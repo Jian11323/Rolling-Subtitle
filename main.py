@@ -178,7 +178,7 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("程序被用户中断")
-    except BaseException as e:
+    except Exception as e:
         # 任何未捕获异常都写入 exe 同目录启动日志，便于无控制台时排查
         try:
             _write_startup_log("---")
@@ -198,7 +198,7 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except BaseException:
+    except Exception:
         # 捕获 main() 之外异常（如导入阶段崩溃），同样落盘
         try:
             _write_startup_log("---")
