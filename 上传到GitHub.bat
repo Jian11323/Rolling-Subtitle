@@ -1,7 +1,5 @@
 @echo off
-chcp 65001 >nul 2>nul
 cd /d "%~dp0"
-
 set REPO=https://github.com/crazy786781/Rolling-Subtitle.git
 
 echo [1] Git config...
@@ -13,34 +11,30 @@ if not exist ".git" (
     git init
 )
 
-echo [3] Add files (by .gitignore)...
+echo [3] Clean non-core from repo...
+git rm --cached build.bat build_debug.bat build_debug_run.bat 2>nul
+git rm --cached build_lite.spec build_lite_debug.spec 2>nul
+git rm --cached "GITHUB_上传说明.md" 2>nul
+where bash >nul 2>&1 && if exist "%~dp0cleanup_only.sh" bash "%~dp0cleanup_only.sh" 2>nul
+
+echo [4] Add files...
 git add -A
 git status --short
 echo.
 pause
 
-echo [4] Commit...
-git commit -m "Update: core files"
-if errorlevel 1 (
-    echo No changes or already committed.
-)
+echo [5] Commit...
+git commit -m "Update core files"
+if errorlevel 1 echo No changes to commit.
 
-echo [5] Push...
+echo [6] Push...
 git remote get-url origin >nul 2>&1
 if errorlevel 1 git remote add origin %REPO%
 if not errorlevel 1 git remote set-url origin %REPO%
 git branch -M main
 git push -u origin main
 if errorlevel 1 (
-    echo.
-    echo Retry once...
-    git push -u origin main
-)
-if errorlevel 1 (
-    echo.
-    echo Push failed: cannot reach github.com ^(port 443^). Network/VPN/proxy issue.
-    echo Try: 1^) Turn on VPN then run this again  2^) If you use proxy: git config --global http.proxy http://127.0.0.1:7890
-    echo Repo: https://github.com/crazy786781/Rolling-Subtitle
+    echo Push failed. Try VPN or run again later.
 ) else (
     echo Done: https://github.com/crazy786781/Rolling-Subtitle
 )

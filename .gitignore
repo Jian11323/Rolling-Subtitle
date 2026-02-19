@@ -26,14 +26,8 @@ build*.bat
 fe_fix.txt
 fe-fix.txt
 
-# 本地辅助（不上传，仅保留 上传到GitHub.bat 在仓库）
-git_config_user.bat
-git_init_and_commit.bat
-git_push.bat
-git_commit_license_and_push.bat
-push_core_only_to_new_repo.bat
-仅推送.bat
-清理仓库并推送.bat
+# 本地辅助（仅 上传到GitHub.bat 入仓）
+cleanup_only.sh
 GITHUB_上传说明.md
 
 # 非核心文档与脚本（不上传）
