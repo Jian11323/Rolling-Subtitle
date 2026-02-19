@@ -38,8 +38,8 @@ if errorlevel 1 (
 )
 if errorlevel 1 (
     echo.
-    echo Push failed. "Empty reply from server" = network issue.
-    echo Try: 1^) Switch network or use VPN  2^) Run again later  3^) In folder run: git push -u origin main
+    echo Push failed: cannot reach github.com ^(port 443^). Network/VPN/proxy issue.
+    echo Try: 1^) Turn on VPN then run this again  2^) If you use proxy: git config --global http.proxy http://127.0.0.1:7890
     echo Repo: https://github.com/crazy786781/Rolling-Subtitle
 ) else (
     echo Done: https://github.com/crazy786781/Rolling-Subtitle
