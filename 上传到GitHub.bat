@@ -32,7 +32,15 @@ if not errorlevel 1 git remote set-url origin %REPO%
 git branch -M main
 git push -u origin main
 if errorlevel 1 (
-    echo Push failed. Check GitHub login and repo: %REPO%
+    echo.
+    echo Retry once...
+    git push -u origin main
+)
+if errorlevel 1 (
+    echo.
+    echo Push failed. "Empty reply from server" = network issue.
+    echo Try: 1^) Switch network or use VPN  2^) Run again later  3^) In folder run: git push -u origin main
+    echo Repo: https://github.com/crazy786781/Rolling-Subtitle
 ) else (
     echo Done: https://github.com/crazy786781/Rolling-Subtitle
 )
