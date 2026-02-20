@@ -17,15 +17,14 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
-CHANGELOG_TEXT = """版本 2.2.1
+# 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
+CHANGELOG_TEXT = """版本 2.2.2
 
-1、新增CPU渲染，GPU渲染两种渲染方式
-2、设置页面重设计；
-3、设置窗口宽度与颜色区对齐优化；
-4、关于页数据源列表修正及更新说明弹窗布局优化"""
+1、修复桌面中文路径启动报错问题；
+2、新增 版本号"""
 
 
 @dataclass

@@ -115,7 +115,7 @@ class MainWindow(QMainWindow):
         """设置用户界面"""
         try:
             # 窗口基本属性
-            self.setWindowTitle("地震预警及情报实况栏")
+            self.setWindowTitle(f"地震预警及情报实况栏 V{APP_VERSION}")
             
             # 设置窗口图标（用于窗口标题栏）
             try:

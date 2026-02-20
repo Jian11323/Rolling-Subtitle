@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config, APP_VERSION
 from utils.logger import get_logger
-from utils.resource_path import get_resource_path
+from utils.resource_path import get_resource_path, get_executable_path
 from .color_manager import Color48Picker
 
 logger = get_logger()
@@ -1390,15 +1390,17 @@ class SettingsWindow(QDialog):
         from PyQt5.QtWidgets import QApplication
         from PyQt5.QtCore import QTimer
         try:
+            exe_path = get_executable_path()
             if getattr(sys, 'frozen', False):
                 # 打包后的 exe：先退出，再由批处理延迟启动新进程，避免与当前进程共用解压目录
-                exe_path = sys.executable
                 args = sys.argv[1:]
                 try:
                     import tempfile
                     fd, bat_path = tempfile.mkstemp(suffix=".bat", prefix="restart_")
                     os.close(fd)
-                    with open(bat_path, "w", encoding="utf-8") as f:
+                    # Windows 下 cmd 按系统 ANSI(如 GBK) 解析 .bat，用 gbk 写入以便中文路径正确
+                    bat_encoding = "gbk" if os.name == "nt" else "utf-8"
+                    with open(bat_path, "w", encoding=bat_encoding) as f:
                         f.write("@echo off\n")
                         f.write("ping 127.0.0.1 -n 3 > nul\n")  # 约 2 秒延迟
                         arg_str = " ".join(f'"{a}"' for a in args)
@@ -1421,10 +1423,8 @@ class SettingsWindow(QDialog):
                     return
                 QApplication.instance().quit()
                 return
-            # Python 脚本：直接启动新进程并退出
-            python_exe = sys.executable
-            script_path = sys.argv[0]
-            subprocess.Popen([python_exe, script_path] + sys.argv[1:])
+            # Python 脚本：直接启动新进程并退出（解释器用 sys.executable，脚本用 exe_path 即 argv[0]）
+            subprocess.Popen([sys.executable, exe_path] + sys.argv[1:])
             QApplication.instance().quit()
         except Exception as e:
             logger.error(f"重启应用程序失败: {e}")
@@ -1728,7 +1728,8 @@ class SettingsWindow(QDialog):
             msg.exec_()
             if msg.clickedButton() == restart_btn:
                 logger.debug("用户选择重启，正在重启软件...")
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                _exe = get_executable_path()
+                os.execv(_exe, [_exe] + sys.argv)
             logger.debug("渲染方式已保存")
         except Exception as e:
             logger.error(f"保存渲染方式失败: {e}")
@@ -1798,7 +1799,8 @@ class SettingsWindow(QDialog):
                 msg.exec_()
                 if msg.clickedButton() == restart_btn:
                     logger.debug("用户选择重启，正在重启软件...")
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    _exe = get_executable_path()
+                    os.execv(_exe, [_exe] + sys.argv)
             else:
                 QMessageBox.information(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("外观与显示设置已保存")

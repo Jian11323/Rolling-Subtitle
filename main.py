@@ -15,13 +15,18 @@ from datetime import datetime
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 启动/崩溃日志：exe 同目录，仅用 stdlib，不依赖 config/logger，便于闪退时排查
+# 启动/崩溃日志：exe 同目录，使用统一 exe 路径以支持中文路径
 def _startup_log_path():
     try:
-        base = os.path.dirname(os.path.abspath(sys.argv[0] or __file__))
+        from utils.resource_path import get_executable_dir
+        base = get_executable_dir()
         return os.path.join(base, "启动日志.txt")
     except Exception:
-        return "启动日志.txt"
+        try:
+            base = os.path.dirname(os.path.abspath(sys.argv[0] or __file__))
+            return os.path.join(base, "启动日志.txt")
+        except Exception:
+            return "启动日志.txt"
 
 def _write_startup_log(line):
     try:
