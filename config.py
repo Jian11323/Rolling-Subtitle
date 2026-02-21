@@ -17,17 +17,15 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.3.1
+CHANGELOG_TEXT = """版本 2.3.2
 
-1、修复滚动文本多行溢出问题；
-2、修复慢速滚动时卡顿问题，提高滚动流畅性；
-3、解决一些问题。
-4、移除不再使用的翻译配置；
-5、新增自定义数据源配置；"""
+1、修复慢速滚动时坐标取整导致的卡顿（使用浮点坐标与 QRectF 绘制）；
+2、弃用 PIL 文本预渲染，改用 Qt 原生 drawText，消除亚像素平移时的模糊与闪烁；
+3、定时器改为 PreciseTimer 并使用 QElapsedTimer 计算帧间隔，提高 Windows 下帧率稳定性。"""
 
 @dataclass
 class GUIConfig:
@@ -77,6 +75,9 @@ class MessageConfig:
     no_activity_message: str = '系统运行中，等待最新地震信息...'
     custom_text: str = '系统运行中，等待最新地震信息...'
     use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
+    # Fan Studio All 数据源：勾选则解析对应类型，不勾选则不解析（不写单项 URL）
+    fanstudio_parse_warning: bool = True  # 勾选则解析所有预警数据源
+    fanstudio_parse_report: bool = True   # 勾选则解析所有速报数据源（含气象预警）
     warning_color: str = '#FF0000'  # 红色
     report_color: str = '#00FFFF'  # 青色
     custom_text_color: str = '#01FF00'  # 自定义文本颜色（绿色，与默认颜色一致）
@@ -263,6 +264,8 @@ class Config:
                 'no_activity_message': self.message_config.no_activity_message,
                 'custom_text': self.message_config.custom_text,
                 'use_custom_text': self.message_config.use_custom_text,
+                'fanstudio_parse_warning': self.message_config.fanstudio_parse_warning,
+                'fanstudio_parse_report': self.message_config.fanstudio_parse_report,
                 'warning_color': self.message_config.warning_color,
                 'report_color': self.message_config.report_color,
                 'custom_text_color': self.message_config.custom_text_color,
@@ -286,10 +289,29 @@ class Config:
                 'split_by_date': self.log_config.split_by_date,
                 'max_log_size': self.log_config.max_log_size,
             },
-            'ENABLED_SOURCES': dict(self.enabled_sources),
+            'ENABLED_SOURCES': self._get_persisted_enabled_sources(),
             'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
         }
     
+    def _is_fanstudio_individual_url(self, url: str) -> bool:
+        """是否为 Fan Studio 单项数据源 URL（非 all）。仅 all 用于连接，单项不再持久化。"""
+        if not url or not isinstance(url, str):
+            return False
+        if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
+            return False
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        return url != all_url
+
+    def _get_persisted_enabled_sources(self) -> Dict[str, bool]:
+        """供保存到配置文件的 enabled_sources：仅包含 all 数据源与非 Fan Studio 数据源，不包含 Fan Studio 单项。"""
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        return {
+            k: v for k, v in self.enabled_sources.items()
+            if k == all_url or not self._is_fanstudio_individual_url(k)
+        }
+
     def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
         """仅对 existing 做缺项补全：只补 full 中有而 existing 中没有的键，不删除 existing 中任何键。"""
         import copy
@@ -414,35 +436,22 @@ class Config:
                 if not self.log_config.validate():
                     success = False
             
-            # 加载数据源配置
-            self.enabled_sources = config_data.get('ENABLED_SOURCES', {})
-            self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
-            
-            # 确定基础域名和all数据源URL（固定使用fanstudio.tech）
+            # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
+            raw_sources = config_data.get('ENABLED_SOURCES', {})
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
-            
-            # 所有数据源列表（默认全部启用）
-            all_warning_sources = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-            all_report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko', 
-                                 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']
-            weather_source = 'weatheralarm'  # 气象预警
+            # 移除旧配置中可能存在的 Fan Studio 单项 URL，只保留 all 与非 fanstudio
+            self.enabled_sources = {
+                k: v for k, v in raw_sources.items()
+                if k == all_url or not self._is_fanstudio_individual_url(k)
+            }
+            self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
 
-            # 如果配置文件中没有数据源配置，使用默认配置（启用所有数据源）
+            # 如果配置文件中没有数据源配置，使用默认配置（仅 all + 非 Fan Studio）
             if not self.enabled_sources:
-                self.enabled_sources = {all_url: True}  # all数据源始终启用
-                # 添加气象预警数据源
-                self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
-                # 添加所有预警数据源
-                for source in all_warning_sources:
-                    self.enabled_sources[f"wss://ws.{base_domain}/{source}"] = True
-                # 添加所有速报数据源
-                for source in all_report_sources:
-                    self.enabled_sources[f"wss://ws.{base_domain}/{source}"] = True
-                # 添加HTTP数据源
-                self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True  # 日本气象厅地震情报
-                self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True  # 日本气象厅海啸预报
-                # Wolfx HTTP / WSS、NIED WSS（默认关闭）
+                self.enabled_sources = {all_url: True}
+                self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
+                self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
                 for u in ["https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json", "https://api.wolfx.jp/fj_eew.json",
                           "https://api.wolfx.jp/cenc_eew.json", "https://api.wolfx.jp/cwa_eew.json",
                           "https://api.wolfx.jp/cenc_eqlist.json", "https://api.wolfx.jp/jma_eqlist.json"]:
@@ -453,56 +462,18 @@ class Config:
                           "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist"]:
                     self.enabled_sources[u] = False
                 self.enabled_sources["wss://sismotide.top/nied"] = False
-
-                logger.info("配置文件中没有数据源配置，使用默认配置（启用所有数据源）")
+                logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
             else:
-                # 配置文件中已有数据源配置，尊重用户的设置
-                # 确保all数据源始终启用（这是必需的，因为实际连接的是all数据源）
                 if all_url not in self.enabled_sources:
                     self.enabled_sources[all_url] = True
-                    logger.debug(f"添加缺失的all数据源: {all_url}")
                 else:
-                    # all数据源必须启用，如果用户禁用了，强制启用
                     if not self.enabled_sources.get(all_url, False):
-                        logger.warning(f"all数据源被禁用，但这是必需的，已自动启用: {all_url}")
                         self.enabled_sources[all_url] = True
-                
-                # 对于其他数据源，如果配置文件中没有，则添加并默认启用（向后兼容）
-                # 但如果配置文件中已经存在（无论是true还是false），则尊重用户的设置
-                weather_url = f"wss://ws.{base_domain}/{weather_source}"
-                if weather_url not in self.enabled_sources:
-                    self.enabled_sources[weather_url] = True
-                    logger.debug(f"添加缺失的气象预警数据源: {weather_source}")
-                # 如果已存在，尊重用户的设置，不强制启用
-                
-                # 确保所有预警数据源在配置中存在（如果不存在则默认启用，如果存在则尊重用户设置）
-                for source in all_warning_sources:
-                    url = f"wss://ws.{base_domain}/{source}"
-                    if url not in self.enabled_sources:
-                        self.enabled_sources[url] = True
-                        logger.debug(f"添加缺失的预警数据源: {source}")
-                # 如果已存在，尊重用户的设置，不强制启用
-                
-                # 确保所有速报数据源在配置中存在（如果不存在则默认启用，如果存在则尊重用户设置）
-                for source in all_report_sources:
-                    url = f"wss://ws.{base_domain}/{source}"
-                    if url not in self.enabled_sources:
-                        self.enabled_sources[url] = True
-                        logger.debug(f"添加缺失的速报数据源: {source}")
-                # 如果已存在，尊重用户的设置，不强制启用
-                
-                # 确保HTTP数据源在配置中存在（如果不存在则默认启用，如果存在则尊重用户设置）
-                http_sources = {
-                    "https://api.p2pquake.net/v2/history?codes=551&limit=3": "日本气象厅地震情报 (p2pquake)",
-                }
-                for http_url, source_name in http_sources.items():
-                    if http_url not in self.enabled_sources:
-                        self.enabled_sources[http_url] = True
-                        logger.debug(f"添加缺失的HTTP数据源: {source_name}")
+                # 仅补全非 Fan Studio 数据源缺失项
+                if "https://api.p2pquake.net/v2/history?codes=551&limit=3" not in self.enabled_sources:
+                    self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
                 if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
                     self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
-                    logger.debug("添加缺失的 P2PQuake 海啸预报数据源")
-                # Wolfx HTTP 数据源（默认关闭）
                 wolfx_http_sources = [
                     "https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json",
                     "https://api.wolfx.jp/fj_eew.json", "https://api.wolfx.jp/cenc_eew.json",
@@ -512,8 +483,6 @@ class Config:
                 for http_url in wolfx_http_sources:
                     if http_url not in self.enabled_sources:
                         self.enabled_sources[http_url] = False
-                        logger.debug(f"添加缺失的 Wolfx HTTP 数据源: {http_url}")
-                # Wolfx / NIED WebSocket 数据源（默认关闭）
                 wolfx_wss = ["wss://ws-api.wolfx.jp/all_eew",
                              "wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
                              "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
@@ -522,8 +491,6 @@ class Config:
                 for wss_url in wolfx_wss:
                     if wss_url not in self.enabled_sources:
                         self.enabled_sources[wss_url] = False
-                        logger.debug(f"添加缺失的 WSS 数据源: {wss_url}")
-                # 如果已存在，尊重用户的设置，不强制启用
 
             # 根据服务器选择更新URL
             self._update_urls_for_server_selection()
@@ -553,9 +520,10 @@ class Config:
             
             logger.info(f"配置加载成功，启用 {len(self.ws_urls)} 个WebSocket数据源")
             self._notify_config_changed()
-            # 缺项补全：仅添加缺失的键并写回，不覆盖用户已有设置
+            # 缺项补全：仅添加缺失的键并写回，不覆盖用户已有设置；ENABLED_SOURCES 使用过滤后的值（不含 Fan Studio 单项）
             full = self._get_full_config_dict()
             merged = self._merge_config_file(config_data, full)
+            merged['ENABLED_SOURCES'] = full['ENABLED_SOURCES']
             if version_changed:
                 merged['config_version'] = APP_VERSION
             if version_changed or self._has_missing_keys(config_data, full):

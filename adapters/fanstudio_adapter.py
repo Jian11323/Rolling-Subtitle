@@ -56,7 +56,25 @@ class FanStudioAdapter(BaseAdapter):
                 return parts[-1] if parts[-1] else parts[-2]
         # 如果source_name直接是类型名
         return self.source_name.lower()
-    
+
+    # Fan Studio All 时按配置「勾选预警/勾选速报」决定解析范围（不依赖单项 URL）
+    FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
+    FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko',
+                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'weatheralarm']
+
+    def _get_fanstudio_enabled_source_names(self, enabled_sources: Dict[str, bool], config: Any, all_url: str) -> set:
+        """当使用 All 数据源时，根据配置 fanstudio_parse_warning / fanstudio_parse_report 得到要解析的数据源名称集合。"""
+        out = set()
+        if not enabled_sources.get(all_url, False):
+            return out
+        parse_warning = getattr(config.message_config, 'fanstudio_parse_warning', True)
+        parse_report = getattr(config.message_config, 'fanstudio_parse_report', True)
+        if parse_warning:
+            out.update(self.FANSTUDIO_WARNING_SOURCES)
+        if parse_report:
+            out.update(self.FANSTUDIO_REPORT_SOURCES)
+        return out
+
     def parse_all_sources(self, raw_data: Any) -> List[Dict[str, Any]]:
         """
         解析initial_all类型的所有数据源，返回所有有效数据的列表
@@ -85,32 +103,19 @@ class FanStudioAdapter(BaseAdapter):
                 config = Config()
                 enabled_sources = config.enabled_sources
             
-            # 获取启用的数据源名称集合（用于快速查找）
-            enabled_source_names = set()
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
+            # 始终使用 All 时：由配置「勾选预警/勾选速报」决定解析范围
+            enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
+            # 兼容旧配置：若仍有单项 Fan Studio URL 则合并
             for url, enabled in enabled_sources.items():
                 if enabled and url != all_url:
-                    # 提取数据源名称（统一使用fanstudio.tech）
                     if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
                         parts = url.split('/')
                         source_name = parts[-1] if parts[-1] else parts[-2]
                         enabled_source_names.add(source_name)
-                        logger.debug(f"[FanStudio适配器] 从URL提取数据源名称: {url} -> {source_name}")
                     elif 'p2pquake.net' in url:
                         enabled_source_names.add('p2pquake')
-                        logger.debug(f"[FanStudio适配器] 从URL提取数据源名称: {url} -> p2pquake")
-            
-            # 特殊处理：当仅连接 /all 且 enabled_source_names 为空时，
-            # 将 initial_all 中存在的所有子数据源视为启用（确保 cea-pr 等能被解析）
-            if not enabled_source_names and enabled_sources.get(all_url, False):
-                for source_type in data.keys():
-                    if source_type != 'type' and isinstance(data.get(source_type), dict):
-                        obj = data[source_type]
-                        if isinstance(obj, dict) and obj.get('Data'):
-                            enabled_source_names.add(source_type)
-                logger.info(f"[FanStudio适配器] 连接 /all 且无子源配置，启用 initial_all 中所有数据源: {sorted(enabled_source_names)}")
-            
             logger.info(f"[FanStudio适配器] 启用的数据源名称集合: {sorted(enabled_source_names)}")
             
             results = []
@@ -198,20 +203,17 @@ class FanStudioAdapter(BaseAdapter):
                         'weatheralarm'
                     ]
                     
-                    # 获取启用的数据源列表
                     enabled_sources = getattr(self, '_enabled_sources', {})
                     config = getattr(self, '_config', None)
                     if config is None:
                         from config import Config
                         config = Config()
                         enabled_sources = config.enabled_sources
-                    
-                    # 获取启用的数据源名称集合（用于快速查找）
-                    enabled_source_names = set()
                     base_domain = "fanstudio.tech"
+                    all_url = f"wss://ws.{base_domain}/all"
+                    enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
                     for url, enabled in enabled_sources.items():
-                        if enabled and url != f"wss://ws.{base_domain}/all":
-                            # 提取数据源名称（统一使用fanstudio.tech）
+                        if enabled and url != all_url:
                             if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
                                 parts = url.split('/')
                                 source_name = parts[-1] if parts[-1] else parts[-2]
@@ -247,21 +249,18 @@ class FanStudioAdapter(BaseAdapter):
             # 处理update类型
             if data.get('type') == 'update':
                 source = data.get('source', '')
-                # 如果适配器类型是 'all'，需要检查该数据源是否启用
                 if self.data_source_type == 'all':
-                    # 获取启用的数据源列表
-                    enabled_sources = getattr(self, '_enabled_sources', {})
                     config = getattr(self, '_config', None)
                     if config is None:
                         from config import Config
                         config = Config()
-                        enabled_sources = config.enabled_sources
-                    
-                    # 检查该数据源是否启用
-                    base_domain = "fanstudio.tech"
-                    source_url = f"wss://ws.{base_domain}/{source}"
-                    if not enabled_sources.get(source_url, False):
-                        logger.debug(f"[FanStudio] update类型数据源 {source} 未启用，跳过")
+                    parse_warning = getattr(config.message_config, 'fanstudio_parse_warning', True)
+                    parse_report = getattr(config.message_config, 'fanstudio_parse_report', True)
+                    if source in self.FANSTUDIO_WARNING_SOURCES and not parse_warning:
+                        logger.debug(f"[FanStudio] update 数据源 {source} 未勾选解析预警，跳过")
+                        return None
+                    if source in self.FANSTUDIO_REPORT_SOURCES and not parse_report:
+                        logger.debug(f"[FanStudio] update 数据源 {source} 未勾选解析速报，跳过")
                         return None
                 
                 # 如果适配器类型是 'all'，处理所有数据源的更新

@@ -612,15 +612,24 @@ class SettingsWindow(QDialog):
         warning_label.setStyleSheet("color: #000000; padding-top: 10px; padding-bottom: 5px;")
         scroll_layout.addWidget(warning_label)
         
-        # Fan Studio预警
-        fs_warning_label = QLabel("Fan Studio预警")
+        # Fan Studio（All 数据源）：勾选预警/速报则解析，不勾选则不解析
         fs_warning_font = QFont()
         fs_warning_font.setBold(True)
         fs_warning_font.setPointSize(15)
-        fs_warning_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(fs_warning_label)
-        # Fan Studio预警：只解析预警数据
-        self._add_source_checkbox(scrollable_widget, "fanstudio_warning", "Fan Studio预警（解析所有预警数据）", default_value=True)
+        fs_all_label = QLabel("Fan Studio（All 数据源）")
+        fs_all_label.setFont(fs_warning_font)
+        scroll_layout.addWidget(fs_all_label)
+        fs_hint = QLabel("始终使用 All 数据源。勾选则解析对应类型，不勾选则不解析。")
+        fs_hint.setStyleSheet("color: #666; font-size: 13px; padding-left: 8px; padding-bottom: 4px;")
+        scroll_layout.addWidget(fs_hint)
+        self.fanstudio_parse_warning_cb = QCheckBox("解析预警数据")
+        self.fanstudio_parse_warning_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_warning', True))
+        self.fanstudio_parse_warning_cb.setStyleSheet("font-size: 14px; padding: 4px;")
+        scroll_layout.addWidget(self.fanstudio_parse_warning_cb)
+        self.fanstudio_parse_report_cb = QCheckBox("解析速报数据（含气象预警）")
+        self.fanstudio_parse_report_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_report', True))
+        self.fanstudio_parse_report_cb.setStyleSheet("font-size: 14px; padding: 4px;")
+        scroll_layout.addWidget(self.fanstudio_parse_report_cb)
 
         # Wolfx 预警（地震预警区：HTTP + WSS 全预警 与 WSS 单项互斥）
         wolfx_warning_label = QLabel("Wolfx 预警")
@@ -670,13 +679,6 @@ class SettingsWindow(QDialog):
         history_label.setFont(font)
         history_label.setStyleSheet("color: #000000; padding-top: 15px; padding-bottom: 5px;")
         scroll_layout.addWidget(history_label)
-        
-        # Fan Studio速报
-        fs_report_label = QLabel("Fan Studio速报")
-        fs_report_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(fs_report_label)
-        # Fan Studio速报：只解析速报数据
-        self._add_source_checkbox(scrollable_widget, "fanstudio_report", "Fan Studio速报（解析所有速报数据）", default_value=True)
         
         # 日本气象厅地震情报
         p2p_label = QLabel("日本气象厅地震情报")
@@ -867,17 +869,16 @@ class SettingsWindow(QDialog):
     
     def _restore_default_selection(self):
         """恢复默认选中状态"""
-        # 默认选中的数据源：Fan Studio预警、Fan Studio速报、日本气象厅地震情报
         # 先全部取消选中
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:
                 checkbox.setChecked(False)
-        
-        # 选中默认数据源（Fan Studio 预警/速报、日本气象厅地震情报、日本气象厅海啸预报；Wolfx/NIED 保持不选）
-        if "fanstudio_warning" in self.source_vars:
-            self.source_vars["fanstudio_warning"].setChecked(True)
-        if "fanstudio_report" in self.source_vars:
-            self.source_vars["fanstudio_report"].setChecked(True)
+        # Fan Studio：默认勾选解析预警与速报
+        if hasattr(self, 'fanstudio_parse_warning_cb'):
+            self.fanstudio_parse_warning_cb.setChecked(True)
+        if hasattr(self, 'fanstudio_parse_report_cb'):
+            self.fanstudio_parse_report_cb.setChecked(True)
+        # 选中默认数据源（日本气象厅地震情报、日本气象厅海啸预报；Wolfx/NIED 保持不选）
         if "https://api.p2pquake.net/v2/history?codes=551&limit=3" in self.source_vars:
             self.source_vars["https://api.p2pquake.net/v2/history?codes=551&limit=3"].setChecked(True)
         if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" in self.source_vars:
@@ -1302,7 +1303,7 @@ class SettingsWindow(QDialog):
             msg = QMessageBox(self)
             msg.setWindowTitle("提示")
             msg.setIcon(QMessageBox.Information)
-            msg.setText("数据源已恢复为默认选中（Fan Studio 预警/速报、日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并重启软件。")
+            msg.setText("数据源已恢复为默认选中（日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并重启软件。")
             save_btn = msg.addButton("保存", QMessageBox.AcceptRole)
             msg.addButton("取消", QMessageBox.RejectRole)
             msg.exec_()
@@ -1363,45 +1364,18 @@ class SettingsWindow(QDialog):
             
             all_url = self.all_source_url
             
-            # 始终启用all数据源（隐藏但必须启用）
+            # 始终启用 all 数据源（已移除 Fan Studio 单项，仅 all）
             self.config.enabled_sources[all_url] = True
             
-            # 检查Fan Studio预警和速报的启用状态
-            fanstudio_warning_enabled = self.source_vars.get("fanstudio_warning", None)
-            fanstudio_report_enabled = self.source_vars.get("fanstudio_report", None)
+            # Fan Studio All：勾选预警/速报则解析，不勾选则不解析
+            if hasattr(self, 'fanstudio_parse_warning_cb'):
+                self.config.message_config.fanstudio_parse_warning = self.fanstudio_parse_warning_cb.isChecked()
+            if hasattr(self, 'fanstudio_parse_report_cb'):
+                self.config.message_config.fanstudio_parse_report = self.fanstudio_parse_report_cb.isChecked()
             
-            # 根据选择启用相应的Fan Studio数据源
-            # 预警数据源列表
-            warning_sources = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-            # 速报数据源列表
-            report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko', 
-                             'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']
-            # 气象预警
-            weather_source = 'weatheralarm'
-            
-            # 如果启用了Fan Studio预警，启用所有预警数据源
-            # 否则，禁用所有预警数据源（设置为False）
-            warning_checked = fanstudio_warning_enabled and fanstudio_warning_enabled.isChecked()
-            for source in warning_sources:
-                url = f"wss://ws.{self.base_domain}/{source}"
-                self.config.enabled_sources[url] = warning_checked
-                logger.debug(f"设置预警数据源 {source} 的状态为: {warning_checked}")
-            
-            # 如果启用了Fan Studio速报，启用所有速报数据源
-            # 否则，禁用所有速报数据源（设置为False）
-            report_checked = fanstudio_report_enabled and fanstudio_report_enabled.isChecked()
-            for source in report_sources:
-                url = f"wss://ws.{self.base_domain}/{source}"
-                self.config.enabled_sources[url] = report_checked
-                logger.debug(f"设置速报数据源 {source} 的状态为: {report_checked}")
-            
-            # 始终启用气象预警（默认开启，不可关闭）
-            weather_url = f"wss://ws.{self.base_domain}/{weather_source}"
-            self.config.enabled_sources[weather_url] = True
-            
-            # 更新其他数据源配置（P2PQuake等）
+            # 更新其他数据源配置（P2PQuake、Wolfx、NIED 等）
             for url, checkbox in self.source_vars.items():
-                if url and url != all_url and url not in ["fanstudio_warning", "fanstudio_report"]:
+                if url and url != all_url:
                     self.config.enabled_sources[url] = checkbox.isChecked()
             
             # 更新WebSocket URL列表（只包含all数据源和其他非fanstudio数据源）

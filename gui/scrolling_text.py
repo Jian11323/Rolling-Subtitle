@@ -6,8 +6,9 @@
 """
 
 from PyQt5.QtWidgets import QOpenGLWidget, QWidget
-from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal
+from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer
 from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, QSurfaceFormat, QOpenGLContext
+from collections import OrderedDict
 from typing import Optional, Dict, Tuple, Any
 from pathlib import Path
 import threading
@@ -40,29 +41,33 @@ class _ScrollingTextMixin:
         logger.info(f"使用字体: {self.font.family()}, 大小: {config.gui_config.font_size}pt, 加粗: 是")
         self._image_cache: Dict[str, QPixmap] = {}
         self._image_cache_lock = threading.Lock()
-        self._text_texture_cache: Dict[Tuple[str, str, int], QPixmap] = {}
+        self._text_texture_cache: OrderedDict[Tuple[str, str, int], QPixmap] = OrderedDict()
         self._text_texture_cache_lock = threading.Lock()
+        self._pil_font_cache: Dict[int, Any] = {}
+        self._pil_font_cache_lock = threading.Lock()
         self._current_load_task_id = 0
         self._cached_text_width = 0
         self._cached_image_width = 0
         self._last_scroll_time = time.time()
+        self._elapsed = QElapsedTimer()
+        self._elapsed.start()
         self._is_loading = False
         self._loading_lock = threading.Lock()
         self._is_scrolling = False
         self._scrolling_lock = threading.Lock()
         self.timer = QTimer()
-        self.timer.setTimerType(Qt.CoarseTimer)
+        self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._scroll)
         target_fps = config.gui_config.target_fps
         timer_interval = max(1, int(1000 / target_fps))
         self.timer.start(timer_interval)
-        logger.info(f"定时器间隔设置为: {timer_interval}ms (目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
+        logger.info(f"定时器间隔设置为: {timer_interval}ms (PreciseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
         self._timer_interval = timer_interval
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
         QTimer.singleShot(1000, self._preload_weather_images)
 
     def _paint_content(self, painter: QPainter):
-        """统一的绘制逻辑（供 paintGL / paintEvent 调用）"""
+        """统一的绘制逻辑（供 paintGL / paintEvent 调用）。使用浮点坐标与原生 drawText，避免取整卡顿与位图插值模糊/闪烁。"""
         try:
             painter.setRenderHint(QPainter.Antialiasing)
             bg_color = QColor(self.config.gui_config.bg_color)
@@ -72,21 +77,19 @@ class _ScrollingTextMixin:
             center_y = self.height() / 2.0
             image_x = self.x_position
             if self.current_image:
-                image_y = center_y - self.current_image.height() / 2.0
-                painter.drawPixmap(int(image_x), int(image_y), self.current_image)
+                pm = self.current_image
+                w, h = pm.width(), pm.height()
+                image_y = center_y - h / 2.0
+                painter.drawPixmap(QRectF(image_x, image_y, w, h), pm, QRectF(0, 0, w, h))
                 image_x += self._cached_image_width
             text_x = image_x
-            if self.current_text_image:
-                text_image_y = center_y - self.current_text_image.height() / 2.0
-                if text_x < self.width() and text_x + self._cached_text_width > 0:
-                    painter.drawPixmap(int(text_x), int(text_image_y), self.current_text_image)
-            else:
-                painter.setFont(self.font)
-                painter.setPen(self.current_color)
-                painter.setRenderHint(QPainter.TextAntialiasing)
-                if text_x < self.width() and text_x + self._cached_text_width > 0:
-                    text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
-                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
+            # 始终使用 Qt 原生 drawText（浮点坐标），不再使用 PIL 预渲染位图，避免亚像素平移时的插值模糊与闪烁
+            painter.setFont(self.font)
+            painter.setPen(self.current_color)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            if text_x < self.width() and text_x + self._cached_text_width > 0:
+                text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
+                painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
         except Exception as e:
             logger.error(f"绘制失败: {e}")
             import traceback
@@ -101,41 +104,50 @@ class _ScrollingTextMixin:
         cache_key = (text, color.name(), self.config.gui_config.font_size)
         with self._text_texture_cache_lock:
             if cache_key in self._text_texture_cache:
+                self._text_texture_cache.move_to_end(cache_key)
                 return self._text_texture_cache[cache_key]
         try:
             from PIL import Image, ImageDraw, ImageFont
-            temp_img = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
-            temp_draw = ImageDraw.Draw(temp_img)
-            pil_font = None
-            try:
-                import platform
-                if platform.system() == "Windows":
-                    simsun_fonts = [
-                        ("C:/Windows/Fonts/simsun.ttc", 0),
-                        ("C:/Windows/Fonts/simsun.ttc", 1),
-                        ("C:/Windows/Fonts/simsun.ttf", 0),
-                    ]
-                    for font_path, font_index in simsun_fonts:
-                        if Path(font_path).exists():
-                            try:
-                                pil_font = ImageFont.truetype(font_path, self.config.gui_config.font_size, index=font_index)
-                                break
-                            except (OSError, IndexError):
-                                try:
-                                    pil_font = ImageFont.truetype(font_path, self.config.gui_config.font_size)
-                                    break
-                                except Exception:
-                                    continue
-                            except Exception:
-                                continue
-                if pil_font is None:
-                    pil_font = ImageFont.load_default()
-                    logger.warning("PIL无法加载宋体，使用默认字体")
-            except Exception as e:
-                logger.warning(f"加载PIL字体时出错: {e}，使用默认字体")
-                pil_font = ImageFont.load_default()
-            bbox = temp_draw.textbbox((0, 0), text, font=pil_font)
             font_size = self.config.gui_config.font_size
+            pil_font = None
+            with self._pil_font_cache_lock:
+                if font_size in self._pil_font_cache:
+                    pil_font = self._pil_font_cache[font_size]
+                else:
+                    try:
+                        import platform
+                        if platform.system() == "Windows":
+                            simsun_fonts = [
+                                ("C:/Windows/Fonts/simsun.ttc", 0),
+                                ("C:/Windows/Fonts/simsun.ttc", 1),
+                                ("C:/Windows/Fonts/simsun.ttf", 0),
+                            ]
+                            for font_path, font_index in simsun_fonts:
+                                if Path(font_path).exists():
+                                    try:
+                                        pil_font = ImageFont.truetype(font_path, font_size, index=font_index)
+                                        break
+                                    except (OSError, IndexError):
+                                        try:
+                                            pil_font = ImageFont.truetype(font_path, font_size)
+                                            break
+                                        except Exception:
+                                            continue
+                                    except Exception:
+                                        continue
+                        if pil_font is None:
+                            pil_font = ImageFont.load_default()
+                            logger.warning("PIL无法加载宋体，使用默认字体")
+                    except Exception as e:
+                        logger.warning(f"加载PIL字体时出错: {e}，使用默认字体")
+                        pil_font = ImageFont.load_default()
+                    self._pil_font_cache[font_size] = pil_font
+            if hasattr(pil_font, 'getbbox'):
+                bbox = pil_font.getbbox(text)
+            else:
+                temp_img = Image.new('RGBA', (1, 1), (0, 0, 0, 0))
+                temp_draw = ImageDraw.Draw(temp_img)
+                bbox = temp_draw.textbbox((0, 0), text, font=pil_font)
             pad_h = max(20, int(font_size * 0.6))
             pad_v = max(20, int(font_size * 0.5))
             text_width = bbox[2] - bbox[0] + pad_h
@@ -150,8 +162,7 @@ class _ScrollingTextMixin:
             with self._text_texture_cache_lock:
                 self._text_texture_cache[cache_key] = pixmap
                 if len(self._text_texture_cache) > 50:
-                    oldest_key = next(iter(self._text_texture_cache))
-                    del self._text_texture_cache[oldest_key]
+                    self._text_texture_cache.popitem(last=False)
             self._cached_text_width = text_width
             return pixmap
         except ImportError:
@@ -289,9 +300,8 @@ class _ScrollingTextMixin:
                 self._is_scrolling = False
             self._ensure_timer_stopped()
             return
-        current_time = time.time()
-        delta_time = current_time - self._last_scroll_time
-        self._last_scroll_time = current_time
+        delta_time = self._elapsed.elapsed() / 1000.0
+        self._elapsed.restart()
         if delta_time > 0.1:
             delta_time = 0.1
         pixels_per_second = self.config.gui_config.text_speed * 60.0
@@ -300,11 +310,8 @@ class _ScrollingTextMixin:
         total_width = 0
         if self.current_image:
             total_width += self._cached_image_width
-        if self.current_text_image:
+        if self.current_text:
             total_width += self._cached_text_width
-        elif self.current_text:
-            metrics = QFontMetrics(self.font)
-            total_width += metrics.horizontalAdvance(self.current_text)
         if total_width > 0 and self.x_position + total_width < 0:
             with self._scrolling_lock:
                 self._is_scrolling = False
@@ -406,6 +413,8 @@ class _ScrollingTextMixin:
                 logger.info(f"字体大小已更新: {self.font.pointSize()}pt -> {new_font_size}pt")
                 with self._text_texture_cache_lock:
                     self._text_texture_cache.clear()
+                with self._pil_font_cache_lock:
+                    self._pil_font_cache.clear()
             # 仅 OpenGL 控件有 format/setFormat，ScrollingTextCPU 跳过
             if hasattr(self, 'setFormat') and callable(getattr(self, 'format', None)):
                 try:
@@ -439,18 +448,13 @@ class _ScrollingTextMixin:
                 if color_updated:
                     self.current_color = new_color_obj
                 self.current_text_image = None
-                self._cached_text_width = 0
                 with self._text_texture_cache_lock:
                     self._text_texture_cache.clear()
+                with self._pil_font_cache_lock:
+                    self._pil_font_cache.clear()
                 if self.current_text:
-                    try:
-                        self.current_text_image = self._render_text_to_image(self.current_text, self.current_color)
-                        if self.current_text_image:
-                            self._cached_text_width = self.current_text_image.width()
-                        self.update()
-                    except Exception as e:
-                        logger.error(f"重新渲染文本时出错: {e}")
-                        self.update()
+                    self._cached_text_width = QFontMetrics(self.font).horizontalAdvance(self.current_text)
+                    self.update()
             logger.debug("滚动文本组件配置热修改应用完成")
         except Exception as e:
             logger.error(f"应用滚动文本组件配置热修改失败: {e}")
@@ -621,27 +625,10 @@ class _ScrollingTextMixin:
         self._current_load_task_id += 1
         current_task_id = self._current_load_task_id
         
-        # 尝试预渲染文本为图片
-        # 注意：如果字体不支持某些字符（如繁体字），预渲染可能会失败或显示不正确
-        # 此时应该回退到直接绘制
-        text_image = self._render_text_to_image(text, self.current_color)
-        if text_image:
-            # 检查预渲染的图片是否有效（宽度应该大于0）
-            if text_image.width() > 0:
-                self.current_text_image = text_image
-                self._cached_text_width = text_image.width()
-                logger.debug(f"使用预渲染文本图片，宽度: {self._cached_text_width}")
-            else:
-                # 预渲染失败，清除并使用直接绘制
-                self.current_text_image = None
-                metrics = QFontMetrics(self.font)
-                self._cached_text_width = metrics.horizontalAdvance(text)
-                logger.warning(f"预渲染文本图片失败，使用直接绘制，宽度: {self._cached_text_width}")
-        else:
-            # 使用QFontMetrics测量文本宽度
-            metrics = QFontMetrics(self.font)
-            self._cached_text_width = metrics.horizontalAdvance(text)
-            logger.debug(f"使用直接绘制文本，宽度: {self._cached_text_width}")
+        # 统一使用 QFontMetrics 计算文本宽度，不再使用 PIL 预渲染（避免亚像素平移时位图插值导致模糊/闪烁）
+        metrics = QFontMetrics(self.font)
+        self._cached_text_width = metrics.horizontalAdvance(text)
+        logger.debug(f"文本宽度（QFontMetrics）: {self._cached_text_width}")
         
         # 如果没有图片，取消加载状态
         if not image_path:
