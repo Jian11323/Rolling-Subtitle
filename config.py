@@ -17,15 +17,16 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.3.1"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.2.2
+CHANGELOG_TEXT = """版本 2.3.1
 
-1、修复桌面中文路径启动报错问题；
-2、新增 版本号"""
-
+1、修复滚动文本多行溢出问题；
+2、修复慢速滚动时卡顿问题，提高滚动流畅性；
+3、移除不再使用的翻译配置；
+4、新增自定义数据源配置；"""
 
 @dataclass
 class GUIConfig:
@@ -124,18 +125,11 @@ class WebSocketConfig:
 
 @dataclass
 class TranslationConfig:
-    """翻译配置类"""
-    baidu_app_id: str = ""
-    baidu_secret_key: str = ""
-    enabled: bool = False  # 是否启用翻译（默认关闭）
-    use_place_name_fix: bool = True  # 是否使用地名修正（与百度翻译互斥，默认开启）
+    """地名修正配置类（原翻译配置，公开版仅保留地名修正）"""
+    use_place_name_fix: bool = True  # 是否使用地名修正（速报根据经纬度修正地名），默认开启
     
     def validate(self) -> bool:
         """验证配置有效性"""
-        # 如果启用了翻译，检查是否配置了API密钥
-        if self.enabled and not self.use_place_name_fix:
-            if not self.baidu_app_id or not self.baidu_secret_key:
-                logger.warning("翻译已启用但未配置API密钥，翻译功能将不可用")
         return True
 
 
@@ -184,6 +178,7 @@ class Config:
         # 数据源配置
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
+        self.custom_data_source_url: str = ""  # 自定义数据源 URL（http/https/ws/wss），空为关闭
         
         # 配置变更回调
         self._config_callbacks: List[Callable] = []
@@ -282,9 +277,6 @@ class Config:
                 'connection_timeout': self.ws_config.connection_timeout,
             },
             'TRANSLATION_CONFIG': {
-                'baidu_app_id': self.translation_config.baidu_app_id,
-                'baidu_secret_key': self.translation_config.baidu_secret_key,
-                'enabled': self.translation_config.enabled,
                 'use_place_name_fix': self.translation_config.use_place_name_fix,
             },
             'LOG_CONFIG': {
@@ -294,6 +286,7 @@ class Config:
                 'max_log_size': self.log_config.max_log_size,
             },
             'ENABLED_SOURCES': dict(self.enabled_sources),
+            'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
         }
     
     def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
@@ -422,6 +415,7 @@ class Config:
             
             # 加载数据源配置
             self.enabled_sources = config_data.get('ENABLED_SOURCES', {})
+            self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
             
             # 确定基础域名和all数据源URL（固定使用fanstudio.tech）
             base_domain = "fanstudio.tech"
@@ -684,6 +678,7 @@ class Config:
                     logger.debug(f"已添加非fanstudio数据源到ws_urls: {url}")
         
         self.ws_urls = ws_urls
+        self.custom_data_source_url = ""
         logger.info(f"已应用默认配置，默认启用 {len(self.ws_urls)} 个WebSocket数据源（Fan Studio All + 默认数据源）: {self.ws_urls}")
     
     def update_enabled_sources(self, sources: Dict[str, bool]):
@@ -744,6 +739,9 @@ class Config:
     
     def get_source_name(self, url: str) -> str:
         """获取数据源名称"""
+        # 自定义数据源 URL 统一显示为 custom
+        if self.custom_data_source_url and url == self.custom_data_source_url:
+            return "custom"
         # 将URL中的域名统一为fanstudio.tech，以便查找
         # 统一使用fanstudio.tech（如果存在fanstudio.hk则替换）
         normalized_url = url.replace('fanstudio.hk', 'fanstudio.tech')
@@ -799,6 +797,7 @@ class Config:
     def get_organization_name(self, source_name: str) -> str:
         """获取机构名称"""
         organization_name_mapping = {
+            "custom": "自定义数据源",
             "fanstudio": "Fan Studio数据源",
             "weatheralarm": "气象预警",
             "cenc": "中国地震台网中心自动测定/正式测定",

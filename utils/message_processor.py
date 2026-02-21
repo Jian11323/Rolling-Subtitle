@@ -27,15 +27,6 @@ class MessageProcessor:
         self.config = Config()
         # 气象预警图片目录（兼容打包后的路径）
         self.weather_images_dir = get_resource_path("气象预警信号图片")
-        
-        # 初始化翻译服务
-        try:
-            from utils.translation_service import TranslationService
-            self.translator = TranslationService(self.config)
-            logger.info("翻译服务已初始化")
-        except Exception as e:
-            logger.error(f"初始化翻译服务失败: {e}")
-            self.translator = None
     
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -157,11 +148,9 @@ class MessageProcessor:
         日本气象厅最终报格式：【日本气象厅 紧急地震速报 infoTypeName】 最终报，shocktime地点发生X.X级地震，震源深度X公里
         
         注意：
-        - JMA数据的placeName和infoTypeName为日语原文
-        - infoTypeName：保持日语原文（予報、警報），不进行翻译
-        - placeName：地震预警使用百度翻译（如果启用了翻译且地名不包含中文）
         - cancel字段为true时，消息会被忽略（不显示）
         - final字段为true时，显示"最终报"而不是"第x报"
+        - 预警地名保持数据源原文（公开版不进行翻译）
         """
         try:
             organization = data.get('organization', '')
@@ -178,56 +167,8 @@ class MessageProcessor:
             info_type = ''
             magnitude = self._safe_float(data.get('magnitude', 0), 0.0)
             place_name = data.get('place_name', '')
-            
-        # 预警地名翻译（仅对特定数据源进行翻译）
-        try:
-            if place_name:
-                import re
-                has_chinese = bool(re.search(r'[\u4e00-\u9fff]', place_name))
-                
-                # CEA、CEA-PR、SICHUAN、CWA-EEW、Wolfx 部分为中文地名，无需翻译
-                chinese_sources = {'cea', 'cea-pr', 'sichuan', 'cwa-eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cenc_eqlist'}
-                
-                # JMA、Wolfx JMA、NIED 保持原始地名（日文等）
-                if source_type == 'jma':
-                    logger.debug(f"JMA预警地名保持原文: {place_name}")
-                elif source_type == 'nied' or (source_type and str(source_type).startswith('wolfx_jma')):
-                    logger.debug(f"{source_type} 预警地名保持原文: {place_name}")
-                # USGS有专门的地名修正逻辑（保持原文，后续修正）
-                elif source_type == 'usgs':
-                    logger.debug(f"USGS预警地名保持原文以便后续修正: {place_name}")
-                # 特定中文数据源无需翻译
-                elif source_type in chinese_sources:
-                    logger.debug(f"{source_type} 地名默认为中文，无需翻译: {place_name}")
-                else:
-                    # 其他数据源如需翻译可在此扩展
-                    if False and not has_chinese:
-                        if self.translator and self.config.translation_config.enabled:
-                            try:
-                                original_name = place_name
-                                translated = self.translator.translate(
-                                    place_name,
-                                    quick_mode=False
-                                )
-                                if translated and translated != place_name:
-                                    place_name = translated
-                                    logger.info(f"预警地名翻译成功: {original_name} -> {translated}")
-                                else:
-                                    logger.debug(f"预警地名翻译未改变: {original_name} (可能API未配置或翻译失败)")
-                            except Exception as e:
-                                logger.warning(f"翻译预警地名时发生异常，保持原文: {place_name}, 错误: {e}")
-                        else:
-                            if not self.translator:
-                                logger.debug(f"翻译服务未初始化，预警地名保持原文: {place_name}")
-                            elif not self.config.translation_config.enabled:
-                                logger.debug(f"预警翻译未启用，地名保持原文: {place_name}")
-                    else:
-                        logger.debug(f"预警地名无需翻译: {place_name}")
-        except Exception as e:
-            # 如果整个翻译逻辑发生异常，记录错误但继续处理，确保消息能正常显示
-            logger.error(f"预警地名翻译逻辑发生异常，保持原文继续处理: {e}", exc_info=True)
         
-        # 获取updates、shock_time、depth等字段并构建消息（无论翻译成功与否都执行）
+        # 获取updates、shock_time、depth等字段并构建消息
         updates = data.get('updates')
         # 确保updates是整数
         if updates is not None:

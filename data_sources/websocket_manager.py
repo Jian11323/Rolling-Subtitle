@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
-from adapters import FanStudioAdapter, WolfxAdapter, NiedAdapter
+from adapters import FanStudioAdapter, WolfxAdapter, NiedAdapter, CustomAdapter
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -79,6 +79,13 @@ class WebSocketManager:
             adapter = NiedAdapter('nied', url)
             adapter._manager_source_type = 'nied'
             return adapter
+        # 自定义数据源（WS/WSS）
+        config = Config()
+        if config.custom_data_source_url and url == config.custom_data_source_url:
+            if url.startswith('ws://') or url.startswith('wss://'):
+                adapter = CustomAdapter('custom', url)
+                adapter._manager_source_type = 'custom'
+                return adapter
         # 默认使用Fan Studio适配器
         adapter = FanStudioAdapter('unknown', url)
         adapter._manager_source_type = 'unknown'
@@ -305,10 +312,28 @@ class WebSocketManager:
             logger.debug(f"[{source_name}] {wait_time}秒后重连(第{attempt}次)")
             await asyncio.sleep(wait_time)
     
+    def is_connection_active(self, url: str) -> bool:
+        """
+        检查指定 URL 的 WebSocket 连接是否处于活跃状态（供设置页状态指示使用）。
+
+        Args:
+            url: WebSocket URL
+
+        Returns:
+            若该 URL 在 connections 中则视为已连接，否则为未连接
+        """
+        if url not in self.connections:
+            return False
+        ws = self.connections[url]
+        try:
+            return getattr(ws, 'open', True)
+        except Exception:
+            return True
+
     def _cleanup_connection(self, url: str, source_name: str):
         """
         清理连接资源
-        
+
         Args:
             url: WebSocket URL
             source_name: 数据源名称
@@ -348,6 +373,13 @@ class WebSocketManager:
             if config.enabled_sources.get(url, True):
                 enabled_urls.append(url)
                 self.enabled_sources[url] = True
+        # 自定义数据源（WS/WSS）：URL 非空即启用
+        custom_url = (config.custom_data_source_url or "").strip()
+        if custom_url and (custom_url.startswith('ws://') or custom_url.startswith('wss://')):
+            if custom_url not in enabled_urls:
+                enabled_urls.append(custom_url)
+                self.enabled_sources[custom_url] = True
+                logger.debug(f"添加自定义WebSocket数据源: {custom_url}")
         
         if not enabled_urls:
             logger.warning("ws_urls为空，没有可连接的数据源！")

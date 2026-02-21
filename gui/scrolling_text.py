@@ -75,18 +75,18 @@ class _ScrollingTextMixin:
                 image_y = center_y - self.current_image.height() / 2.0
                 painter.drawPixmap(int(image_x), int(image_y), self.current_image)
                 image_x += self._cached_image_width
-            text_x = int(image_x)
+            text_x = image_x
             if self.current_text_image:
                 text_image_y = center_y - self.current_text_image.height() / 2.0
                 if text_x < self.width() and text_x + self._cached_text_width > 0:
-                    painter.drawPixmap(text_x, int(text_image_y), self.current_text_image)
+                    painter.drawPixmap(int(text_x), int(text_image_y), self.current_text_image)
             else:
                 painter.setFont(self.font)
                 painter.setPen(self.current_color)
                 painter.setRenderHint(QPainter.TextAntialiasing)
                 if text_x < self.width() and text_x + self._cached_text_width > 0:
                     text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
-                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, self.current_text)
+                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
         except Exception as e:
             logger.error(f"绘制失败: {e}")
             import traceback
@@ -304,7 +304,7 @@ class _ScrollingTextMixin:
             total_width += self._cached_text_width
         elif self.current_text:
             metrics = QFontMetrics(self.font)
-            total_width += metrics.width(self.current_text)
+            total_width += metrics.horizontalAdvance(self.current_text)
         if total_width > 0 and self.x_position + total_width < 0:
             with self._scrolling_lock:
                 self._is_scrolling = False
@@ -582,6 +582,8 @@ class _ScrollingTextMixin:
         
         self.set_loading(True)
         
+        # 强制单行显示：将换行符替换为空格，避免多行溢出
+        text = (text or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         self.current_text = text
         # 如果提供了message_type，优先从配置中获取颜色（确保使用最新配置）
         # 否则使用传入的color参数
@@ -633,12 +635,12 @@ class _ScrollingTextMixin:
                 # 预渲染失败，清除并使用直接绘制
                 self.current_text_image = None
                 metrics = QFontMetrics(self.font)
-                self._cached_text_width = metrics.width(text)
+                self._cached_text_width = metrics.horizontalAdvance(text)
                 logger.warning(f"预渲染文本图片失败，使用直接绘制，宽度: {self._cached_text_width}")
         else:
             # 使用QFontMetrics测量文本宽度
             metrics = QFontMetrics(self.font)
-            self._cached_text_width = metrics.width(text)
+            self._cached_text_width = metrics.horizontalAdvance(text)
             logger.debug(f"使用直接绘制文本，宽度: {self._cached_text_width}")
         
         # 如果没有图片，取消加载状态

@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
     QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QUrl
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt5.QtGui import QFont, QDesktopServices, QColor
 from typing import Optional, Dict, Any
 from pathlib import Path
@@ -154,11 +154,10 @@ class SettingsWindow(QDialog):
         self.notebook = QTabWidget()
         main_layout.addWidget(self.notebook)
         
-        # 标签页顺序：外观与显示、数据源、翻译、日志、关于
+        # 标签页顺序：外观与显示、数据源、高级、关于
         self._create_appearance_tab()
         self._create_data_source_tab()
-        self._create_translation_tab()
-        self._create_log_tab()
+        self._create_advanced_tab()
         self._create_about_tab()
         
         # 创建底部按钮区域
@@ -166,12 +165,85 @@ class SettingsWindow(QDialog):
         
         # 居中显示
         self._center_window()
+        
+        # 自定义数据源状态定时刷新（仅「高级」页可见时运行，切换离开或关闭时停止）
+        self._custom_source_status_timer = QTimer(self)
+        self._custom_source_status_timer.setInterval(2000)
+        self._custom_source_status_timer.timeout.connect(self._update_custom_source_status)
+        self._advanced_tab_index = 2  # 高级页在 notebook 中的索引
+        self.notebook.currentChanged.connect(self._on_settings_tab_changed)
+    
+    def _on_settings_tab_changed(self, index: int):
+        """切换标签页时：仅在「高级」页启动状态刷新定时器，离开时停止。"""
+        if index == self._advanced_tab_index:
+            if not self._custom_source_status_timer.isActive():
+                self._custom_source_status_timer.start()
+            self._update_custom_source_status()
+        else:
+            self._custom_source_status_timer.stop()
+    
+    def _update_custom_source_status(self):
+        """根据当前自定义数据源 URL 与主窗口 manager 更新状态标签。仅当在「高级」页且标签已创建时执行。"""
+        if not self.isVisible():
+            return
+        if self.notebook.currentIndex() != self._advanced_tab_index:
+            return
+        if not hasattr(self, 'custom_source_status_label') or self.custom_source_status_label is None:
+            return
+        try:
+            # 优先使用当前输入框中的 URL（未保存也可预览状态）
+            if hasattr(self, 'advanced_vars') and 'custom_url_entry' in self.advanced_vars:
+                url = (self.advanced_vars['custom_url_entry'].text() or "").strip()
+            else:
+                url = (self.config.custom_data_source_url or "").strip()
+            if not url:
+                self.custom_source_status_label.setText("状态：未配置")
+                return
+            parent = self.parent()
+            if parent is None:
+                self.custom_source_status_label.setText("状态：—")
+                return
+            low = url.lower()
+            if low.startswith("http://") or low.startswith("https://"):
+                http_mgr = getattr(parent, "data_sources", None) or {}
+                poll_mgr = http_mgr.get("http_polling") if isinstance(http_mgr, dict) else None
+                if poll_mgr is None or not hasattr(poll_mgr, "get_custom_source_status"):
+                    self.custom_source_status_label.setText("状态：未连接（HTTP，需重启后查看）")
+                    return
+                status = poll_mgr.get_custom_source_status(url)
+                if status == "ok":
+                    self.custom_source_status_label.setText("状态：正常")
+                elif status == "error":
+                    self.custom_source_status_label.setText("状态：连接失败")
+                else:
+                    self.custom_source_status_label.setText("状态：未连接")
+                return
+            if low.startswith("ws://") or low.startswith("wss://"):
+                ws_mgr = getattr(parent, "ws_manager", None)
+                if ws_mgr is None or not hasattr(ws_mgr, "is_connection_active"):
+                    self.custom_source_status_label.setText("状态：—（需重启后查看）")
+                    return
+                if ws_mgr.is_connection_active(url):
+                    self.custom_source_status_label.setText("状态：已连接")
+                else:
+                    self.custom_source_status_label.setText("状态：未连接")
+                return
+            self.custom_source_status_label.setText("状态：—")
+        except Exception as e:
+            logger.debug(f"更新自定义数据源状态失败: {e}")
+            if hasattr(self, 'custom_source_status_label') and self.custom_source_status_label is not None:
+                self.custom_source_status_label.setText("状态：—")
     
     def showEvent(self, event):
         """窗口显示时的事件处理，确保窗口不超出屏幕"""
         super().showEvent(event)
         # 在显示后再次调整窗口位置和大小，确保不超出屏幕
         self._adjust_window_to_screen()
+
+    def hideEvent(self, event):
+        """窗口隐藏或关闭时停止自定义数据源状态刷新定时器"""
+        self._custom_source_status_timer.stop()
+        super().hideEvent(event)
     
     def _adjust_window_to_screen(self):
         """调整窗口大小和位置，确保不超出屏幕"""
@@ -811,461 +883,240 @@ class SettingsWindow(QDialog):
         if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" in self.source_vars:
             self.source_vars["https://api.p2pquake.net/v2/jma/tsunami?limit=1"].setChecked(True)
     
-    def _create_translation_tab(self):
-        """创建翻译设置标签页"""
-        # 创建滚动区域
+    def _create_advanced_tab(self):
+        """创建高级设置标签页（地名修正、日志、自定义数据源）"""
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
         scrollable_widget = QWidget()
         main_layout = QVBoxLayout(scrollable_widget)
         main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         main_layout.setSpacing(SPACING_TAB)
         
-        mode_frame = QWidget()
-        mode_layout = QVBoxLayout(mode_frame)
-        mode_layout.setContentsMargins(0, 0, 0, 0)
-        mode_layout.setSpacing(15)
-        mode_title = QLabel("地名处理方式")
-        mode_title.setStyleSheet(STYLE_SECTION_TITLE)
-        mode_layout.addWidget(mode_title)
-        
-        # 地名修正选项（用于速报）
-        fix_frame = QWidget()
-        fix_layout = QVBoxLayout(fix_frame)
-        fix_layout.setContentsMargins(0, 0, 0, 0)
-        fix_layout.setSpacing(5)
-        
+        # ---------- 1. 地名修正 ----------
+        sec1_title = QLabel("地名修正")
+        sec1_title.setStyleSheet(STYLE_SECTION_TITLE)
+        main_layout.addWidget(sec1_title)
         fix_checkbox = QCheckBox("速报使用地名修正")
         fix_checkbox.setChecked(self.config.translation_config.use_place_name_fix)
         fix_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
-        fix_layout.addWidget(fix_checkbox)
-        
-        fix_info = QLabel("速报消息根据经纬度自动修正地名（支持usgs, emsc, bcsf, gfz, usp, kma数据源）\n无需配置API密钥")
+        main_layout.addWidget(fix_checkbox)
+        fix_info = QLabel("速报消息根据经纬度自动修正地名（支持 usgs、emsc、bcsf、gfz、usp、kma 等数据源），无需 API 密钥。")
         fix_info.setStyleSheet("color: #666666; font-size: 12px; padding-left: 25px; line-height: 1.5;")
         fix_info.setWordWrap(True)
-        fix_layout.addWidget(fix_info)
-        mode_layout.addWidget(fix_frame)
-        
-        mode_layout.addSpacing(5)
-        
-        # 百度翻译选项（用于预警）
-        baidu_frame = QWidget()
-        baidu_layout = QVBoxLayout(baidu_frame)
-        baidu_layout.setContentsMargins(0, 0, 0, 0)
-        baidu_layout.setSpacing(5)
-        
-        baidu_checkbox = QCheckBox("预警使用百度翻译")
-        baidu_checkbox.setChecked(self.config.translation_config.enabled)
-        baidu_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
-        baidu_layout.addWidget(baidu_checkbox)
-        
-        baidu_info = QLabel("预警消息将日语、韩语、英语地名翻译为中文\n需要配置百度翻译API密钥")
-        baidu_info.setStyleSheet("color: #666666; font-size: 12px; padding-left: 25px; line-height: 1.5;")
-        baidu_info.setWordWrap(True)
-        baidu_layout.addWidget(baidu_info)
-        mode_layout.addWidget(baidu_frame)
-        
-        main_layout.addWidget(mode_frame)
+        main_layout.addWidget(fix_info)
         
         # 分隔线
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setFrameShadow(QFrame.Sunken)
-        separator.setStyleSheet("color: #E0E0E0;")
-        main_layout.addWidget(separator)
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setFrameShadow(QFrame.Sunken)
+        sep1.setStyleSheet("color: #E0E0E0;")
+        main_layout.addWidget(sep1)
         
-        # API配置区域（仅在使用百度翻译时显示）
-        config_frame = QWidget()
-        config_layout = QVBoxLayout(config_frame)
-        config_layout.setContentsMargins(0, 0, 0, 0)
-        config_layout.setSpacing(15)
-        
-        # 配置标题
-        config_title = QLabel("API 配置（预警使用百度翻译时需要）")
-        config_title_font = QFont()
-        config_title_font.setBold(True)
-        config_title_font.setPointSize(13)
-        config_title.setFont(config_title_font)
-        config_title.setStyleSheet("color: #333333; margin-bottom: 5px;")
-        config_layout.addWidget(config_title)
-        
-        # 根据选择显示/隐藏API配置区域
-        def update_api_config_visibility():
-            if baidu_checkbox.isChecked():
-                config_frame.setVisible(True)
-            else:
-                config_frame.setVisible(False)
-        
-        baidu_checkbox.toggled.connect(update_api_config_visibility)
-        # 初始化显示状态
-        update_api_config_visibility()
-        
-        # App ID 输入组
-        app_id_group = QWidget()
-        app_id_layout = QVBoxLayout(app_id_group)
-        app_id_layout.setContentsMargins(0, 0, 0, 0)
-        app_id_layout.setSpacing(5)
-        
-        app_id_label = QLabel("百度翻译 App ID:")
-        app_id_label.setStyleSheet("font-size: 13px; color: #555555;")
-        app_id_layout.addWidget(app_id_label)
-        
-        app_id_entry = QLineEdit()
-        app_id_entry.setText(self.config.translation_config.baidu_app_id)
-        app_id_entry.setEchoMode(QLineEdit.Password)
-        app_id_entry.setMaxLength(100)
-        app_id_entry.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 1px solid #CCCCCC;
-                border-radius: 4px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #4A90E2;
-            }
-        """)
-        app_id_layout.addWidget(app_id_entry)
-        config_layout.addWidget(app_id_group)
-        
-        # Secret Key 输入组
-        secret_key_group = QWidget()
-        secret_key_layout = QVBoxLayout(secret_key_group)
-        secret_key_layout.setContentsMargins(0, 0, 0, 0)
-        secret_key_layout.setSpacing(5)
-        
-        secret_key_label = QLabel("百度翻译 Secret Key:")
-        secret_key_label.setStyleSheet("font-size: 13px; color: #555555;")
-        secret_key_layout.addWidget(secret_key_label)
-        
-        secret_key_entry = QLineEdit()
-        secret_key_entry.setText(self.config.translation_config.baidu_secret_key)
-        secret_key_entry.setEchoMode(QLineEdit.Password)
-        secret_key_entry.setMaxLength(100)
-        secret_key_entry.setStyleSheet("""
-            QLineEdit {
-                padding: 8px;
-                border: 1px solid #CCCCCC;
-                border-radius: 4px;
-                font-size: 13px;
-            }
-            QLineEdit:focus {
-                border: 1px solid #4A90E2;
-            }
-        """)
-        secret_key_layout.addWidget(secret_key_entry)
-        config_layout.addWidget(secret_key_group)
-        
-        # 获取API密钥链接
-        link_label = QLabel('获取API密钥请访问: <a href="https://fanyi-api.baidu.com/" style="color: #4A90E2; text-decoration: none;">百度翻译开放平台</a>')
-        link_label.setOpenExternalLinks(True)
-        link_label.setStyleSheet("font-size: 12px; color: #666666; padding-top: 5px;")
-        config_layout.addWidget(link_label)
-        
-        main_layout.addWidget(config_frame)
-        
-        # 提示信息区域
-        hint_frame = QWidget()
-        hint_frame.setStyleSheet("""
-            QWidget {
-                background-color: #FFF9E6;
-                border: 1px solid #FFE082;
-                border-radius: 4px;
-                padding: 10px;
-            }
-        """)
-        hint_layout = QVBoxLayout(hint_frame)
-        hint_layout.setContentsMargins(12, 10, 12, 10)
-        hint_layout.setSpacing(5)
-        
-        hint_text = "提示：\n• 速报消息使用地名修正（根据经纬度自动修正，无需API密钥）\n• 预警消息使用百度翻译（需要配置API密钥）\n• 配置后需要保存设置并重启程序才能生效"
-        hint_label = QLabel(hint_text)
-        hint_label.setStyleSheet("color: #E65100; font-size: 12px; line-height: 1.5;")
-        hint_label.setWordWrap(True)
-        hint_layout.addWidget(hint_label)
-        
-        main_layout.addWidget(hint_frame)
-        
-        # 添加弹性空间
-        main_layout.addStretch()
-        
-        # 保存按钮区域
-        button_frame = QWidget()
-        button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 10, 0, 0)
-        button_layout.addStretch()  # 左侧弹性空间，使按钮居中
-        
-        save_btn = QPushButton("保存")
-        save_btn.setMinimumWidth(120)
-        save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
-        save_btn.clicked.connect(self._save_translation_settings)
-        button_layout.addWidget(save_btn)
-        button_layout.addStretch()  # 右侧弹性空间，使按钮居中
-        
-        main_layout.addWidget(button_frame)
-        
-        # 保存变量引用
-        self.translation_vars = {
-            'baidu_checkbox': baidu_checkbox,
-            'fix_checkbox': fix_checkbox,
-            'app_id': app_id_entry,
-            'secret_key': secret_key_entry,
-        }
-        
-        scroll_area.setWidget(scrollable_widget)
-        self.notebook.addTab(scroll_area, "翻译")
-    
-    def _create_log_tab(self):
-        """创建日志设置标签页"""
-        # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
-        scrollable_widget = QWidget()
-        layout = QVBoxLayout(scrollable_widget)
-        layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
-        layout.setSpacing(SPACING_TAB)
-        
-        title_label = QLabel("日志设置")
-        title_label.setStyleSheet(STYLE_SECTION_TITLE)
-        layout.addWidget(title_label)
-        
-        # 说明文字
-        desc_label = QLabel("配置日志输出选项")
-        desc_label.setStyleSheet("color: #666; padding-bottom: 15px;")
-        layout.addWidget(desc_label)
-        
-        # 输出日志到文件
+        # ---------- 2. 日志设置 ----------
+        sec2_title = QLabel("日志设置")
+        sec2_title.setStyleSheet(STYLE_SECTION_TITLE)
+        main_layout.addWidget(sec2_title)
         output_file_checkbox = QCheckBox("输出日志到文件")
         output_file_checkbox.setChecked(self.config.log_config.output_to_file)
-        output_file_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 14px;
-                padding: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-        """)
-        layout.addWidget(output_file_checkbox)
-        
-        # 说明
+        output_file_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        main_layout.addWidget(output_file_checkbox)
         output_file_desc = QLabel("启用后，日志将保存到 log.txt 文件中")
-        output_file_desc.setWordWrap(True)  # 启用自动换行
-        output_file_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 30px; padding-bottom: 10px;")
-        layout.addWidget(output_file_desc)
-        
-        # 每次程序启动前清空日志
+        output_file_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        output_file_desc.setWordWrap(True)
+        main_layout.addWidget(output_file_desc)
         clear_log_checkbox = QCheckBox("每次程序启动前清空日志")
         clear_log_checkbox.setChecked(self.config.log_config.clear_log_on_startup)
-        clear_log_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 14px;
-                padding: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-        """)
-        layout.addWidget(clear_log_checkbox)
-        
-        # 说明
+        clear_log_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        main_layout.addWidget(clear_log_checkbox)
         clear_log_desc = QLabel("启用后，每次启动程序时会清空日志文件")
-        clear_log_desc.setWordWrap(True)  # 启用自动换行
-        clear_log_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 30px; padding-bottom: 10px;")
-        layout.addWidget(clear_log_desc)
-        
-        # 分隔线
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet("color: #ddd;")
-        layout.addWidget(line)
-        
-        # 按日期分割日志
+        clear_log_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        clear_log_desc.setWordWrap(True)
+        main_layout.addWidget(clear_log_desc)
         split_date_checkbox = QCheckBox("按日期分割日志")
         split_date_checkbox.setChecked(self.config.log_config.split_by_date)
-        split_date_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-size: 14px;
-                padding: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-        """)
-        layout.addWidget(split_date_checkbox)
-        
-        # 说明
+        split_date_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        main_layout.addWidget(split_date_checkbox)
         split_date_desc = QLabel("启用后，日志文件将按日期命名（log_YYYYMMDD.txt），每天自动创建新文件")
-        split_date_desc.setWordWrap(True)  # 启用自动换行
-        split_date_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 30px; padding-bottom: 10px;")
-        layout.addWidget(split_date_desc)
-        
-        # 日志大小设置
+        split_date_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        split_date_desc.setWordWrap(True)
+        main_layout.addWidget(split_date_desc)
         log_size_layout = QHBoxLayout()
         log_size_label = QLabel("日志文件最大大小（MB）：")
         log_size_label.setStyleSheet("font-size: 14px;")
         log_size_layout.addWidget(log_size_label)
-        
         log_size_spinbox = QSpinBox()
         log_size_spinbox.setMinimum(1)
         log_size_spinbox.setMaximum(1000)
         log_size_spinbox.setValue(self.config.log_config.max_log_size)
         log_size_spinbox.setSuffix(" MB")
-        log_size_spinbox.setStyleSheet("""
-            QSpinBox {
-                font-size: 14px;
-                padding: 5px;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-            }
-        """)
+        log_size_spinbox.setStyleSheet(STYLE_SPINBOX)
         log_size_layout.addWidget(log_size_spinbox)
         log_size_layout.addStretch()
-        layout.addLayout(log_size_layout)
-        
-        # 说明
+        main_layout.addLayout(log_size_layout)
         log_size_desc = QLabel("当日志文件达到此大小时，将自动创建备份文件（仅在未启用按日期分割时生效）")
-        log_size_desc.setWordWrap(True)  # 启用自动换行
-        log_size_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 0px; padding-bottom: 10px;")
-        layout.addWidget(log_size_desc)
+        log_size_desc.setStyleSheet("color: #888; font-size: 12px;")
+        log_size_desc.setWordWrap(True)
+        main_layout.addWidget(log_size_desc)
         
-        layout.addStretch()
+        # 分隔线
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        sep2.setStyleSheet("color: #E0E0E0;")
+        main_layout.addWidget(sep2)
         
-        # 底部按钮
+        # ---------- 3. 自定义数据源 ----------
+        sec3_title = QLabel("自定义数据源")
+        sec3_title.setStyleSheet(STYLE_SECTION_TITLE)
+        main_layout.addWidget(sec3_title)
+        custom_url_label = QLabel("自定义数据源 URL：")
+        custom_url_label.setStyleSheet(STYLE_LABEL)
+        main_layout.addWidget(custom_url_label)
+        custom_url_entry = QLineEdit()
+        custom_url_entry.setPlaceholderText("输入 http/https/ws/wss URL，留空则关闭")
+        custom_url_entry.setText(self.config.custom_data_source_url or "")
+        custom_url_entry.setStyleSheet("""
+            QLineEdit { padding: 8px; border: 1px solid #CCCCCC; border-radius: 4px; font-size: 13px; }
+            QLineEdit:focus { border: 1px solid #4A90E2; }
+        """)
+        main_layout.addWidget(custom_url_entry)
+        custom_source_status_label = QLabel("状态：—")
+        custom_source_status_label.setStyleSheet("color: #666; font-size: 12px;")
+        custom_source_status_label.setObjectName("custom_source_status_label")
+        self.custom_source_status_label = custom_source_status_label
+        main_layout.addWidget(custom_source_status_label)
+        custom_hint = QLabel(
+            "• HTTP/HTTPS：软件将每秒向该 URL 发送一次 GET 请求以获取预警数据；留空即关闭。\n"
+            "• WS/WSS：请确保数据格式符合要求并能连接到服务器。"
+        )
+        custom_hint.setStyleSheet("color: #666; font-size: 12px; line-height: 1.5;")
+        custom_hint.setWordWrap(True)
+        main_layout.addWidget(custom_hint)
+        # 格式示例
+        format_label = QLabel("预警源数据格式示例（二选一）：")
+        format_label.setStyleSheet("font-size: 12px; color: #555; margin-top: 8px;")
+        main_layout.addWidget(format_label)
+        example_flat = (
+            '格式一（平铺）：\n'
+            '{\n'
+            '  "eventID": "JMA_202512262525",\n'
+            '  "placeName": "青森县东方冲",\n'
+            '  "latitude": 41.1,\n'
+            '  "longitude": 142.6,\n'
+            '  "depth": 10,\n'
+            '  "reportTime": "2025/12/25 25:25:00",\n'
+            '  "shockTime": "2025/12/25 25:24:00",\n'
+            '  "reportNum": 5,\n'
+            '  "magnitude": "3.5",\n'
+            '  "sourceName": "JMA"\n'
+            '}'
+        )
+        example_flat_edit = QPlainTextEdit()
+        example_flat_edit.setPlainText(example_flat)
+        example_flat_edit.setReadOnly(True)
+        example_flat_edit.setMaximumHeight(145)
+        example_flat_edit.setStyleSheet(
+            "QPlainTextEdit { font-family: Consolas,Monaco,monospace; font-size: 11px; "
+            "background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 6px; }"
+        )
+        main_layout.addWidget(example_flat_edit)
+        example_nested = (
+            '格式二（嵌套 Data）：\n'
+            '{\n'
+            '  "Data": {\n'
+            '    "id": "CWA_202601190730",\n'
+            '    "updates": 4,\n'
+            '    "shockTime": "2026-01-19 07:30:00",\n'
+            '    "latitude": 23.33,\n'
+            '    "longitude": 120.82,\n'
+            '    "depth": 10.0,\n'
+            '    "magnitude": 4.5,\n'
+            '    "placeName": "高雄市桃源區"\n'
+            '  }\n'
+            '}'
+        )
+        example_nested_edit = QPlainTextEdit()
+        example_nested_edit.setPlainText(example_nested)
+        example_nested_edit.setReadOnly(True)
+        example_nested_edit.setMaximumHeight(145)
+        example_nested_edit.setStyleSheet(
+            "QPlainTextEdit { font-family: Consolas,Monaco,monospace; font-size: 11px; "
+            "background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 6px; }"
+        )
+        main_layout.addWidget(example_nested_edit)
+        
+        main_layout.addStretch()
+        
+        # 保存按钮
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 10, 0, 0)  # 与其他标签页保持一致
-        button_layout.addStretch()  # 左侧弹性空间，使按钮居中
-        
-        # 为保持与其他标签页一致，统一保存按钮尺寸
-        save_btn = QPushButton("保存")
+        button_layout.setContentsMargins(0, 10, 0, 0)
+        button_layout.addStretch()
+        save_btn = QPushButton("保存高级设置")
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
-        save_btn.clicked.connect(lambda: self._save_log_settings(
-            output_file_checkbox, clear_log_checkbox, split_date_checkbox, log_size_spinbox
+        save_btn.setStyleSheet(STYLE_SAVE_BTN)
+        save_btn.clicked.connect(lambda: self._save_advanced_settings(
+            fix_checkbox, output_file_checkbox, clear_log_checkbox,
+            split_date_checkbox, log_size_spinbox, custom_url_entry
         ))
         button_layout.addWidget(save_btn)
-        button_layout.addStretch()  # 右侧弹性空间，使按钮居中
+        button_layout.addStretch()
+        main_layout.addWidget(button_frame)
         
-        layout.addWidget(button_frame)
-        
+        self.advanced_vars = {
+            'fix_checkbox': fix_checkbox,
+            'output_file_checkbox': output_file_checkbox,
+            'clear_log_checkbox': clear_log_checkbox,
+            'split_date_checkbox': split_date_checkbox,
+            'log_size_spinbox': log_size_spinbox,
+            'custom_url_entry': custom_url_entry,
+            'custom_source_status_label': custom_source_status_label,
+        }
         scroll_area.setWidget(scrollable_widget)
-        self.notebook.addTab(scroll_area, "日志")
+        self.notebook.addTab(scroll_area, "高级")
     
-    def _save_log_settings(self, output_file_checkbox, clear_log_checkbox, split_date_checkbox, log_size_spinbox):
-        """保存日志设置"""
+    def _save_advanced_settings(self, fix_checkbox, output_file_checkbox, clear_log_checkbox,
+                                  split_date_checkbox, log_size_spinbox, custom_url_entry, show_message=True):
+        """保存高级设置（地名修正、日志、自定义数据源）。show_message=False 时不弹成功提示（由调用方统一提示）。返回 True 表示保存成功，False 表示未保存（校验失败或异常）。"""
         try:
+            custom_url = custom_url_entry.text().strip()
+            if custom_url:
+                low = custom_url.lower()
+                if not (low.startswith('http://') or low.startswith('https://') or low.startswith('ws://') or low.startswith('wss://')):
+                    QMessageBox.warning(
+                        self, "警告",
+                        "自定义数据源 URL 必须以 http://、https://、ws:// 或 wss:// 开头，请修改后重试。"
+                    )
+                    return False
+            self.config.translation_config.use_place_name_fix = fix_checkbox.isChecked()
             self.config.log_config.output_to_file = output_file_checkbox.isChecked()
             self.config.log_config.clear_log_on_startup = clear_log_checkbox.isChecked()
             self.config.log_config.split_by_date = split_date_checkbox.isChecked()
             self.config.log_config.max_log_size = log_size_spinbox.value()
-            
-            # 验证配置
+            self.config.custom_data_source_url = custom_url
             if not self.config.log_config.validate():
                 QMessageBox.warning(self, "警告", "日志配置验证失败，请检查设置")
-                return
-            
-            # 保存到文件
+                return False
             self.config.save_config()
-            
-            QMessageBox.information(self, "成功", "日志设置已保存！\n需要重启程序才能生效。")
-            logger.debug("日志设置已保存")
-            
+            if show_message:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("成功")
+                msg.setText("高级设置已保存。\n数据源与日志相关设置需重启程序后生效。")
+                msg.setIcon(QMessageBox.Information)
+                cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
+                msg.exec_()
+                if msg.clickedButton() == restart_btn:
+                    logger.debug("用户选择重启，正在重启软件...")
+                    self._restart_application()
+            logger.debug("高级设置已保存")
+            return True
         except Exception as e:
-            logger.error(f"保存日志设置失败: {e}")
+            logger.error(f"保存高级设置失败: {e}")
             QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
-    
-    def _open_baidu_translate_link(self):
-        """打开百度翻译开放平台链接"""
-        try:
-            QDesktopServices.openUrl(QUrl("https://fanyi-api.baidu.com/"))
-        except Exception as e:
-            logger.error(f"打开百度翻译开放平台链接失败: {e}")
-            QMessageBox.critical(self, "错误", f"无法打开链接: {e}")
-    
-    def _save_translation_settings(self):
-        """保存翻译设置"""
-        try:
-            # 更新地名修正设置（用于速报）
-            self.config.translation_config.use_place_name_fix = self.translation_vars['fix_checkbox'].isChecked()
-            
-            # 更新百度翻译设置（用于预警）
-            # 获取API密钥
-            app_id = self.translation_vars['app_id'].text().strip()
-            secret_key = self.translation_vars['secret_key'].text().strip()
-            
-            # 如果选择了使用百度翻译，需要检查API密钥
-            if self.translation_vars['baidu_checkbox'].isChecked():
-                if app_id and secret_key:
-                    self.config.translation_config.enabled = True
-                else:
-                    QMessageBox.warning(self, "警告", "启用预警百度翻译需要配置API密钥！\n翻译功能将保持禁用状态。")
-                    self.config.translation_config.enabled = False
-            else:
-                    self.config.translation_config.enabled = False
-            
-            # 更新API密钥
-            self.config.translation_config.baidu_app_id = app_id
-            self.config.translation_config.baidu_secret_key = secret_key
-            
-            # 保存到文件
-            self.config.save_config()
-            
-            QMessageBox.information(
-                self,
-                "提示",
-                "翻译设置已保存，程序将自动重启以应用更改。"
-            )
-            logger.debug("翻译设置已保存")
-            self._restart_application()
-            return
-            
-        except Exception as e:
-            logger.error(f"保存翻译设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
-
+            return False
     
     def _create_about_tab(self):
         """创建关于标签页"""
@@ -1279,12 +1130,13 @@ class SettingsWindow(QDialog):
         sep_style = "background-color: #E0E0E0; max-height: 1px;"
         body_style = "color: #555555; font-size: 13px; padding-left: 10px; padding-bottom: 2px;"
 
-        # 标题与版本
+        # 标题与版本（上方留白，避免贴顶）
+        layout.addSpacing(12)
         title_label = QLabel("地震预警及速报滚动实况")
-        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #0066CC; padding-bottom: 2px;")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0066CC; padding-bottom: 2px;")
         layout.addWidget(title_label)
         version_label = QLabel(f"版本 v{APP_VERSION} Beta测试版")
-        version_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #FF6600; padding-bottom: 6px;")
+        version_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FF6600; padding-bottom: 6px;")
         layout.addWidget(version_label)
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.HLine)
@@ -1468,11 +1320,37 @@ class SettingsWindow(QDialog):
         try:
             self._save_data_source_settings()
             self._save_appearance_settings()
-            self._save_translation_settings()
-            QMessageBox.information(
-                self, "成功",
-                "所有设置已保存！\n数据源和翻译设置需要重启程序才能生效。"
-            )
+            advanced_saved = False
+            if hasattr(self, 'advanced_vars'):
+                advanced_required = ('fix_checkbox', 'output_file_checkbox', 'clear_log_checkbox', 'split_date_checkbox', 'log_size_spinbox', 'custom_url_entry')
+                if all(k in self.advanced_vars for k in advanced_required):
+                    advanced_saved = self._save_advanced_settings(
+                        self.advanced_vars['fix_checkbox'],
+                        self.advanced_vars['output_file_checkbox'],
+                        self.advanced_vars['clear_log_checkbox'],
+                        self.advanced_vars['split_date_checkbox'],
+                        self.advanced_vars['log_size_spinbox'],
+                        self.advanced_vars['custom_url_entry'],
+                        show_message=False,
+                    )
+                else:
+                    logger.warning("高级设置未就绪，请先打开「高级」标签页")
+            if advanced_saved:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("成功")
+                msg.setText("所有设置已保存。\n数据源与高级设置需重启程序后生效。")
+                msg.setIcon(QMessageBox.Information)
+                cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
+                msg.exec_()
+                if msg.clickedButton() == restart_btn:
+                    logger.debug("用户选择重启，正在重启软件...")
+                    self._restart_application()
+            else:
+                QMessageBox.information(
+                    self, "成功",
+                    "所有设置已保存！\n数据源与高级设置需要重启程序才能生效。"
+                )
         except Exception as e:
             logger.error(f"保存设置失败: {e}")
             QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
@@ -1688,6 +1566,10 @@ class SettingsWindow(QDialog):
     def _save_display_settings(self):
         """保存显示设置"""
         try:
+            required = ('timezone', 'speed', 'font_size', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            if not all(k in self.display_vars for k in required):
+                logger.warning("显示设置未就绪，请先打开「外观与显示」页")
+                return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
             if new_timezone is None:
@@ -1723,6 +1605,9 @@ class SettingsWindow(QDialog):
     def _save_render_settings(self):
         """保存渲染方式设置（仅渲染方式页使用）"""
         try:
+            if 'use_gpu_rendering' not in self.render_vars:
+                logger.warning("渲染设置未就绪，请先打开「渲染方式」页")
+                return
             self.config.gui_config.use_gpu_rendering = self.render_vars['use_gpu_rendering'].isChecked()
             self.config.save_config()
             self.config._notify_config_changed()
@@ -1735,8 +1620,7 @@ class SettingsWindow(QDialog):
             msg.exec_()
             if msg.clickedButton() == restart_btn:
                 logger.debug("用户选择重启，正在重启软件...")
-                _exe = get_executable_path()
-                os.execv(_exe, [_exe] + sys.argv)
+                self._restart_application()
             logger.debug("渲染方式已保存")
         except Exception as e:
             logger.error(f"保存渲染方式失败: {e}")
@@ -1766,6 +1650,10 @@ class SettingsWindow(QDialog):
     def _save_appearance_settings(self):
         """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
         try:
+            display_required = ('timezone', 'speed', 'font_size', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            if not all(k in self.display_vars for k in display_required) or 'use_gpu_rendering' not in self.render_vars:
+                logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
+                return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
             if new_timezone is None:
@@ -1806,8 +1694,7 @@ class SettingsWindow(QDialog):
                 msg.exec_()
                 if msg.clickedButton() == restart_btn:
                     logger.debug("用户选择重启，正在重启软件...")
-                    _exe = get_executable_path()
-                    os.execv(_exe, [_exe] + sys.argv)
+                    self._restart_application()
             else:
                 QMessageBox.information(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("外观与显示设置已保存")

@@ -11,6 +11,7 @@ from .p2pquake_adapter import P2PQuakeAdapter
 from .p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
 from .wolfx_adapter import WolfxAdapter
 from .nied_adapter import NiedAdapter
+from .custom_adapter import CustomAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -19,4 +20,5 @@ __all__ = [
     'P2PQuakeTsunamiAdapter',
     'WolfxAdapter',
     'NiedAdapter',
+    'CustomAdapter',
 ]

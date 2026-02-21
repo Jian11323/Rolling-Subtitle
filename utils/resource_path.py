@@ -29,7 +29,14 @@ def get_executable_path() -> str:
             pass
     if getattr(sys, "frozen", False):
         return os.path.abspath(sys.executable)
-    return os.path.abspath(sys.argv[0] or getattr(sys, "__file__", sys.executable))
+    # 非打包：脚本路径优先；argv[0] 为空或 -c 时回退到 __main__.__file__
+    script = sys.argv[0] if sys.argv else None
+    if not script or script == "-c":
+        main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+        script = main_file if main_file else sys.executable
+    else:
+        script = script or sys.executable
+    return os.path.abspath(script)
 
 
 def get_executable_dir() -> str:

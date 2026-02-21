@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config, APP_VERSION
-from adapters import P2PQuakeAdapter, P2PQuakeTsunamiAdapter, WolfxAdapter
+from adapters import P2PQuakeAdapter, P2PQuakeTsunamiAdapter, WolfxAdapter, CustomAdapter
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -46,6 +46,8 @@ class HTTPPollingConnection:
         self._last_data_hash = None  # 用于检测数据变化
         self._last_error_log_time = 0.0  # 重复错误降噪：上次打 ERROR 的时间
         self._last_error_msg = ""  # 重复错误降噪：上次错误摘要
+        self.last_request_ok = False  # 最近一次请求是否成功（供设置页状态指示）
+        self.last_request_time = 0.0  # 最近一次请求时间
         self._session = requests.Session()
         self._session.headers.update({
             'User-Agent': f'EarthquakeScroller/{APP_VERSION}'
@@ -109,10 +111,15 @@ class HTTPPollingConnection:
                         logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
                         self._last_error_log_time = now
                         self._last_error_msg = err_summary
+                    self.last_request_ok = False
                     return
             
             if response is None:
+                self.last_request_ok = False
                 return
+            
+            self.last_request_ok = True
+            self.last_request_time = time.time()
             
             # 解析响应
             data = response.json()
@@ -157,8 +164,10 @@ class HTTPPollingConnection:
                     logger.debug(f"[{self.source_name}] 原始数据预览: {str(data)[:500] if isinstance(data, (str, dict, list)) else type(data)}")
                 
         except requests.exceptions.RequestException as e:
+            self.last_request_ok = False
             logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
         except Exception as e:
+            self.last_request_ok = False
             logger.error(f"[{self.source_name}] 轮询处理失败: {e}")
     
     def stop(self):
@@ -187,6 +196,10 @@ class HTTPPollingManager:
     
     def get_adapter(self, url: str) -> Optional[Any]:
         """根据URL获取对应的适配器"""
+        # 自定义数据源（HTTP/HTTPS）
+        if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
+            if url.startswith('http://') or url.startswith('https://'):
+                return CustomAdapter('custom', url)
         # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
@@ -211,6 +224,12 @@ class HTTPPollingManager:
                     logger.debug(f"发现启用的HTTP数据源: {url}")
                 else:
                     logger.debug(f"HTTP数据源已禁用: {url}")
+        # 自定义数据源（HTTP/HTTPS）：URL 非空即启用
+        custom_url = (self.config.custom_data_source_url or "").strip()
+        if custom_url and (custom_url.startswith('http://') or custom_url.startswith('https://')):
+            if custom_url not in http_urls:
+                http_urls.append(custom_url)
+                logger.debug(f"发现自定义HTTP数据源: {custom_url}")
         
         if not http_urls:
             logger.info("没有启用的HTTP数据源")
@@ -227,8 +246,13 @@ class HTTPPollingManager:
                 logger.error(f"无法找到适配器 for {url}")
                 continue
             
-            # 轮询间隔：Wolfx 速报 5 秒，其余 2 秒
-            poll_interval = 5 if 'eqlist' in url and 'wolfx' in url.lower() else 2
+            # 轮询间隔：自定义数据源 1 秒，Wolfx 速报 5 秒，其余 2 秒
+            if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
+                poll_interval = 1
+            elif 'eqlist' in url and 'wolfx' in url.lower():
+                poll_interval = 5
+            else:
+                poll_interval = 2
             connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)
             self.connections[url] = connection
             
@@ -236,6 +260,21 @@ class HTTPPollingManager:
             connection.start(self.message_callback)
             
             logger.info(f"已启动HTTP轮询: {source_name}")
+    
+    def get_custom_source_status(self, url: str) -> Optional[str]:
+        """
+        获取自定义数据源（HTTP/HTTPS）的最近一次请求状态，供设置页状态指示使用。
+
+        Args:
+            url: 自定义数据源 URL
+
+        Returns:
+            'ok' 表示最近一次请求成功，'error' 表示失败，None 表示该 URL 未在连接中（未配置或未运行）
+        """
+        if not url or url not in self.connections:
+            return None
+        conn = self.connections[url]
+        return 'ok' if conn.last_request_ok else 'error'
     
     def stop_all(self):
         """停止所有轮询连接"""

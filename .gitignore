@@ -40,6 +40,7 @@ clear_repo_and_cleanup.bat
 GITHUB_上传说明.md
 
 # 非核心文档与脚本（不上传）
+使用说明书.md
 打包检查报告.md
 create_advanced_copy.py
 convert_icon.py
