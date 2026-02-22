@@ -17,14 +17,15 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.3.2"
+APP_VERSION = "2.3.3"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.3.2
+CHANGELOG_TEXT = """版本 2.3.3
 
 1、修复字体异常加粗与抗锯齿失效问题
-2、新增字体修改功能"""
+2、适当调整设置页面布局
+3、新增字体修改功能"""
 
 @dataclass
 class GUIConfig:
