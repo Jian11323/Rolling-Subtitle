@@ -59,14 +59,6 @@ python main.py
     └── message_processor.py
 ```
 
-配置说明
-
-详细配置说明请参考：
-- `配置文件路径说明.md` - 配置文件路径说明
-- `重构说明.md` - 项目重构说明
-- `移除Wolfx说明.md` - Wolfx数据源移除说明
-- `移除认证模块说明.md` - 认证模块移除说明
-
 许可证
 
 本项目采用 [GNU GPLv3](LICENSE) 开源协议（因使用 PyQt5 等 GPL 组件，遵循 Copyleft 要求）。
