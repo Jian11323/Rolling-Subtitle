@@ -23,14 +23,16 @@ APP_VERSION = "2.3.2"
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
 CHANGELOG_TEXT = """版本 2.3.2
 
-1、修复慢速滚动时坐标取整导致的卡顿（使用浮点坐标与 QRectF 绘制）；
-2、弃用 PIL 文本预渲染，改用 Qt 原生 drawText，消除亚像素平移时的模糊与闪烁；
-3、定时器改为 PreciseTimer 并使用 QElapsedTimer 计算帧间隔，提高 Windows 下帧率稳定性。"""
+1、修复字体异常加粗与抗锯齿失效问题
+2、新增字体修改功能"""
 
 @dataclass
 class GUIConfig:
     """GUI配置类"""
     font_size: int = 40
+    font_family: str = "SimSun"
+    font_bold: bool = False
+    font_italic: bool = False
     text_speed: float = 4.0
     bg_color: str = 'black'
     info_color: str = '#01FF00'
@@ -42,7 +44,8 @@ class GUIConfig:
     target_fps: int = 60  # 目标帧率
     timezone: str = "Asia/Shanghai"  # 显示时区（IANA 名称），默认北京时间
     last_seen_changelog_version: str = ""  # 上次已读的更新说明版本，用于弹窗仅展示一次
-    use_gpu_rendering: bool = False  # True=GPU(OpenGL) 渲染，False=CPU(软件) 渲染，默认 CPU
+    use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
+    render_backend: str = "cpu"  # "cpu" | "opengl"，默认 cpu
     
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -53,6 +56,7 @@ class GUIConfig:
             assert 800 <= self.window_width <= 3000, "窗口宽度必须在800-3000之间"
             assert 100 <= self.window_height <= 500, "窗口高度必须在100-500之间"
             assert 1 <= self.target_fps <= 240, "目标帧率必须在1-240之间"
+            assert self.render_backend in ("cpu", "opengl"), "render_backend 必须为 cpu 或 opengl"
             return True
         except AssertionError as e:
             logger.error(f"GUI配置验证失败: {e}")
@@ -240,6 +244,9 @@ class Config:
             'config_version': APP_VERSION,
             'GUI_CONFIG': {
                 'font_size': self.gui_config.font_size,
+                'font_family': self.gui_config.font_family,
+                'font_bold': self.gui_config.font_bold,
+                'font_italic': self.gui_config.font_italic,
                 'text_speed': self.gui_config.text_speed,
                 'bg_color': self.gui_config.bg_color,
                 'info_color': self.gui_config.info_color,
@@ -252,6 +259,7 @@ class Config:
                 'timezone': self.gui_config.timezone,
                 'last_seen_changelog_version': self.gui_config.last_seen_changelog_version,
                 'use_gpu_rendering': self.gui_config.use_gpu_rendering,
+                'render_backend': self.gui_config.render_backend,
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -397,6 +405,17 @@ class Config:
                 for key, value in gui_data.items():
                     if hasattr(self.gui_config, key):
                         setattr(self.gui_config, key, value)
+                # 兼容旧配置：无 render_backend 时根据 use_gpu_rendering 推导
+                if 'render_backend' not in config_data.get('GUI_CONFIG', {}):
+                    self.gui_config.render_backend = "opengl" if self.gui_config.use_gpu_rendering else "cpu"
+                # 规范化并迁移：统一为小写，不支持的取值改为 opengl
+                backend = (self.gui_config.render_backend or "").strip().lower()
+                if backend in ("cpu", "opengl"):
+                    self.gui_config.render_backend = backend
+                else:
+                    self.gui_config.render_backend = "opengl"
+                # 根据 render_backend 同步 use_gpu_rendering，保证一致
+                self.gui_config.use_gpu_rendering = (self.gui_config.render_backend == "opengl")
                 if not self.gui_config.validate():
                     success = False
             

@@ -39,16 +39,16 @@ class MainWindow(QMainWindow):
     # 定义信号：用于在主线程中更新设置窗口的气象预警图片
     weather_image_update = pyqtSignal(dict)
     
-    def __init__(self):
+    def __init__(self, config=None):
         super().__init__()
-        self.config = Config()
+        self.config = config if config is not None else Config()
         self.message_processor = MessageProcessor()
         self.message_queue = MessageQueue(maxsize=100)
         self.message_buffer = MessageBuffer(max_size=20)
         # 分别存储预警和速报消息
         self.warning_buffer = MessageBuffer(max_size=20, use_priority=True)
         self.report_buffer = MessageBuffer(max_size=20, use_priority=True)
-        self.scrolling_text: Optional[Union[ScrollingText, ScrollingTextCPU]] = None
+        self.scrolling_text: Optional[Union[ScrollingText, ScrollingTextCPU, Any]] = None
         self.data_sources: Dict[str, Any] = {}
         self.ws_manager: Optional[WebSocketManager] = None  # WebSocket管理器引用
 
@@ -152,13 +152,18 @@ class MainWindow(QMainWindow):
             layout = QVBoxLayout(central_widget)
             layout.setContentsMargins(0, 0, 0, 0)
             
-            # 创建滚动文本组件（按配置选择 CPU 或 GPU 渲染）
-            if self.config.gui_config.use_gpu_rendering:
+            # 创建滚动文本组件（按 render_backend 选择 CPU / OpenGL）
+            backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
+            scroll_widget = None  # 布局中用于右键菜单的控件
+            if backend == "opengl":
                 self.scrolling_text = ScrollingText(self.config)
+                scroll_widget = self.scrolling_text
+                layout.addWidget(self.scrolling_text)
             else:
                 self.scrolling_text = ScrollingTextCPU(self.config)
+                scroll_widget = self.scrolling_text
+                layout.addWidget(self.scrolling_text)
             self.scrolling_text.scroll_completed.connect(self._on_scroll_completed)
-            layout.addWidget(self.scrolling_text)
             
             # 设置样式
             self.setStyleSheet(f"background-color: {self.config.gui_config.bg_color};")
@@ -168,11 +173,12 @@ class MainWindow(QMainWindow):
             
             # 创建右键菜单（绑定到主窗口和滚动文本组件）
             self._create_context_menu()
-            # 同时为滚动文本组件绑定右键菜单（使用 lambda 确保坐标正确映射）
-            self.scrolling_text.setContextMenuPolicy(Qt.CustomContextMenu)
-            self.scrolling_text.customContextMenuRequested.connect(
-                lambda pos: self._show_context_menu(pos, self.scrolling_text)
-            )
+            # 为滚动区域绑定右键菜单
+            if scroll_widget is not None:
+                scroll_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+                scroll_widget.customContextMenuRequested.connect(
+                    lambda pos: self._show_context_menu(pos, scroll_widget)
+                )
             
             logger.debug("用户界面初始化完成")
             

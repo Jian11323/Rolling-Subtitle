@@ -346,9 +346,24 @@ class MessageProcessor:
         
         # 机构名称
         if organization:
-            # FSSN特殊处理：显示为【FSSN地震信息】
+            # FSSN特殊处理：根据info_type显示 已确认/已核实地震信息
             if organization == "FSSN":
-                message_parts.append(f"【{organization}地震信息】")
+                if info_type and ("正式" in info_type or "已核实" in info_type):
+                    message_parts.append("【FSSN已核实地震信息】")
+                else:
+                    message_parts.append("【FSSN已确认地震信息】")
+            # 香港天文台：根据info_type显示 待核实/已核实地震信息
+            elif organization == "香港天文台":
+                if info_type == "已核实":
+                    message_parts.append("【香港天文台已核实地震信息】")
+                else:
+                    message_parts.append("【香港天文台待核实地震信息】")
+            # 美国地质调查局：根据info_type显示 Automatic/Reviewed地震信息
+            elif organization == "美国地质调查局":
+                if info_type and "正式" in info_type:
+                    message_parts.append("【美国地质调查局Reviewed地震信息】")
+                else:
+                    message_parts.append("【美国地质调查局Automatic地震信息】")
             # CENC特殊处理：根据infoTypeName动态显示
             elif organization == "中国地震台网中心自动测定/正式测定":
                 # 从infoTypeName中提取测定类型（去掉方括号）

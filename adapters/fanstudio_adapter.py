@@ -403,6 +403,14 @@ class FanStudioAdapter(BaseAdapter):
         # 特殊字段处理
         event_id = data.get('eventId', data.get('id', ''))
         info_type = data.get('infoTypeName', '')
+        # HKO：verify Y/N → 已核实/待核实
+        if source_type == 'hko':
+            info_type = "已核实" if (data.get('verify') or '').upper() == 'Y' else "待核实"
+        # USGS：infoTypeName → 自动/正式
+        elif source_type == 'usgs':
+            raw = (data.get('infoTypeName') or '').strip().lower()
+            info_type = "正式" if raw == 'reviewed' else "自动"
+        # FSSN：保持 infoTypeName 原样，展示层用包含判断
         
         # 格式化时间（FanStudio 速报均为 UTC+8，转为显示时区）
         if shock_time:

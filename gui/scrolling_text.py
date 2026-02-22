@@ -34,11 +34,14 @@ class _ScrollingTextMixin:
         self.current_image_path = None
         self.current_image = None
         self.current_text_image = None
-        self.font = QFont("SimSun", config.gui_config.font_size)
+        font_family = getattr(config.gui_config, 'font_family', None) or "SimSun"
+        self.font = QFont(font_family, config.gui_config.font_size)
         if not self.font.exactMatch():
             self.font = QFont("宋体", config.gui_config.font_size)
-        self.font.setBold(True)
-        logger.info(f"使用字体: {self.font.family()}, 大小: {config.gui_config.font_size}pt, 加粗: 是")
+        self.font.setBold(getattr(config.gui_config, 'font_bold', False))
+        self.font.setItalic(getattr(config.gui_config, 'font_italic', False))
+        self.font.setStyleStrategy(QFont.PreferAntialias)
+        logger.info(f"使用字体: {self.font.family()}, 大小: {config.gui_config.font_size}pt, 加粗: {self.font.bold()}, 倾斜: {self.font.italic()}")
         self._image_cache: Dict[str, QPixmap] = {}
         self._image_cache_lock = threading.Lock()
         self._text_texture_cache: OrderedDict[Tuple[str, str, int], QPixmap] = OrderedDict()
@@ -86,6 +89,7 @@ class _ScrollingTextMixin:
             # 始终使用 Qt 原生 drawText（浮点坐标），不再使用 PIL 预渲染位图，避免亚像素平移时的插值模糊与闪烁
             painter.setFont(self.font)
             painter.setPen(self.current_color)
+            # OpenGL/CPU 路径均依赖此处设置，保证文字抗锯齿
             painter.setRenderHint(QPainter.TextAntialiasing)
             if text_x < self.width() and text_x + self._cached_text_width > 0:
                 text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
@@ -317,6 +321,7 @@ class _ScrollingTextMixin:
                 self._is_scrolling = False
             self.scroll_completed.emit()
             return
+        getattr(self, '_refresh_offscreen_image', lambda: None)()
         self.update()
 
     def show_loading_message(self):
@@ -408,13 +413,30 @@ class _ScrollingTextMixin:
             new_text_speed = self.config.gui_config.text_speed
             logger.info(f"滚动速度已更新（配置热修改）: {new_text_speed:.1f}")
             new_font_size = self.config.gui_config.font_size
-            if self.font.pointSize() != new_font_size:
+            new_font_family = getattr(self.config.gui_config, 'font_family', None) or "SimSun"
+            new_font_bold = getattr(self.config.gui_config, 'font_bold', False)
+            new_font_italic = getattr(self.config.gui_config, 'font_italic', False)
+            font_changed = (
+                self.font.pointSize() != new_font_size
+                or self.font.family() != new_font_family
+                or self.font.bold() != new_font_bold
+                or self.font.italic() != new_font_italic
+            )
+            if font_changed:
                 self.font.setPointSize(new_font_size)
-                logger.info(f"字体大小已更新: {self.font.pointSize()}pt -> {new_font_size}pt")
+                self.font.setFamily(new_font_family)
+                if not self.font.exactMatch():
+                    self.font.setFamily("宋体")
+                self.font.setBold(new_font_bold)
+                self.font.setItalic(new_font_italic)
+                self.font.setStyleStrategy(QFont.PreferAntialias)
+                logger.info(f"字体已更新: {self.font.family()}, {self.font.pointSize()}pt, 加粗: {self.font.bold()}, 倾斜: {self.font.italic()}")
                 with self._text_texture_cache_lock:
                     self._text_texture_cache.clear()
                 with self._pil_font_cache_lock:
                     self._pil_font_cache.clear()
+                if self.current_text:
+                    self._cached_text_width = QFontMetrics(self.font).horizontalAdvance(self.current_text)
             # 仅 OpenGL 控件有 format/setFormat，ScrollingTextCPU 跳过
             if hasattr(self, 'setFormat') and callable(getattr(self, 'format', None)):
                 try:
@@ -711,7 +733,7 @@ class ScrollingText(QOpenGLWidget, _ScrollingTextMixin):
         fmt.setVersion(2, 1)
         fmt.setDepthBufferSize(24)
         fmt.setStencilBufferSize(8)
-        fmt.setSamples(0)
+        fmt.setSamples(4)  # 多重采样，改善 OpenGL 下文字抗锯齿
         fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
         fmt.setOption(QSurfaceFormat.DeprecatedFunctions, False)
         super().__init__()
@@ -759,7 +781,7 @@ class ScrollingTextCPU(_ScrollingTextMixin, QWidget):
         self.setAutoFillBackground(False)
         self._init_scrolling(config)
         logger.info("滚动组件使用 QWidget 软件渲染（CPU）")
-    
+
     def paintEvent(self, event):
         """软件绘制（QWidget）"""
         painter = QPainter(self)

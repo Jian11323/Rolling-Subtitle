@@ -92,9 +92,9 @@ def main():
         logger.set_log_config(config.log_config)
         logger.info(f"数据源: {len(config.ws_urls)}个")
 
-        # 在创建 QApplication 之前设置 OpenGL 与垂直同步（仅当选择 GPU 渲染时；CPU 渲染不设置）
-        # 部分机器无独显/驱动异常会导致 Qt 初始化失败，此处做回退
-        if config.gui_config.use_gpu_rendering:
+        render_backend = getattr(config.gui_config, 'render_backend', None) or ("opengl" if config.gui_config.use_gpu_rendering else "cpu")
+        # 在创建 QApplication 之前设置 OpenGL（仅当选择 OpenGL 时）
+        if render_backend == "opengl":
             try:
                 from PyQt5.QtCore import Qt
                 from PyQt5.QtGui import QSurfaceFormat
@@ -168,8 +168,8 @@ def main():
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, load_translator_async)
         
-        # 创建主窗口
-        window = MainWindow()
+        # 创建主窗口（传入 config）
+        window = MainWindow(config=config)
         window.show()
 
         # 调试版：启动阶段日志已正常显示；启动完成后控制台仅保留报错日志（ERROR 及以上）

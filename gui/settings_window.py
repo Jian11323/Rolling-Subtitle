@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
-    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox
+    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QFontComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt5.QtGui import QFont, QDesktopServices, QColor
@@ -132,7 +132,7 @@ class SettingsWindow(QDialog):
         # 获取屏幕尺寸，确保窗口不超出屏幕
         from PyQt5.QtWidgets import QApplication
         screen = QApplication.desktop().screenGeometry()
-        max_width = min(520, screen.width() - 40)  # 初始宽度 520，留出边距
+        max_width = min(440, screen.width() - 40)  # 初始宽度 520，留出边距
         max_height = min(550, screen.height() - 100)  # 高度 550，留出边距（含任务栏）
         
         self.setMinimumSize(420, 300)  # 最小宽度 420，避免内容挤在一起
@@ -303,64 +303,82 @@ class SettingsWindow(QDialog):
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scrollable_widget = QWidget()
         main_layout = QVBoxLayout(scrollable_widget)
-        main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
-        main_layout.setSpacing(SPACING_TAB)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(8)
         
         # ---------- 1. 基本显示 ----------
         block1 = QWidget()
-        block1_layout = QVBoxLayout(block1)
+        block1_layout = QGridLayout(block1)
         block1_layout.setContentsMargins(0, 0, 0, 0)
-        block1_layout.setSpacing(12)
+        block1_layout.setHorizontalSpacing(4)
+        block1_layout.setVerticalSpacing(2)
         sec1 = QLabel("基本显示")
-        sec1.setStyleSheet(STYLE_SECTION_TITLE)
-        block1_layout.addWidget(sec1)
+        sec1.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
+        block1_layout.addWidget(sec1, 0, 0, 1, 6)
         
         # 滚动速度
-        speed_row = QWidget()
-        speed_row_layout = QHBoxLayout(speed_row)
-        speed_row_layout.setContentsMargins(0, 0, 0, 0)
-        speed_row_layout.setSpacing(10)
         speed_label = QLabel("滚动速度:")
         speed_label.setStyleSheet(STYLE_LABEL)
+        speed_label.setMinimumWidth(80)
         speed_slider = QSlider(Qt.Horizontal)
         speed_slider.setMinimum(1)
         speed_slider.setMaximum(200)
         speed_slider.setValue(int(self.config.gui_config.text_speed * 10))
         speed_slider.setStyleSheet(STYLE_SLIDER)
+        speed_slider.setFixedWidth(240)
         speed_label_value = QLabel(f"{self.config.gui_config.text_speed:.1f}")
         speed_label_value.setStyleSheet("font-size: 13px; color: #333333; min-width: 40px;")
         speed_slider.valueChanged.connect(lambda v: speed_label_value.setText(f"{v / 10.0:.1f}"))
-        speed_row_layout.addWidget(speed_label)
-        speed_row_layout.addWidget(speed_slider)
-        speed_row_layout.addWidget(speed_label_value)
-        block1_layout.addWidget(speed_row)
+        block1_layout.addWidget(speed_label, 1, 0)
+        block1_layout.addWidget(speed_slider, 1, 1)
+        block1_layout.addWidget(speed_label_value, 1, 2)
         
-        # 字体大小
-        font_row = QWidget()
-        font_row_layout = QHBoxLayout(font_row)
-        font_row_layout.setContentsMargins(0, 0, 0, 0)
-        font_row_layout.setSpacing(10)
-        font_label = QLabel("字体大小:")
-        font_label.setStyleSheet(STYLE_LABEL)
-        font_slider = QSlider(Qt.Horizontal)
-        font_slider.setMinimum(10)
-        font_slider.setMaximum(100)
-        font_slider.setValue(self.config.gui_config.font_size)
-        font_slider.setStyleSheet(STYLE_SLIDER)
-        font_label_value = QLabel(f"{self.config.gui_config.font_size}px")
-        font_label_value.setStyleSheet("font-size: 13px; color: #333333; min-width: 50px;")
-        font_slider.valueChanged.connect(lambda v: font_label_value.setText(f"{v}px"))
-        font_row_layout.addWidget(font_label)
-        font_row_layout.addWidget(font_slider)
-        font_row_layout.addWidget(font_label_value)
-        block1_layout.addWidget(font_row)
+        # 字体、字体大小（第0行）；字体加粗、字体倾斜（第1行）—— 使用内部 QGridLayout 保证列对齐
+        font_family_combo = QFontComboBox()
+        font_family_combo.setCurrentFont(QFont(getattr(self.config.gui_config, 'font_family', None) or "SimSun"))
+        font_family_combo.setStyleSheet(STYLE_COMBOBOX)
+        font_family_combo.setFixedWidth(88)
+        font_family_label = QLabel("字体:")
+        font_family_label.setStyleSheet(STYLE_LABEL)
+        font_size_label = QLabel("字体大小:")
+        font_size_label.setStyleSheet(STYLE_LABEL)
+        font_size_combo = QComboBox()
+        font_size_combo.setEditable(False)
+        for i in range(10, 101, 2):
+            font_size_combo.addItem(f"{i}px", i)
+        current_fs = max(10, min(100, self.config.gui_config.font_size))
+        idx_fs = font_size_combo.findData(current_fs)
+        if idx_fs < 0:
+            idx_fs = font_size_combo.findData((current_fs // 2) * 2)
+        font_size_combo.setCurrentIndex(max(0, idx_fs))
+        font_size_combo.setStyleSheet(STYLE_COMBOBOX)
+        font_size_combo.setFixedWidth(88)
+        font_bold_cb = QCheckBox("字体加粗")
+        font_bold_cb.setChecked(getattr(self.config.gui_config, 'font_bold', False))
+        font_bold_cb.setStyleSheet("font-size: 13px;")
+        font_italic_cb = QCheckBox("字体倾斜")
+        font_italic_cb.setChecked(getattr(self.config.gui_config, 'font_italic', False))
+        font_italic_cb.setStyleSheet("font-size: 13px;")
+        font_block = QWidget()
+        font_block_layout = QGridLayout(font_block)
+        font_block_layout.setContentsMargins(0, 0, 0, 0)
+        font_block_layout.setHorizontalSpacing(4)
+        font_block_layout.setVerticalSpacing(4)
+        font_block_layout.addWidget(font_family_label, 0, 0)
+        font_block_layout.addWidget(font_family_combo, 0, 1)
+        font_block_layout.addWidget(font_size_label, 0, 2)
+        font_block_layout.addWidget(font_size_combo, 0, 3)
+        font_block_layout.addWidget(font_bold_cb, 1, 0, 1, 2)
+        font_block_layout.addWidget(font_italic_cb, 1, 2, 1, 2)
+        font_block_layout.setColumnStretch(4, 1)
+        block1_layout.addWidget(font_block, 2, 0, 1, 4)
         
         # 显示时区
         from utils.timezone_names_zh import get_tz_options, iana_to_display
         timezone_options = get_tz_options()
         timezone_label = QLabel("显示时区:")
         timezone_label.setStyleSheet(STYLE_LABEL)
-        block1_layout.addWidget(timezone_label)
+        timezone_label.setMinimumWidth(80)
         timezone_combo = QComboBox()
         timezone_combo.setEditable(False)
         for display, iana_id in timezone_options:
@@ -373,23 +391,32 @@ class SettingsWindow(QDialog):
             idx = timezone_combo.findText("UTC+8 北京")
         timezone_combo.setCurrentIndex(max(0, idx))
         timezone_combo.setStyleSheet(STYLE_COMBOBOX)
-        block1_layout.addWidget(timezone_combo)
+        timezone_combo.setFixedWidth(120)
         timezone_hint = QLabel("修改时区后需重启软件生效。")
         timezone_hint.setStyleSheet(STYLE_HINT)
-        block1_layout.addWidget(timezone_hint)
+        timezone_hint.setWordWrap(True)
+        tz_row = QWidget()
+        tz_row_layout = QHBoxLayout(tz_row)
+        tz_row_layout.setContentsMargins(0, 0, 0, 0)
+        tz_row_layout.setSpacing(8)
+        tz_row_layout.addWidget(timezone_combo)
+        tz_row_layout.addWidget(timezone_hint)
+        tz_row_layout.addStretch()
+        block1_layout.addWidget(timezone_label, 4, 0)
+        block1_layout.addWidget(tz_row, 4, 1, 1, 5)
         main_layout.addWidget(block1)
-        main_layout.addSpacing(SPACING_BLOCK)
+        main_layout.addSpacing(10)
         
         # ---------- 2. 窗口 ----------
         block2 = QWidget()
         block2_layout = QVBoxLayout(block2)
         block2_layout.setContentsMargins(0, 0, 0, 0)
-        block2_layout.setSpacing(12)
+        block2_layout.setSpacing(6)
         sec2 = QLabel("窗口")
-        sec2.setStyleSheet(STYLE_SECTION_TITLE)
+        sec2.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
         block2_layout.addWidget(sec2)
         size_row = QHBoxLayout()
-        size_row.setSpacing(15)
+        size_row.setSpacing(10)
         width_label = QLabel("窗口宽度:")
         width_label.setStyleSheet(STYLE_LABEL)
         width_spin = QSpinBox()
@@ -410,53 +437,58 @@ class SettingsWindow(QDialog):
         size_row.addWidget(height_spin)
         size_row.addStretch()
         block2_layout.addLayout(size_row)
-        opacity_label = QLabel("窗口透明度:")
-        opacity_label.setStyleSheet(STYLE_LABEL)
-        block2_layout.addWidget(opacity_label)
         opacity_row = QWidget()
         opacity_row_layout = QHBoxLayout(opacity_row)
         opacity_row_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_row_layout.setSpacing(8)
+        opacity_label = QLabel("窗口透明度:")
+        opacity_label.setStyleSheet(STYLE_LABEL)
+        opacity_label.setMinimumWidth(80)
+        opacity_row_layout.addWidget(opacity_label)
         opacity_slider = QSlider(Qt.Horizontal)
         opacity_slider.setMinimum(1)
         opacity_slider.setMaximum(10)
         opacity_slider.setValue(int(self.config.gui_config.opacity * 10))
         opacity_slider.setStyleSheet(STYLE_SLIDER)
+        opacity_slider.setFixedWidth(240)
         opacity_label_value = QLabel(f"{self.config.gui_config.opacity:.1f}")
         opacity_label_value.setStyleSheet("font-size: 13px; color: #333333; min-width: 40px;")
         opacity_slider.valueChanged.connect(lambda v: opacity_label_value.setText(f"{v / 10.0:.1f}"))
         opacity_row_layout.addWidget(opacity_slider)
         opacity_row_layout.addWidget(opacity_label_value)
+        opacity_row_layout.addStretch()
         block2_layout.addWidget(opacity_row)
         main_layout.addWidget(block2)
-        main_layout.addSpacing(SPACING_BLOCK)
+        main_layout.addSpacing(10)
         
         # ---------- 3. 性能与渲染 ----------
         block3 = QWidget()
         block3_layout = QVBoxLayout(block3)
         block3_layout.setContentsMargins(0, 0, 0, 0)
-        block3_layout.setSpacing(12)
+        block3_layout.setSpacing(6)
         sec3 = QLabel("性能与渲染")
-        sec3.setStyleSheet(STYLE_SECTION_TITLE)
+        sec3.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
         block3_layout.addWidget(sec3)
         render_row = QHBoxLayout()
         cpu_radio = QRadioButton("CPU 渲染（软件）")
-        gpu_radio = QRadioButton("GPU 渲染（OpenGL）")
+        opengl_radio = QRadioButton("GPU 渲染（OpenGL）")
         cpu_radio.setStyleSheet(STYLE_LABEL)
-        gpu_radio.setStyleSheet(STYLE_LABEL)
-        if self.config.gui_config.use_gpu_rendering:
-            gpu_radio.setChecked(True)
+        opengl_radio.setStyleSheet(STYLE_LABEL)
+        backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
+        if backend == "opengl":
+            opengl_radio.setChecked(True)
         else:
             cpu_radio.setChecked(True)
         cpu_radio.setToolTip("兼容性更好，修改后需重启软件生效")
-        gpu_radio.setToolTip("硬件加速，修改后需重启软件生效")
+        opengl_radio.setToolTip("硬件加速（OpenGL），修改后需重启软件生效")
         render_row.addWidget(cpu_radio)
-        render_row.addWidget(gpu_radio)
+        render_row.addWidget(opengl_radio)
         render_row.addStretch()
         block3_layout.addLayout(render_row)
         perf_row = QWidget()
         perf_row_layout = QHBoxLayout(perf_row)
         perf_row_layout.setContentsMargins(0, 0, 0, 0)
-        perf_row_layout.setSpacing(16)  # VSync 与目标帧率组之间的间距
+        perf_row_layout.setSpacing(12)
         vsync_checkbox = QCheckBox("启用垂直同步")
         vsync_checkbox.setChecked(self.config.gui_config.vsync_enabled)
         vsync_checkbox.setStyleSheet(STYLE_LABEL)
@@ -481,15 +513,15 @@ class SettingsWindow(QDialog):
         perf_row_layout.addStretch()
         block3_layout.addWidget(perf_row)
         main_layout.addWidget(block3)
-        main_layout.addSpacing(SPACING_BLOCK)
+        main_layout.addSpacing(10)
         
         # ---------- 4. 颜色 ----------
         block4 = QWidget()
         block4_layout = QVBoxLayout(block4)
         block4_layout.setContentsMargins(0, 0, 0, 0)
-        block4_layout.setSpacing(12)
+        block4_layout.setSpacing(2)
         sec4 = QLabel("颜色")
-        sec4.setStyleSheet(STYLE_SECTION_TITLE)
+        sec4.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
         block4_layout.addWidget(sec4)
         report_color_value = self.config.message_config.report_color.upper()
         warning_color_value = self.config.message_config.warning_color.upper()
@@ -502,7 +534,7 @@ class SettingsWindow(QDialog):
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
-            row_layout.setSpacing(10)
+            row_layout.setSpacing(8)
             lbl = QLabel(label_text)
             lbl.setStyleSheet("font-size: 13px; color: #555555;")
             lbl.setMinimumWidth(120)  # 统一标签宽度，三行颜色预览/色值/按钮纵向对齐
@@ -514,7 +546,7 @@ class SettingsWindow(QDialog):
             value_label = QLabel(color_value)
             value_label.setMinimumWidth(80)
             value_label.setStyleSheet("font-size: 13px; color: #333333; font-family: monospace;")
-            row_layout.addWidget(value_label)
+            # value_label 不加入 layout，仅保留引用供颜色更新使用
             btn = QPushButton("修改颜色")
             btn.setStyleSheet("font-size: 13px; padding: 4px 10px;")
             btn.clicked.connect(lambda: self._open_color_picker(color_type))
@@ -531,23 +563,25 @@ class SettingsWindow(QDialog):
         self.warning_color_preview, self.warning_color_label = _add_color_row(block4_layout, "地震预警颜色:", warning_color_value, 'warning')
         self.custom_text_color_preview, self.custom_text_color_label = _add_color_row(block4_layout, "自定义文本颜色:", custom_text_color_value, 'custom_text')
         main_layout.addWidget(block4)
-        main_layout.addSpacing(SPACING_BLOCK)
+        main_layout.addSpacing(10)
         
         # ---------- 5. 自定义文本 ----------
         block5 = QWidget()
         block5_layout = QVBoxLayout(block5)
         block5_layout.setContentsMargins(0, 0, 0, 0)
-        block5_layout.setSpacing(12)
+        block5_layout.setSpacing(6)
         sec5 = QLabel("自定义文本")
-        sec5.setStyleSheet(STYLE_SECTION_TITLE)
+        sec5.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
         block5_layout.addWidget(sec5)
         custom_hint = QLabel("在「数据源」页选择「自定义文本」后，非预警时将显示此处编辑的文本。修改并保存后立即生效，无需重启。")
         custom_hint.setStyleSheet(STYLE_HINT)
         custom_hint.setWordWrap(True)
+        custom_hint.setMaximumWidth(360)
         block5_layout.addWidget(custom_hint)
         self.custom_text_edit = QPlainTextEdit()
         self.custom_text_edit.setPlaceholderText("输入要滚动显示的自定义文本...")
         self.custom_text_edit.setMinimumHeight(100)
+        self.custom_text_edit.setMaximumWidth(360)
         self.custom_text_edit.setPlainText(self.config.message_config.custom_text or "")
         block5_layout.addWidget(self.custom_text_edit)
         main_layout.addWidget(block5)
@@ -555,7 +589,10 @@ class SettingsWindow(QDialog):
         # 保存变量引用（供 _save_appearance_settings 使用）
         self.display_vars = {
             'speed': speed_slider,
-            'font_size': font_slider,
+            'font_size': font_size_combo,
+            'font_family': font_family_combo,
+            'font_bold': font_bold_cb,
+            'font_italic': font_italic_cb,
             'width': width_spin,
             'height': height_spin,
             'opacity': opacity_slider,
@@ -563,14 +600,14 @@ class SettingsWindow(QDialog):
             'target_fps': fps_spin,
             'timezone': timezone_combo,
         }
-        self.render_vars = {'use_gpu_rendering': gpu_radio}
+        self.render_vars = {'cpu_radio': cpu_radio, 'opengl_radio': opengl_radio}
         
         main_layout.addStretch()
         
         # 保存按钮
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 10, 0, 0)
+        button_layout.setContentsMargins(0, 6, 0, 0)
         button_layout.addStretch()
         save_btn = QPushButton("保存")
         save_btn.setMinimumWidth(120)
@@ -1540,19 +1577,29 @@ class SettingsWindow(QDialog):
     def _save_display_settings(self):
         """保存显示设置"""
         try:
-            required = ('timezone', 'speed', 'font_size', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
             if not all(k in self.display_vars for k in required):
                 logger.warning("显示设置未就绪，请先打开「外观与显示」页")
                 return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
             if new_timezone is None:
-                new_timezone = self.display_vars['timezone'].currentText().strip()
+                display_text = self.display_vars['timezone'].currentText().strip()
+                from utils.timezone_names_zh import get_tz_options
+                for disp, iana_id in get_tz_options():
+                    if disp == display_text:
+                        new_timezone = iana_id
+                        break
+                else:
+                    new_timezone = old_timezone
             timezone_changed = (old_timezone != new_timezone)
             
             # 更新GUI配置
             self.config.gui_config.text_speed = self.display_vars['speed'].value() / 10.0
-            self.config.gui_config.font_size = self.display_vars['font_size'].value()
+            self.config.gui_config.font_size = self.display_vars['font_size'].currentData()
+            self.config.gui_config.font_family = self.display_vars['font_family'].currentFont().family()
+            self.config.gui_config.font_bold = self.display_vars['font_bold'].isChecked()
+            self.config.gui_config.font_italic = self.display_vars['font_italic'].isChecked()
             self.config.gui_config.window_width = self.display_vars['width'].value()
             self.config.gui_config.window_height = self.display_vars['height'].value()
             self.config.gui_config.opacity = self.display_vars['opacity'].value() / 10.0
@@ -1579,10 +1626,16 @@ class SettingsWindow(QDialog):
     def _save_render_settings(self):
         """保存渲染方式设置（仅渲染方式页使用）"""
         try:
-            if 'use_gpu_rendering' not in self.render_vars:
-                logger.warning("渲染设置未就绪，请先打开「渲染方式」页")
+            render_required = ('cpu_radio', 'opengl_radio')
+            if not all(k in self.render_vars for k in render_required):
+                logger.warning("渲染设置未就绪，请先打开「外观与显示」页")
                 return
-            self.config.gui_config.use_gpu_rendering = self.render_vars['use_gpu_rendering'].isChecked()
+            if self.render_vars['opengl_radio'].isChecked():
+                new_backend = "opengl"
+            else:
+                new_backend = "cpu"
+            self.config.gui_config.render_backend = new_backend
+            self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
             self.config.save_config()
             self.config._notify_config_changed()
             msg = QMessageBox(self)
@@ -1624,29 +1677,44 @@ class SettingsWindow(QDialog):
     def _save_appearance_settings(self):
         """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
         try:
-            display_required = ('timezone', 'speed', 'font_size', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
-            if not all(k in self.display_vars for k in display_required) or 'use_gpu_rendering' not in self.render_vars:
+            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            render_required = ('cpu_radio', 'opengl_radio')
+            if not all(k in self.display_vars for k in display_required) or not all(k in self.render_vars for k in render_required):
                 logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
                 return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
             if new_timezone is None:
-                new_timezone = self.display_vars['timezone'].currentText().strip()
+                display_text = self.display_vars['timezone'].currentText().strip()
+                from utils.timezone_names_zh import get_tz_options
+                for disp, iana_id in get_tz_options():
+                    if disp == display_text:
+                        new_timezone = iana_id
+                        break
+                else:
+                    new_timezone = old_timezone
             timezone_changed = (old_timezone != new_timezone)
-            old_gpu = self.config.gui_config.use_gpu_rendering
-            new_gpu = self.render_vars['use_gpu_rendering'].isChecked()
-            render_changed = (old_gpu != new_gpu)
+            old_backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
+            if self.render_vars['opengl_radio'].isChecked():
+                new_backend = "opengl"
+            else:
+                new_backend = "cpu"
+            render_changed = (old_backend != new_backend)
             
             # 写入 gui_config（显示 + 渲染）
             self.config.gui_config.text_speed = self.display_vars['speed'].value() / 10.0
-            self.config.gui_config.font_size = self.display_vars['font_size'].value()
+            self.config.gui_config.font_size = self.display_vars['font_size'].currentData()
+            self.config.gui_config.font_family = self.display_vars['font_family'].currentFont().family()
+            self.config.gui_config.font_bold = self.display_vars['font_bold'].isChecked()
+            self.config.gui_config.font_italic = self.display_vars['font_italic'].isChecked()
             self.config.gui_config.window_width = self.display_vars['width'].value()
             self.config.gui_config.window_height = self.display_vars['height'].value()
             self.config.gui_config.opacity = self.display_vars['opacity'].value() / 10.0
             self.config.gui_config.vsync_enabled = self.display_vars['vsync_enabled'].isChecked()
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
-            self.config.gui_config.use_gpu_rendering = new_gpu
+            self.config.gui_config.render_backend = new_backend
+            self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
             
             # 写入 message_config（颜色 + 自定义文本）
             self.config.message_config.report_color = self.current_report_color
