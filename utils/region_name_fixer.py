@@ -70,8 +70,23 @@ class RegionNameFixer:
         
         logger.info(f"正在加载区域地名修正文件: {self.json_file_path}")
         
-        with open(self.json_file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        try:
+            # 先检查文件是否为空，避免空文件导致 JSONDecodeError 噪音
+            try:
+                if self.json_file_path.stat().st_size == 0:
+                    logger.warning(f"区域地名修正文件为空，将忽略该文件: {self.json_file_path}")
+                    return
+            except OSError as e:
+                logger.warning(f"无法获取区域地名修正文件大小，将直接尝试解析: {e}")
+            
+            with open(self.json_file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(f"区域地名修正文件内容不是合法 JSON，将忽略该文件: {self.json_file_path}")
+            return
+        except Exception as e:
+            logger.error(f"加载区域地名修正文件失败: {e}")
+            return
         
         # 提取regions数组
         if isinstance(data, dict) and 'regions' in data:

@@ -5,18 +5,65 @@
 使用QPainter实现高性能滚动，自动处理刷新，解决窗口静止时卡顿问题
 """
 
-from PyQt5.QtWidgets import QOpenGLWidget, QWidget
-from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer
-from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, QSurfaceFormat, QOpenGLContext
+from PyQt5.QtWidgets import QOpenGLWidget, QWidget, QApplication
+from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer, QThread
+from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, QSurfaceFormat, QOpenGLContext, QFontDatabase
 from collections import OrderedDict
 from typing import Optional, Dict, Tuple, Any
 from pathlib import Path
 import threading
 import time
+import urllib.request
+import ssl
 
 from utils.logger import get_logger
 
 logger = get_logger()
+
+
+# 中文名 -> 英文系统名，用于 exactMatch 时系统仅注册英文名（如 KaiTi）的情况
+FONT_FAMILY_ALIASES = {
+    "楷体": "KaiTi",
+    "黑体": "SimHei",
+    "仿宋": "FangSong",
+    "微软雅黑": "Microsoft YaHei",
+}
+
+
+def _resolve_font_family(family_name: str, point_size: int) -> str:
+    """
+    解析字体族名：先尝试别名映射，再尝试前缀/子串变体；仅当请求为宋体/SimSun 且仍无法匹配时才回退到宋体。
+    返回最终应使用的 family 字符串。
+    """
+    if not family_name or not family_name.strip():
+        return "SimSun"
+    family_name = family_name.strip()
+    test_font = QFont(family_name, point_size)
+    if test_font.exactMatch():
+        return family_name
+    # 尝试中文 -> 英文别名
+    if family_name in FONT_FAMILY_ALIASES:
+        alias = FONT_FAMILY_ALIASES[family_name]
+        test_font.setFamily(alias)
+        if test_font.exactMatch():
+            logger.debug(f"字体解析: 请求「{family_name}」通过别名「{alias}」匹配")
+            return alias
+    # 尝试前缀/子串变体（如 楷体_GB2312、华文琥珀 中）
+    db = QFontDatabase()
+    for f in db.families():
+        if f == family_name:
+            continue
+        if f.startswith(family_name) or family_name.startswith(f):
+            test_font.setFamily(f)
+            if test_font.exactMatch():
+                logger.debug(f"字体解析: 请求「{family_name}」通过变体「{f}」匹配")
+                return f
+    # 仅当用户选的就是宋体/SimSun 时才回退到宋体
+    if family_name in ("宋体", "SimSun"):
+        logger.warning("字体解析: 请求宋体/SimSun 无法 exactMatch，已回退到宋体")
+        return "宋体"
+    # 其他情况保持请求名，交给 Qt 回退
+    return family_name
 
 
 class _ScrollingTextMixin:
@@ -35,12 +82,15 @@ class _ScrollingTextMixin:
         self.current_image = None
         self.current_text_image = None
         font_family = getattr(config.gui_config, 'font_family', None) or "SimSun"
-        self.font = QFont(font_family, config.gui_config.font_size)
-        if not self.font.exactMatch():
-            self.font = QFont("宋体", config.gui_config.font_size)
+        resolved_family = _resolve_font_family(font_family, config.gui_config.font_size)
+        self.font = QFont(resolved_family, config.gui_config.font_size)
         self.font.setBold(getattr(config.gui_config, 'font_bold', False))
         self.font.setItalic(getattr(config.gui_config, 'font_italic', False))
         self.font.setStyleStrategy(QFont.PreferAntialias)
+        if hasattr(QFont, 'PreferNoHinting'):
+            self.font.setHintingPreference(QFont.PreferNoHinting)
+        elif hasattr(QFont, 'HintingPreference') and hasattr(QFont.HintingPreference, 'PreferNoHinting'):
+            self.font.setHintingPreference(QFont.HintingPreference.PreferNoHinting)
         logger.info(f"使用字体: {self.font.family()}, 大小: {config.gui_config.font_size}pt, 加粗: {self.font.bold()}, 倾斜: {self.font.italic()}")
         self._image_cache: Dict[str, QPixmap] = {}
         self._image_cache_lock = threading.Lock()
@@ -423,10 +473,10 @@ class _ScrollingTextMixin:
                 or self.font.italic() != new_font_italic
             )
             if font_changed:
+                logger.debug(f"字体热更新: 请求字体「{new_font_family}」")
+                resolved_family = _resolve_font_family(new_font_family, new_font_size)
                 self.font.setPointSize(new_font_size)
-                self.font.setFamily(new_font_family)
-                if not self.font.exactMatch():
-                    self.font.setFamily("宋体")
+                self.font.setFamily(resolved_family)
                 self.font.setBold(new_font_bold)
                 self.font.setItalic(new_font_italic)
                 self.font.setStyleStrategy(QFont.PreferAntialias)
@@ -489,33 +539,130 @@ class _ScrollingTextMixin:
         """重置文本位置到右侧（供 ScrollingText / ScrollingTextCPU 共用）"""
         self.x_position = float(self.width() if self.width() > 1 else self.config.gui_config.window_width)
 
+    def _is_image_url(self, image_path: str) -> bool:
+        """判断是否为远程图片 URL"""
+        return isinstance(image_path, str) and image_path.startswith(('http://', 'https://'))
+
+    def _fetch_image_bytes_from_url(self, url: str, timeout: int = 12, max_retries: int = 3, retry_delay: float = 2.0) -> Optional[bytes]:
+        """
+        带重试的远程图片拉取函数：用于 NMC 等气象预警图片的预加载与展示加载。
+        使用与现有逻辑一致的 User-Agent 与 SSL 配置，仅在网络/服务抖动时进行有限次重试。
+        """
+        if not url or not isinstance(url, str):
+            return None
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+                    return resp.read()
+            except Exception as e:  # 包含超时、连接错误、HTTPError 等
+                last_exc = e
+                logger.warning(
+                    f"从 URL 加载图片失败(第{attempt}次): {url[:60]}..., {type(e).__name__}: {e}"
+                )
+                if attempt < max_retries:
+                    try:
+                        time.sleep(retry_delay)
+                    except Exception:
+                        pass
+        if last_exc is not None:
+            logger.warning(
+                f"从 URL 加载图片失败(已重试 {max_retries} 次): {url[:60]}..., {type(last_exc).__name__}: {last_exc}"
+            )
+        return None
+
+    def preload_image_url(self, url: str) -> None:
+        """
+        预加载远程图片 URL 到缓存（仅写入缓存，不刷新界面）。
+        收到气象预警且图片为 NMC URL 时调用，轮播到该条时即可命中缓存并立即显示图标。
+        """
+        if not self._is_image_url(url):
+            return
+
+        def start():
+            window_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
+            cache_key = f"{url}_{window_height}"
+            with self._image_cache_lock:
+                if cache_key in self._image_cache:
+                    return
+                for offset in range(-20, 21, 5):
+                    h = window_height + offset
+                    if h > 0 and f"{url}_{h}" in self._image_cache:
+                        return
+            logger.info(f"气象预警 NMC 图片预加载已启动: {url[:60]}...")
+            threading.Thread(
+                target=self._do_preload_url,
+                args=(url, window_height),
+                daemon=True,
+                name="PreloadImageUrl"
+            ).start()
+
+        app = QApplication.instance()
+        if app and QThread.currentThread() == app.thread():
+            start()
+        else:
+            QTimer.singleShot(0, start)
+
+    def _do_preload_url(self, url: str, window_height: int) -> None:
+        """后台线程：请求 URL、缩放、写入 _image_cache，不刷新界面。"""
+        try:
+            data = self._fetch_image_bytes_from_url(url, timeout=12, max_retries=3, retry_delay=2.0)
+            if not data:
+                logger.warning(f"气象预警图片预加载失败(已重试 3 次): {url}")
+                return
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(data):
+                logger.warning(f"预加载图片数据解析失败: {url}")
+                return
+            target_height = int(window_height * 0.8)
+            if pixmap.height() > target_height:
+                ratio = target_height / pixmap.height()
+                new_width = int(pixmap.width() * ratio)
+                pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            cache_key = f"{url}_{window_height}"
+            with self._image_cache_lock:
+                self._image_cache[cache_key] = pixmap
+                if len(self._image_cache) > 200:
+                    oldest_key = next(iter(self._image_cache))
+                    del self._image_cache[oldest_key]
+            logger.info(f"气象预警图片预加载完成: {url}")
+        except Exception as e:
+            logger.warning(f"气象预警图片预加载失败: {url}, {e}")
+
     def _load_image_async(self, image_path: str, task_id: int):
-        """异步加载图片"""
+        """异步加载图片（支持本地路径或 http(s) URL）"""
         try:
             logger.info(f"开始异步加载图片: {image_path}, task_id: {task_id}")
-            
-            img_path = Path(image_path)
-            if not img_path.exists():
-                logger.error(f"图片文件不存在: {image_path}")
-                self.set_loading(False)
-                return
-            
-            # 检查缓存（使用绝对路径，确保与预加载时的格式一致）
-            img_path_resolved = str(img_path.resolve())
-            current_height = self.height()
+
+            is_url = self._is_image_url(image_path)
+            if is_url:
+                img_path_resolved = image_path
+            else:
+                img_path = Path(image_path)
+                if not img_path.exists():
+                    logger.error(f"图片文件不存在: {image_path}")
+                    self.set_loading(False)
+                    return
+                img_path_resolved = str(img_path.resolve())
+
+            # 与预加载一致：高度不足时用 config，确保能命中预加载写入的 key
+            current_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
             cache_key = f"{img_path_resolved}_{current_height}"
-            
-            # 尝试多个可能的高度（因为窗口高度可能变化）
+
+            # 检查缓存
             found_pixmap = None
             found_key = None
             with self._image_cache_lock:
-                # 先检查精确匹配
                 if cache_key in self._image_cache:
                     found_pixmap = self._image_cache[cache_key]
                     found_key = cache_key
                 else:
-                    # 尝试查找附近高度的缓存（±20px范围内）
-                    for offset in range(-20, 21, 5):  # 每5px检查一次
+                    for offset in range(-20, 21, 5):
                         test_height = current_height + offset
                         if test_height > 0:
                             test_key = f"{img_path_resolved}_{test_height}"
@@ -524,48 +671,77 @@ class _ScrollingTextMixin:
                                 found_key = test_key
                                 logger.debug(f"找到附近高度的缓存: {test_key} (当前高度: {current_height})")
                                 break
-            
+
             if found_pixmap:
                 logger.info(f"从缓存中获取图片: {found_key}, task_id: {task_id}, current_task_id: {self._current_load_task_id}")
-                # 在主线程中更新显示（使用QTimer确保在主线程中执行）
                 from PyQt5.QtCore import QTimer
                 QTimer.singleShot(0, lambda: self._update_image_display(found_pixmap, task_id))
                 return
-            
-            # 直接使用QPixmap加载图片（不转换格式）
-            pixmap = QPixmap(image_path)
-            if pixmap.isNull():
-                logger.error(f"图片加载失败: {image_path}")
-                self.set_loading(False)
-                return
-            
+
+            # 加载图片：URL 用 urllib + loadFromData，本地用 QPixmap(path)
+            if is_url:
+                data = self._fetch_image_bytes_from_url(image_path, timeout=12, max_retries=3, retry_delay=2.0)
+                if not data:
+                    fallback = getattr(self, '_fallback_image_path', None)
+                    if fallback and fallback != image_path:
+                        try:
+                            fp = Path(fallback)
+                            if fp.exists():
+                                pixmap = QPixmap(fallback)
+                                if not pixmap.isNull():
+                                    logger.info(f"NMC 图片无法加载，已回退至本地图片: {fallback}")
+                                    # 缩放、缓存、更新显示（与下方本地分支一致）
+                                    h = self.height() if self.height() > 10 else self.config.gui_config.window_height
+                                    target_height = int(h * 0.8)
+                                    if pixmap.height() > target_height:
+                                        ratio = target_height / pixmap.height()
+                                        new_width = int(pixmap.width() * ratio)
+                                        pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                                    cache_key_fb = f"{str(fp.resolve())}_{self.height()}"
+                                    with self._image_cache_lock:
+                                        self._image_cache[cache_key_fb] = pixmap
+                                        if len(self._image_cache) > 200:
+                                            oldest_key = next(iter(self._image_cache))
+                                            del self._image_cache[oldest_key]
+                                    QTimer.singleShot(0, lambda: self._update_image_display(pixmap, task_id))
+                                    return
+                        except Exception as e:
+                            logger.debug(f"回退本地图片失败: {e}")
+                    logger.error(f"从 URL 加载图片失败(已重试 3 次): {image_path}")
+                    self.set_loading(False)
+                    return
+                pixmap = QPixmap()
+                if not pixmap.loadFromData(data):
+                    logger.error(f"图片数据加载失败: {image_path}")
+                    self.set_loading(False)
+                    return
+            else:
+                pixmap = QPixmap(image_path)
+                if pixmap.isNull():
+                    logger.error(f"图片加载失败: {image_path}")
+                    self.set_loading(False)
+                    return
+
             logger.debug(f"图片加载成功: {pixmap.width()}x{pixmap.height()}")
-            
-            # 如果需要，调整大小
+
             target_height = int(self.height() * 0.8)
             if pixmap.height() > target_height:
                 ratio = target_height / pixmap.height()
                 new_width = int(pixmap.width() * ratio)
                 pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 logger.debug(f"图片已缩放: {pixmap.width()}x{pixmap.height()}")
-            
-            # 缓存图片（使用绝对路径，确保与预加载时的格式一致）
+
             cache_key = f"{img_path_resolved}_{self.height()}"
             with self._image_cache_lock:
                 self._image_cache[cache_key] = pixmap
                 logger.debug(f"图片已缓存: {cache_key}")
-                # 不限制预加载图片的缓存大小
-                # 只限制非预加载图片的缓存（通过检查缓存大小，但预加载的图片应该已经在缓存中了）
-                if len(self._image_cache) > 200:  # 增加缓存大小限制，因为现在有预加载的图片
-                    # 只删除非预加载的图片（如果缓存键不包含预加载的路径）
-                    # 这里简化处理，直接限制总缓存大小
+                if len(self._image_cache) > 200:
                     oldest_key = next(iter(self._image_cache))
                     del self._image_cache[oldest_key]
-            
-            # 在主线程中更新显示（使用QTimer确保在主线程中执行）
+
             from PyQt5.QtCore import QTimer
             QTimer.singleShot(0, lambda: self._update_image_display(pixmap, task_id))
-            
+
         except Exception as e:
             logger.error(f"异步加载图片失败: {e}")
             self.set_loading(False)
@@ -588,7 +764,7 @@ class _ScrollingTextMixin:
             logger.error(f"更新图片显示失败: {e}")
             self.set_loading(False)
     
-    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None):
+    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None, fallback_image_path: Optional[str] = None):
         """
         更新文本和颜色，可选显示图片（异步加载）
         
@@ -599,6 +775,7 @@ class _ScrollingTextMixin:
             force: 是否强制更新（即使正在滚动），用于预警消息
             message_type: 消息类型（可选），用于配置热修改时重新获取颜色
             parsed_data: 解析后的数据字典（可选），用于气象预警颜色计算和热修改
+            fallback_image_path: 远程图片完全加载失败时回退的本地路径（可选，用于气象预警）
         """
         # 如果正在滚动且不是强制更新，则忽略
         with self._scrolling_lock:
@@ -624,6 +801,7 @@ class _ScrollingTextMixin:
         self.current_message_type = message_type  # 存储消息类型
         self.current_parsed_data = parsed_data  # 存储解析数据（用于热修改时重新计算气象预警颜色）
         self.current_image_path = image_path
+        self._fallback_image_path = fallback_image_path  # 远程加载失败时回退的本地路径
         
         # 调试日志
         logger.info(f"更新文本: {text[:50]}..., 颜色: {color}, 图片路径: {image_path if image_path else '无'}, 窗口尺寸: {self.width()}x{self.height()}, 初始X位置: {self.width() if self.width() > 1 else self.config.gui_config.window_width}")
@@ -657,18 +835,20 @@ class _ScrollingTextMixin:
             self.set_loading(False)
         else:
             # 先检查缓存，如果图片在缓存中，立即显示
-            # 直接检查缓存，避免文件系统操作导致的阻塞
-            # 如果缓存中没有，异步加载会处理文件不存在的情况
+            # URL 直接用作 cache key；本地路径使用 resolve 后的绝对路径
             try:
-                img_path = Path(image_path)
-                # 尝试解析路径（使用try-except避免阻塞）
-                try:
-                    img_path_resolved = str(img_path.resolve())
-                except (OSError, PermissionError) as e:
-                    logger.debug(f"解析图片路径时出错（非阻塞）: {e}")
-                    img_path_resolved = str(image_path)  # 使用原始路径
-                
-                current_height = self.height()
+                if self._is_image_url(image_path):
+                    img_path_resolved = image_path
+                else:
+                    img_path = Path(image_path)
+                    try:
+                        img_path_resolved = str(img_path.resolve())
+                    except (OSError, PermissionError) as e:
+                        logger.debug(f"解析图片路径时出错（非阻塞）: {e}")
+                        img_path_resolved = str(image_path)
+
+                # 与预加载一致：高度不足时用 config，确保能命中预加载写入的 key
+                current_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
                 cache_key = f"{img_path_resolved}_{current_height}"
                 
                 # 尝试多个可能的高度（因为窗口高度可能变化）

@@ -19,6 +19,9 @@ from utils import timezone_utils
 
 logger = get_logger()
 
+# 中国气象局预警图标基础 URL，可根据 type 编码查询预警图标
+NMC_ALARM_IMAGE_BASE = "https://image.nmc.cn/assets/img/alarm"
+
 
 class MessageProcessor:
     """消息处理器"""
@@ -421,24 +424,34 @@ class MessageProcessor:
     
     def _match_weather_image(self, weather_data: Dict[str, Any]) -> Optional[str]:
         """
-        根据气象预警数据匹配图片文件路径（快速匹配，不阻塞）
-        优先从headline中匹配，如果未匹配到图片，则从description中匹配
+        根据气象预警数据匹配图片文件路径或 URL（快速匹配，不阻塞）
+        优先使用 API 的 type 字段拼出中国气象局官方图片 URL；无 type 时从 headline/description 匹配本地 jpg。
         
         Args:
-            weather_data: 气象预警数据字典，包含 'headline', 'title', 'description' 等字段
+            weather_data: 气象预警数据字典，包含 'type', 'headline', 'title', 'description' 等字段
             
         Returns:
-            匹配的图片文件路径（字符串），如果未找到则返回None
+            图片 URL、本地文件路径字符串，或 None
         """
         try:
-            # 从headline或title中提取预警信息
+            # 优先从 type 字段获取预警图标（中国气象局官方编码，如 p0005003）
+            alarm_type = weather_data.get('type')
+            if alarm_type and isinstance(alarm_type, str) and alarm_type.strip():
+                type_str = alarm_type.strip()
+                if re.match(r'^p[a-zA-Z0-9]+$', type_str):
+                    url = f"{NMC_ALARM_IMAGE_BASE}/{type_str}.png"
+                    logger.info(f"使用 type 字段获取气象预警图片: {url}")
+                    return url
+                logger.debug(f"type 格式不符合预期，回退本地匹配: {type_str!r}")
+
+            # 回退：从 headline 或 title 中提取预警信息匹配本地 jpg
             headline = weather_data.get('headline', '') or weather_data.get('title', '')
             if not headline:
-                logger.warning("气象预警数据中没有headline或title字段")
+                logger.warning("气象预警数据中没有 type 且没有 headline/title 字段")
                 logger.debug(f"weather_data keys: {list(weather_data.keys())}")
                 return None
-            
-            logger.info(f"尝试匹配气象预警图片，headline: {headline}")
+
+            logger.info(f"尝试匹配气象预警图片（本地），headline: {headline}")
             
             # 检查图片目录是否存在
             if not self.weather_images_dir.exists():
@@ -597,7 +610,7 @@ class MessageProcessor:
     
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:
         """
-        获取气象预警图片路径
+        获取气象预警图片路径（优先 NMC URL，无 type 时匹配本地 jpg）
         
         Args:
             parsed_data: 解析后的数据字典
@@ -610,6 +623,75 @@ class MessageProcessor:
         
         raw_data = parsed_data.get('raw_data', {})
         return self._match_weather_image(raw_data)
+
+    def get_weather_image_path_local(self, parsed_data: Dict[str, Any]) -> Optional[str]:
+        """
+        仅根据气象预警数据匹配本地图片路径（不请求 NMC URL），用于远程图片完全加载失败时的回退。
+        
+        Args:
+            parsed_data: 解析后的数据字典（须含 raw_data 中的 headline/title/description）
+            
+        Returns:
+            本地 jpg 路径字符串，若无法匹配则返回 None
+        """
+        if parsed_data.get('type') != 'weather':
+            return None
+        raw_data = parsed_data.get('raw_data', {})
+        return self._match_weather_image_local_only(raw_data)
+
+    def _match_weather_image_local_only(self, weather_data: Dict[str, Any]) -> Optional[str]:
+        """
+        仅从 headline/description 匹配本地气象预警 jpg，不使用 type 拼 NMC URL。
+        供远程加载失败时回退使用。
+        """
+        try:
+            headline = weather_data.get('headline', '') or weather_data.get('title', '')
+            if not headline:
+                return None
+            if not self.weather_images_dir.exists():
+                return None
+            pattern = r'发布(.+?)(红色|橙色|黄色|蓝色|白色)预警'
+            match = re.search(pattern, headline)
+            warning_type = None
+            warning_color = None
+            if match:
+                warning_type = match.group(1)
+                warning_color = match.group(2)
+                image_filename = f"{warning_type}{warning_color}预警.jpg"
+                image_path = self.weather_images_dir / image_filename
+                if image_path.exists():
+                    return str(image_path)
+            if not warning_color:
+                color_match = re.search(r'(红色|橙色|黄色|蓝色|白色)预警', headline)
+                if color_match:
+                    warning_color = color_match.group(1)
+            description = weather_data.get('description', '')
+            if description:
+                desc_patterns = [
+                    r'([^，。：:；;]+?)(红色|橙色|黄色|蓝色|白色)预警',
+                    r'([^，。：:；;]+?)(?:Ⅳ级|Ⅴ级|Ⅲ级|Ⅱ级|Ⅰ级)?预警',
+                ]
+                for desc_pattern in desc_patterns:
+                    desc_match = re.search(desc_pattern, description)
+                    if desc_match:
+                        potential_type = desc_match.group(1).strip()
+                        potential_type = re.sub(r'^(高速公路|发布|预计|根据|上述地区)', '', potential_type).strip()
+                        if len(desc_match.groups()) > 1 and desc_match.group(2) in ['红色', '橙色', '黄色', '蓝色', '白色']:
+                            warning_color = desc_match.group(2)
+                        if not warning_color:
+                            color_match = re.search(r'(红色|橙色|黄色|蓝色|白色)预警', description)
+                            if color_match:
+                                warning_color = color_match.group(1)
+                        if potential_type and len(potential_type) <= 10 and warning_color:
+                            image_filename = f"{potential_type}{warning_color}预警.jpg"
+                            image_path = self.weather_images_dir / image_filename
+                            if image_path.exists():
+                                return str(image_path)
+                        break
+            return None
+        except Exception as e:
+            logger.debug(f"本地气象预警图片匹配失败: {e}")
+            return None
     
     def _format_generic_message(self, data: Dict[str, Any]) -> str:
         """格式化通用消息"""

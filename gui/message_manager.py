@@ -85,6 +85,7 @@ class MessageItem:
     message_type: str = "report"  # 消息类型：'warning'（预警）、'report'（速报）、'weather'（气象预警）
     source: str = ""
     image_path: Optional[str] = None  # 图片路径（用于气象预警）
+    fallback_image_path: Optional[str] = None  # 远程图片加载失败时回退的本地路径（气象预警）
     event_id: str = ""  # 事件唯一ID，用于识别同一条地震事件的更新
     shock_time: Optional[str] = None  # 发震时间（用于预警消息有效期检查）
     parsed_data: Optional[Dict] = None  # 解析后的数据字典（用于气象预警颜色计算和热修改）

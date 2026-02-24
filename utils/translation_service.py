@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 翻译服务模块（公开版占位）
-公开版已移除百度翻译，此类仅保留接口兼容，translate 直接返回原文。
+
+公开版未使用，仅作接口占位。公开版已移除百度翻译，此类仅保留接口兼容，
+translate 直接返回原文。
 """
 
 from typing import Optional

@@ -482,7 +482,8 @@ class MainWindow(QMainWindow):
                         next_msg.image_path,
                         force=False,
                         message_type=next_msg.message_type,
-                        parsed_data=next_msg.parsed_data
+                        parsed_data=next_msg.parsed_data,
+                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None)
                     )
                     if success:
                         self.current_display_type = 'warning'
@@ -550,7 +551,8 @@ class MainWindow(QMainWindow):
                         next_msg.image_path,
                         force=False,
                         message_type=next_msg.message_type,
-                        parsed_data=next_msg.parsed_data
+                        parsed_data=next_msg.parsed_data,
+                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None)
                     )
                     if success:
                         self.current_display_type = 'report'
@@ -591,7 +593,10 @@ class MainWindow(QMainWindow):
         try:
             # 更新消息的图片路径
             message.image_path = image_path
-            
+            # 若为 NMC URL，预加载入缓存，便于后续轮播到该条时立即显示
+            if image_path and image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
+                self.scrolling_text.preload_image_url(image_path)
+
             # 如果当前正在显示该消息，更新显示
             if (self._current_displaying_message and 
                 self._current_displaying_message.source == message.source and
@@ -605,14 +610,17 @@ class MainWindow(QMainWindow):
                     if image_path:
                         from pathlib import Path
                         try:
-                            img_path = Path(image_path)
-                            # 尝试解析路径（使用try-except避免阻塞）
-                            try:
-                                img_path_resolved = str(img_path.resolve())
-                            except (OSError, PermissionError) as e:
-                                logger.debug(f"解析图片路径时出错（非阻塞）: {e}")
-                                img_path_resolved = str(image_path)  # 使用原始路径
-                            
+                            # URL 直接用作缓存 key，不对其做 Path 解析
+                            if image_path.startswith(('http://', 'https://')):
+                                img_path_resolved = image_path
+                            else:
+                                img_path = Path(image_path)
+                                try:
+                                    img_path_resolved = str(img_path.resolve())
+                                except (OSError, PermissionError) as e:
+                                    logger.debug(f"解析图片路径时出错（非阻塞）: {e}")
+                                    img_path_resolved = str(image_path)
+
                             current_height = self.scrolling_text.height()
                             cache_key = f"{img_path_resolved}_{current_height}"
                             
@@ -692,7 +700,8 @@ class MainWindow(QMainWindow):
                     message.image_path,
                     force=force_interrupt,
                     message_type=message.message_type,
-                    parsed_data=message.parsed_data
+                    parsed_data=message.parsed_data,
+                    fallback_image_path=getattr(message, 'fallback_image_path', None)
                 )
                 if success:
                     self.current_display_type = 'warning'
@@ -789,7 +798,8 @@ class MainWindow(QMainWindow):
                     current_msg.image_path,
                     force=not is_scrolling,
                     message_type=current_msg.message_type,
-                    parsed_data=current_msg.parsed_data
+                    parsed_data=current_msg.parsed_data,
+                    fallback_image_path=getattr(current_msg, 'fallback_image_path', None)
                 )
                 if success:
                     self.current_display_type = 'report'
@@ -932,6 +942,7 @@ class MainWindow(QMainWindow):
             # 图片路径不在on_message_received中同步获取，避免阻塞主线程
             # 图片路径将在消息处理循环中异步获取
             image_path = None
+            fallback_image_path = None
             if message_type == 'weather':
                 # 尝试快速获取图片路径（如果已经在缓存中或路径已知）
                 # 如果获取失败，将在消息处理循环中异步获取
@@ -939,6 +950,8 @@ class MainWindow(QMainWindow):
                     image_path = self.message_processor.get_weather_image_path(parsed_data)
                     if image_path:
                         logger.info(f"✓ 气象预警图片路径已获取: {image_path}")
+                        if image_path.startswith(('http://', 'https://')):
+                            fallback_image_path = self.message_processor.get_weather_image_path_local(parsed_data)
                     else:
                         logger.debug(f"气象预警图片路径未找到，将在消息处理循环中异步获取")
                 except Exception as e:
@@ -966,15 +979,18 @@ class MainWindow(QMainWindow):
                 message_type=message_type,
                 source=source_name,
                 image_path=image_path,
+                fallback_image_path=fallback_image_path if message_type == 'weather' else None,
                 event_id=event_id,
                 shock_time=shock_time if message_type == 'warning' else None,  # 只保存预警消息的发震时间
                 parsed_data=parsed_data if message_type == 'weather' else None  # 只保存气象预警的parsed_data（用于热修改时重新计算颜色和异步获取图片路径）
             )
             
-            # 对于气象预警，记录图片路径信息
+            # 对于气象预警，记录图片路径信息并预加载 NMC URL 到缓存，轮播到该条时可立即显示图标
             if message_type == 'weather':
                 logger.info(f"创建气象预警MessageItem: 数据源={source_name}, 图片路径={image_path if image_path else '无'}, parsed_data={'有' if parsed_data else '无'}")
-            
+                if image_path and image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
+                    self.scrolling_text.preload_image_url(image_path)
+
             if self.message_queue.put(msg_item, block=False):
                 # 只保留“新预警”的日志；速报(report)的“收到新消息”日志不再输出
                 if message_type == 'warning':
@@ -1080,9 +1096,21 @@ class MainWindow(QMainWindow):
                                     else:
                                         logger.warning("预警缓冲区为空，无法切换显示")
                                 else:
-                                    logger.info(
-                                        f"收到 {len(warning_messages)} 条预警更新报（同一事件），已后台替换缓冲区，不打断当前正在滚动的内容"
-                                    )
+                                    # 同一事件更新报：根据「收到预警更新报立即切换」设置决定是否立即打断
+                                    if getattr(self.config.message_config, 'show_one_alert_per_received', False):
+                                        first_warning = None
+                                        with self.warning_buffer._lock:
+                                            if self.warning_buffer.buffer:
+                                                first_warning = self.warning_buffer.buffer[0]
+                                        if first_warning:
+                                            self._switch_to_warning_mode(first_warning, force_interrupt=True)
+                                            logger.info(
+                                                f"[收到预警更新报立即切换] 同事件更新报立即打断并更新: {first_warning.source} | {first_warning.text[:50]}..."
+                                            )
+                                    else:
+                                        logger.info(
+                                            f"收到 {len(warning_messages)} 条预警更新报（同一事件），已后台替换缓冲区，不打断当前正在滚动的内容"
+                                        )
                         will_update_text = True
                     
                     # 处理气象预警和速报消息（自定义文本模式下不写入 report_buffer，仅显示自定义文本）
@@ -1093,7 +1121,10 @@ class MainWindow(QMainWindow):
                         for msg in all_messages:
                             if msg.message_type == 'weather':
                                 logger.info(f"处理气象预警消息: 数据源={msg.source}, 图片路径={msg.image_path if msg.image_path else '无'}, parsed_data={'有' if msg.parsed_data else '无'}")
-                            
+                                # 主线程中再次触发 NMC URL 预加载，使 start() 立即执行，尽早开始网络请求
+                                if msg.image_path and msg.image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
+                                    self.scrolling_text.preload_image_url(msg.image_path)
+
                             if msg.message_type == 'weather' and not msg.image_path and msg.parsed_data:
                                 # 在后台线程中异步获取图片路径
                                 def get_image_path_async(msg_item=msg):

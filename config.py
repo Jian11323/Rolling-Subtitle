@@ -17,15 +17,18 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.3.3"
+APP_VERSION = "2.3.4"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.3.3
+CHANGELOG_TEXT = """版本 2.3.4
 
-1、修复字体异常加粗与抗锯齿失效问题
-2、适当调整设置页面布局
-3、新增字体修改功能"""
+1、修复字体选择框问题
+2、修复字体修改有概率不生效问题。
+3、适当调整设置页面布局。
+4、气象预警图标从 type 字段获取 NMC 官方图片并支持预加载。
+5、新增「收到预警更新报立即切换」选项。
+6、气象预警远程图片加载失败时自动回退至本地预警图片。"""
 
 @dataclass
 class GUIConfig:
@@ -88,7 +91,9 @@ class MessageConfig:
     custom_text_color: str = '#01FF00'  # 自定义文本颜色（绿色，与默认颜色一致）
     default_color: str = '#01FF00'
     weather_warning_color: str = '#FFF500'
-    
+    # 收到预警更新报立即切换：开启则同事件更新报立即打断并替换，否则仅后台替换；默认关闭
+    show_one_alert_per_received: bool = False
+
     def validate(self) -> bool:
         """验证配置有效性"""
         try:
@@ -280,6 +285,7 @@ class Config:
                 'custom_text_color': self.message_config.custom_text_color,
                 'default_color': self.message_config.default_color,
                 'weather_warning_color': self.message_config.weather_warning_color,
+                'show_one_alert_per_received': self.message_config.show_one_alert_per_received,
             },
             'WS_CONFIG': {
                 'reconnect_interval': self.ws_config.reconnect_interval,
@@ -313,11 +319,12 @@ class Config:
         return url != all_url
 
     def _get_persisted_enabled_sources(self) -> Dict[str, bool]:
-        """供保存到配置文件的 enabled_sources：仅包含 all 数据源与非 Fan Studio 数据源，不包含 Fan Studio 单项。"""
+        """供保存到配置文件的 enabled_sources：仅 all 与非 Fan Studio 数据源（不包含 Fan Studio 单项）。"""
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         return {
-            k: v for k, v in self.enabled_sources.items()
+            k: v
+            for k, v in self.enabled_sources.items()
             if k == all_url or not self._is_fanstudio_individual_url(k)
         }
 
@@ -460,16 +467,17 @@ class Config:
             raw_sources = config_data.get('ENABLED_SOURCES', {})
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
-            # 移除旧配置中可能存在的 Fan Studio 单项 URL，只保留 all 与非 fanstudio
             self.enabled_sources = {
                 k: v for k, v in raw_sources.items()
                 if k == all_url or not self._is_fanstudio_individual_url(k)
             }
             self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
 
-            # 如果配置文件中没有数据源配置，使用默认配置（仅 all + 非 Fan Studio）
+            # 如果配置文件中没有数据源配置，使用默认配置（仅 all + weather + 非 Fan Studio 单项）
+            weather_source = 'weatheralarm'
             if not self.enabled_sources:
                 self.enabled_sources = {all_url: True}
+                self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
                 self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
                 self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
                 for u in ["https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json", "https://api.wolfx.jp/fj_eew.json",
@@ -619,33 +627,19 @@ class Config:
         self.ws_config = WebSocketConfig()
         self.translation_config = TranslationConfig()
         self.log_config = LogConfig()
-        # 默认启用所有数据源（固定使用fanstudio.tech）
+        # 默认数据源：仅聚合/独立源，不加入 Fan Studio 单项 wss URL（实际只连 /all）
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
-        # 所有预警和速报数据源（对应Fan Studio预警和Fan Studio速报）
-        warning_sources = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-        report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko', 
-                         'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']
-        weather_source = 'weatheralarm'  # 气象预警
+        weather_source = 'weatheralarm'
 
-        self.enabled_sources = {all_url: True}  # all数据源始终启用
-        # 添加气象预警数据源（默认开启）
+        self.enabled_sources = {all_url: True}
         self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
-        # 添加所有预警数据源（Fan Studio预警）
-        for source in warning_sources:
-            self.enabled_sources[f"wss://ws.{base_domain}/{source}"] = True
-        # 添加所有速报数据源（Fan Studio速报）
-        for source in report_sources:
-            self.enabled_sources[f"wss://ws.{base_domain}/{source}"] = True
-        # 添加HTTP数据源
-        self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True  # 日本气象厅地震情报
-        self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True  # 日本气象厅海啸预报
-        # Wolfx HTTP（默认关闭）
+        self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
+        self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
         for u in ["https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json", "https://api.wolfx.jp/fj_eew.json",
                   "https://api.wolfx.jp/cenc_eew.json", "https://api.wolfx.jp/cwa_eew.json",
                   "https://api.wolfx.jp/cenc_eqlist.json", "https://api.wolfx.jp/jma_eqlist.json"]:
             self.enabled_sources[u] = False
-        # Wolfx / NIED WebSocket（默认关闭）
         self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = False
         for u in ["wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
                   "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
@@ -653,22 +647,14 @@ class Config:
             self.enabled_sources[u] = False
         self.enabled_sources["wss://sismotide.top/nied"] = False
 
-        # 提取WebSocket URL（只包含all数据源和其他非fanstudio数据源）
-        ws_urls = []
-        # all数据源必须包含
-        ws_urls.append(all_url)
-        logger.debug(f"已添加all数据源到ws_urls: {all_url}")
-        
-        # 添加其他非fanstudio数据源
+        ws_urls = [all_url]
         for url in self.enabled_sources.keys():
             if url.startswith(('ws://', 'wss://')) and url != all_url:
                 if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
                     ws_urls.append(url)
-                    logger.debug(f"已添加非fanstudio数据源到ws_urls: {url}")
-        
         self.ws_urls = ws_urls
         self.custom_data_source_url = ""
-        logger.info(f"已应用默认配置，默认启用 {len(self.ws_urls)} 个WebSocket数据源（Fan Studio All + 默认数据源）: {self.ws_urls}")
+        logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
     
     def update_enabled_sources(self, sources: Dict[str, bool]):
         """更新启用的数据源"""
@@ -727,41 +713,32 @@ class Config:
             logger.error(f"更新URL失败: {e}")
     
     def get_source_name(self, url: str) -> str:
-        """获取数据源名称"""
-        # 自定义数据源 URL 统一显示为 custom
+        """获取数据源名称。Fan Studio 子源用 path 代号映射（不写完整 wss URL），其余用完整 URL 映射。"""
         if self.custom_data_source_url and url == self.custom_data_source_url:
             return "custom"
-        # 将URL中的域名统一为fanstudio.tech，以便查找
-        # 统一使用fanstudio.tech（如果存在fanstudio.hk则替换）
         normalized_url = url.replace('fanstudio.hk', 'fanstudio.tech')
-        
-        source_name_mapping = {
-            "wss://ws.fanstudio.tech/all": "fanstudio",
-            "wss://ws.fanstudio.tech/weatheralarm": "weatheralarm",
-            "wss://ws.fanstudio.tech/cenc": "cenc",
-            "wss://ws.fanstudio.tech/cea": "cea",
-            "wss://ws.fanstudio.tech/cea-pr": "cea-pr",
-            "wss://ws.fanstudio.tech/sichuan": "sichuan",
-            "wss://ws.fanstudio.tech/ningxia": "ningxia",
-            "wss://ws.fanstudio.tech/guangxi": "guangxi",
-            "wss://ws.fanstudio.tech/shanxi": "shanxi",
-            "wss://ws.fanstudio.tech/beijing": "beijing",
-            "wss://ws.fanstudio.tech/cwa": "cwa",
-            "wss://ws.fanstudio.tech/cwa-eew": "cwa-eew",
-            "wss://ws.fanstudio.tech/jma": "jma",
-            "wss://ws.fanstudio.tech/hko": "hko",
-            "wss://ws.fanstudio.tech/usgs": "usgs",
-            "wss://ws.fanstudio.tech/sa": "sa",
-            "wss://ws.fanstudio.tech/emsc": "emsc",
-            "wss://ws.fanstudio.tech/bcsf": "bcsf",
-            "wss://ws.fanstudio.tech/gfz": "gfz",
-            "wss://ws.fanstudio.tech/usp": "usp",
-            "wss://ws.fanstudio.tech/kma": "kma",
-            "wss://ws.fanstudio.tech/kma-eew": "kma-eew",
-            "wss://ws.fanstudio.tech/fssn": "fssn",
+        # Fan Studio wss：从 URL 抽 path，用代号查表，避免在代码中写单项 API 链接
+        if ('fanstudio.tech' in normalized_url or 'fanstudio.hk' in url) and normalized_url.startswith(('wss://', 'ws://')):
+            try:
+                path = normalized_url.rstrip('/').split('/')[-1] or 'all'
+                fanstudio_path_to_name = {
+                    "all": "fanstudio",
+                    "weatheralarm": "weatheralarm",
+                    "cenc": "cenc", "cea": "cea", "cea-pr": "cea-pr",
+                    "sichuan": "sichuan", "ningxia": "ningxia", "guangxi": "guangxi",
+                    "shanxi": "shanxi", "beijing": "beijing",
+                    "cwa": "cwa", "cwa-eew": "cwa-eew", "jma": "jma", "hko": "hko",
+                    "usgs": "usgs", "sa": "sa", "emsc": "emsc", "bcsf": "bcsf",
+                    "gfz": "gfz", "usp": "usp", "kma": "kma", "kma-eew": "kma-eew", "fssn": "fssn",
+                }
+                if path in fanstudio_path_to_name:
+                    return fanstudio_path_to_name[path]
+            except Exception:
+                pass
+        # 非 Fan Studio：仅保留需完整 URL 的数据源（p2pquake、Wolfx、NIED 等）
+        url_to_name = {
             "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
             "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
-            # Wolfx HTTP
             "https://api.wolfx.jp/sc_eew.json": "wolfx_sc_eew",
             "https://api.wolfx.jp/jma_eew.json": "wolfx_jma_eew",
             "https://api.wolfx.jp/fj_eew.json": "wolfx_fj_eew",
@@ -769,7 +746,6 @@ class Config:
             "https://api.wolfx.jp/cwa_eew.json": "wolfx_cwa_eew",
             "https://api.wolfx.jp/cenc_eqlist.json": "wolfx_cenc_eqlist",
             "https://api.wolfx.jp/jma_eqlist.json": "wolfx_jma_eqlist",
-            # Wolfx WebSocket（all 与单项）
             "wss://ws-api.wolfx.jp/all_eew": "wolfx_all_eew",
             "wss://ws-api.wolfx.jp/sc_eew": "wolfx_sc_eew",
             "wss://ws-api.wolfx.jp/jma_eew": "wolfx_jma_eew",
@@ -780,8 +756,7 @@ class Config:
             "wss://ws-api.wolfx.jp/jma_eqlist": "wolfx_jma_eqlist",
             "wss://sismotide.top/nied": "nied",
         }
-        
-        return source_name_mapping.get(normalized_url, url)
+        return url_to_name.get(normalized_url, url)
     
     def get_organization_name(self, source_name: str) -> str:
         """获取机构名称"""

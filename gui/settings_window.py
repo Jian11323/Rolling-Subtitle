@@ -10,11 +10,11 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
-    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QFontComboBox
+    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
-from PyQt5.QtGui import QFont, QDesktopServices, QColor
-from typing import Optional, Dict, Any
+from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase
+from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 import re
 
@@ -74,6 +74,49 @@ STYLE_COMBOBOX = """
     }
     QComboBox:focus { border: 1px solid #4A90E2; }
 """
+
+# 字体列表去重与精简：去掉「中」「中文」「_GB2312」等变体后缀，每种字体只保留一条，显示名用精简后的名称
+_FONT_SUFFIXES: Tuple[str, ...] = (
+    ' 中', ' 中文', ' LIC', ' UI', ' Light', ' Bold', ' Semibold', ' Semilight', ' Thin', ' Medium', ' Regular', ' Italic', ' Black', ' DemiBold', ' ExtraLight',
+    ' _GB2312', ' _GB18030', ' _Big5', '_GB2312', '_GB18030', '_Big5',
+)
+
+
+def _font_base_name(name: str) -> str:
+    """去掉常见变体后缀得到字体「基名」"""
+    s = (name or '').strip()
+    for suf in sorted(_FONT_SUFFIXES, key=len, reverse=True):
+        if s.endswith(suf):
+            return s[:-len(suf)].strip()
+    return s
+
+
+def _get_deduplicated_font_list() -> List[Tuple[str, str]]:
+    """返回 [(显示名, 实际字体族)], 每种字体一条，显示名已精简；优先选用系统能 exactMatch 的字体名以保证应用后生效。"""
+    db = QFontDatabase()
+    families = db.families()
+    base_to_candidates: Dict[str, List[str]] = {}
+    for f in sorted(families):
+        base = _font_base_name(f)
+        if not base:
+            continue
+        base_to_candidates.setdefault(base, []).append(f)
+    test_font = QFont()
+    test_font.setPointSize(12)
+    result: List[Tuple[str, str]] = []
+    for base in sorted(base_to_candidates.keys()):
+        candidates = base_to_candidates[base]
+        # 优先选用 setFamily 后 exactMatch 为 True 的（保证保存后主窗口字体能生效）
+        chosen = None
+        for f in candidates:
+            test_font.setFamily(f)
+            if test_font.exactMatch():
+                chosen = f
+                break
+        if chosen is None:
+            chosen = candidates[0]
+        result.append((base, chosen))
+    return result
 STYLE_SAVE_BTN = """
     QPushButton {
         background-color: #4CAF50;
@@ -334,10 +377,20 @@ class SettingsWindow(QDialog):
         block1_layout.addWidget(speed_label_value, 1, 2)
         
         # 字体、字体大小（第0行）；字体加粗、字体倾斜（第1行）—— 使用内部 QGridLayout 保证列对齐
-        font_family_combo = QFontComboBox()
-        font_family_combo.setCurrentFont(QFont(getattr(self.config.gui_config, 'font_family', None) or "SimSun"))
+        font_family_combo = QComboBox()
+        font_family_combo.setEditable(False)
+        for display_name, actual_family in _get_deduplicated_font_list():
+            font_family_combo.addItem(display_name, actual_family)
+        current_font = getattr(self.config.gui_config, 'font_family', None) or "SimSun"
+        idx = font_family_combo.findData(current_font)
+        if idx < 0:
+            idx = font_family_combo.findText(_font_base_name(current_font))
+        if idx >= 0:
+            font_family_combo.setCurrentIndex(idx)
+        else:
+            font_family_combo.setCurrentIndex(0)
         font_family_combo.setStyleSheet(STYLE_COMBOBOX)
-        font_family_combo.setFixedWidth(88)
+        font_family_combo.setFixedWidth(140)
         font_family_label = QLabel("字体:")
         font_family_label.setStyleSheet(STYLE_LABEL)
         font_size_label = QLabel("字体大小:")
@@ -563,6 +616,26 @@ class SettingsWindow(QDialog):
         self.warning_color_preview, self.warning_color_label = _add_color_row(block4_layout, "地震预警颜色:", warning_color_value, 'warning')
         self.custom_text_color_preview, self.custom_text_color_label = _add_color_row(block4_layout, "自定义文本颜色:", custom_text_color_value, 'custom_text')
         main_layout.addWidget(block4)
+        main_layout.addSpacing(10)
+        
+        # ---------- 预警/消息更新 ----------
+        block_alert_update = QWidget()
+        block_alert_update_layout = QVBoxLayout(block_alert_update)
+        block_alert_update_layout.setContentsMargins(0, 0, 0, 0)
+        block_alert_update_layout.setSpacing(6)
+        sec_alert = QLabel("预警/消息更新")
+        sec_alert.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
+        block_alert_update_layout.addWidget(sec_alert)
+        self.show_one_alert_per_received_checkbox = QCheckBox("收到预警更新报立即切换")
+        self.show_one_alert_per_received_checkbox.setChecked(
+            getattr(self.config.message_config, 'show_one_alert_per_received', False)
+        )
+        self.show_one_alert_per_received_checkbox.setToolTip(
+            "开启后，收到预警更新报时立即切换并显示最新内容；关闭时仅后台替换，不打断当前滚动。默认关闭。"
+        )
+        self.show_one_alert_per_received_checkbox.setStyleSheet("font-size: 13px;")
+        block_alert_update_layout.addWidget(self.show_one_alert_per_received_checkbox)
+        main_layout.addWidget(block_alert_update)
         main_layout.addSpacing(10)
         
         # ---------- 5. 自定义文本 ----------
@@ -1597,7 +1670,10 @@ class SettingsWindow(QDialog):
             # 更新GUI配置
             self.config.gui_config.text_speed = self.display_vars['speed'].value() / 10.0
             self.config.gui_config.font_size = self.display_vars['font_size'].currentData()
-            self.config.gui_config.font_family = self.display_vars['font_family'].currentFont().family()
+            self.config.gui_config.font_family = (
+                self.display_vars['font_family'].currentData()
+                or self.display_vars['font_family'].currentText()
+            )
             self.config.gui_config.font_bold = self.display_vars['font_bold'].isChecked()
             self.config.gui_config.font_italic = self.display_vars['font_italic'].isChecked()
             self.config.gui_config.window_width = self.display_vars['width'].value()
@@ -1704,7 +1780,10 @@ class SettingsWindow(QDialog):
             # 写入 gui_config（显示 + 渲染）
             self.config.gui_config.text_speed = self.display_vars['speed'].value() / 10.0
             self.config.gui_config.font_size = self.display_vars['font_size'].currentData()
-            self.config.gui_config.font_family = self.display_vars['font_family'].currentFont().family()
+            self.config.gui_config.font_family = (
+                self.display_vars['font_family'].currentData()
+                or self.display_vars['font_family'].currentText()
+            )
             self.config.gui_config.font_bold = self.display_vars['font_bold'].isChecked()
             self.config.gui_config.font_italic = self.display_vars['font_italic'].isChecked()
             self.config.gui_config.window_width = self.display_vars['width'].value()
@@ -1716,12 +1795,13 @@ class SettingsWindow(QDialog):
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
             
-            # 写入 message_config（颜色 + 自定义文本）
+            # 写入 message_config（颜色 + 自定义文本 + 收到预警更新报立即切换）
             self.config.message_config.report_color = self.current_report_color
             self.config.message_config.warning_color = self.current_warning_color
             self.config.message_config.custom_text_color = self.current_custom_text_color
             self.config.message_config.custom_text = self.custom_text_edit.toPlainText().strip() or ""
-            
+            self.config.message_config.show_one_alert_per_received = self.show_one_alert_per_received_checkbox.isChecked()
+
             self.config.save_config()
             self.config._notify_config_changed()
             
@@ -1746,43 +1826,41 @@ class SettingsWindow(QDialog):
     
     def _match_weather_image(self, weather_data: Dict[str, Any]) -> Optional[Path]:
         """
-        根据气象预警数据匹配图片文件
+        根据气象预警数据匹配图片文件（与 message_processor 逻辑一致）
+        有 type 时使用官方图标，返回 None 表示不在设置页显示本地预览；无 type 时从 headline 匹配本地 jpg。
         
         Args:
-            weather_data: 气象预警数据字典，包含 'headline', 'title', 'type' 等字段
+            weather_data: 气象预警数据字典，包含 'type', 'headline', 'title' 等字段
             
         Returns:
-            匹配的图片文件路径，如果未找到则返回None
+            匹配的本地图片路径，若使用 type 官方图标或未找到则返回 None
         """
         try:
-            # 从headline或title中提取预警信息
+            # 有 type 时使用中国气象局官方图标，设置页不显示本地预览
+            alarm_type = weather_data.get('type')
+            if alarm_type and isinstance(alarm_type, str) and alarm_type.strip():
+                if re.match(r'^p[a-zA-Z0-9]+$', alarm_type.strip()):
+                    logger.debug(f"气象预警使用 type 官方图标: {alarm_type}, 不显示本地预览")
+                    return None
+
+            # 回退：从 headline 或 title 匹配本地 jpg
             headline = weather_data.get('headline', '') or weather_data.get('title', '')
             if not headline:
                 return None
-            
-            # 提取预警类型和颜色
-            # 例如："广东省阳江市发布暴雨橙色预警信号" -> "暴雨橙色预警"
-            # 匹配模式：{类型}{颜色}预警
+
             pattern = r'发布(.+?)(红色|橙色|黄色|蓝色|白色)预警'
             match = re.search(pattern, headline)
-            
             if match:
-                warning_type = match.group(1)  # 预警类型，如"暴雨"
-                warning_color = match.group(2)  # 预警颜色，如"橙色"
-                
-                # 构建图片文件名
+                warning_type = match.group(1)
+                warning_color = match.group(2)
                 image_filename = f"{warning_type}{warning_color}预警.jpg"
                 image_path = self.weather_images_dir / image_filename
-                
                 if image_path.exists():
                     return image_path
-            
-            # 如果正则匹配失败，尝试从type字段匹配
-            # type字段格式：p0002002（需要查找对应的映射表）
-            # 这里先使用简单的文件名匹配
-            logger.debug(f"无法从headline匹配图片: {headline}")
+
+            logger.debug(f"无法从 headline 匹配本地图片: {headline}")
             return None
-            
+
         except Exception as e:
             logger.error(f"匹配气象预警图片时出错: {e}")
             return None
