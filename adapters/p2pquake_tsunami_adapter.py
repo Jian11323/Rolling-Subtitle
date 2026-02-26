@@ -24,18 +24,12 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
     def __init__(self, source_name: str, source_url: str):
         super().__init__(source_name, source_url)
 
-    def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+    def parse_single_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        解析海啸 API 返回的数组，只取第一条；cancelled 时返回 None。
+        解析单条海啸对象（用于 HTTP 数组首条或 WebSocket 单条消息）。
+        cancelled 为 True 时返回 None。
         """
         try:
-            if isinstance(raw_data, str):
-                data = json.loads(raw_data)
-            else:
-                data = raw_data
-            if not isinstance(data, list) or len(data) == 0:
-                return None
-            item = data[0]
             if not isinstance(item, dict):
                 return None
             if item.get('cancelled') is True:
@@ -43,7 +37,6 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
             issue = item.get('issue') or {}
             issue_time = issue.get('time') or item.get('time') or ''
             issue_type = issue.get('type') or '海啸情报'
-            source = issue.get('source') or '気象庁'
             shock_time = timezone_utils.jst_to_display(issue_time) if issue_time else ''
             areas = item.get('areas') or []
             place_name = self._build_tsunami_detail(areas, issue_type)
@@ -62,6 +55,25 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
                 'event_id': item.get('id') or '',
                 'raw_data': item,
             }
+        except Exception as e:
+            logger.debug(f"[P2PQuake海啸] 解析跳过: {e}")
+            return None
+
+    def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """
+        解析海啸 API 返回的数组，只取第一条；cancelled 时返回 None。
+        若 raw_data 为单条 dict（如 WebSocket），则直接调用 parse_single_item。
+        """
+        try:
+            if isinstance(raw_data, str):
+                data = json.loads(raw_data)
+            else:
+                data = raw_data
+            if isinstance(data, dict):
+                return self.parse_single_item(data)
+            if not isinstance(data, list) or len(data) == 0:
+                return None
+            return self.parse_single_item(data[0])
         except Exception as e:
             logger.debug(f"[P2PQuake海啸] 解析跳过: {e}")
             return None

@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QDialog, QLabel, QScrollArea, QPushButton, QFrame
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QResizeEvent
 from typing import Dict, Any, Optional, Union
 
 # 添加项目根目录到路径
@@ -67,6 +67,11 @@ class MainWindow(QMainWindow):
         
         # 右键菜单缓存（避免每次右键点击时重新创建）
         self.context_menu = None
+        
+        # 窗口大小变更防抖：拖拽结束后再写入配置
+        self._resize_save_timer = QTimer(self)
+        self._resize_save_timer.setSingleShot(True)
+        self._resize_save_timer.timeout.connect(self._save_window_size_to_config)
         
         # 连接信号到槽函数
         self.weather_image_update.connect(self._update_settings_weather_image)
@@ -196,6 +201,28 @@ class MainWindow(QMainWindow):
             self.move(x, y)
         except Exception as e:
             logger.error(f"窗口居中失败: {e}")
+    
+    def resizeEvent(self, event: QResizeEvent):
+        """用户拖拽改变窗口大小时，防抖后将当前尺寸写入配置"""
+        super().resizeEvent(event)
+        if not self.initialized:
+            return
+        self._resize_save_timer.stop()
+        self._resize_save_timer.start(400)
+    
+    def _save_window_size_to_config(self):
+        """将当前主窗口大小写入配置并保存（不受系统分辨率限制，用户设置多少即保存多少，允许超出屏幕）"""
+        try:
+            w = max(800, min(20000, self.width()))
+            h = max(100, min(5000, self.height()))
+            if (self.config.gui_config.window_width, self.config.gui_config.window_height) == (w, h):
+                return
+            self.config.gui_config.window_width = w
+            self.config.gui_config.window_height = h
+            self.config.save_config()
+            logger.debug(f"主窗口大小已写入配置: {w}x{h}")
+        except Exception as e:
+            logger.error(f"保存窗口大小到配置失败: {e}")
     
     def _create_context_menu(self):
         """创建右键菜单（在初始化时立即创建，避免第一次点击时的延迟）"""
@@ -966,6 +993,11 @@ class MainWindow(QMainWindow):
                         QTimer.singleShot(0, lambda: self.weather_image_update.emit(raw_data))
                 except Exception as e:
                     logger.error(f"延迟通知设置窗口更新气象预警图片失败: {e}")
+            elif message_type == 'report' and parsed_data.get('is_tsunami') and parsed_data.get('logo_url'):
+                # 自然资源部海啸预警：使用 details.logoUrl 作为图标（海啸消息灰图标等）
+                image_path = parsed_data.get('logo_url')
+                if image_path:
+                    logger.info(f"✓ 海啸预警图标路径: {image_path}")
             
             # 获取event_id（用于识别同一条地震事件的更新）
             event_id = parsed_data.get('event_id', '')
@@ -988,8 +1020,9 @@ class MainWindow(QMainWindow):
             # 对于气象预警，记录图片路径信息并预加载 NMC URL 到缓存，轮播到该条时可立即显示图标
             if message_type == 'weather':
                 logger.info(f"创建气象预警MessageItem: 数据源={source_name}, 图片路径={image_path if image_path else '无'}, parsed_data={'有' if parsed_data else '无'}")
-                if image_path and image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
-                    self.scrolling_text.preload_image_url(image_path)
+            # 气象预警/海啸预警：远程 URL 统一在此预加载（与气象预警图片解析同顺序，确保首次轮播可命中缓存）
+            if image_path and image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
+                self.scrolling_text.preload_image_url(image_path)
 
             if self.message_queue.put(msg_item, block=False):
                 # 只保留“新预警”的日志；速报(report)的“收到新消息”日志不再输出
@@ -1117,13 +1150,16 @@ class MainWindow(QMainWindow):
                     if (weather_messages or report_messages) and not getattr(self.config.message_config, 'use_custom_text', False):
                         all_messages = weather_messages + report_messages
                         
-                        # 对于气象预警消息，检查图片路径并异步获取（如果需要）
+                        # 对于气象预警/海啸预警消息，检查图片路径并预加载；气象预警无图时异步获取
                         for msg in all_messages:
                             if msg.message_type == 'weather':
                                 logger.info(f"处理气象预警消息: 数据源={msg.source}, 图片路径={msg.image_path if msg.image_path else '无'}, parsed_data={'有' if msg.parsed_data else '无'}")
                                 # 主线程中再次触发 NMC URL 预加载，使 start() 立即执行，尽早开始网络请求
                                 if msg.image_path and msg.image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
                                     self.scrolling_text.preload_image_url(msg.image_path)
+                            # 速报带远程图片（如海啸 logoUrl）同样预加载
+                            if msg.message_type == 'report' and msg.image_path and msg.image_path.startswith(('http://', 'https://')) and self.scrolling_text and hasattr(self.scrolling_text, 'preload_image_url'):
+                                self.scrolling_text.preload_image_url(msg.image_path)
 
                             if msg.message_type == 'weather' and not msg.image_path and msg.parsed_data:
                                 # 在后台线程中异步获取图片路径

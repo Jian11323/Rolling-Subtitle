@@ -474,15 +474,15 @@ class SettingsWindow(QDialog):
         width_label.setStyleSheet(STYLE_LABEL)
         width_spin = QSpinBox()
         width_spin.setMinimum(200)
-        width_spin.setMaximum(3000)
-        width_spin.setValue(self.config.gui_config.window_width)
+        width_spin.setMaximum(20000)  # 不受分辨率限制，允许超出屏幕
+        width_spin.setValue(min(20000, max(200, self.config.gui_config.window_width)))
         width_spin.setStyleSheet(STYLE_SPINBOX)
         height_label = QLabel("窗口高度:")
         height_label.setStyleSheet(STYLE_LABEL)
         height_spin = QSpinBox()
         height_spin.setMinimum(50)
-        height_spin.setMaximum(500)
-        height_spin.setValue(self.config.gui_config.window_height)
+        height_spin.setMaximum(5000)  # 不受分辨率限制，允许超出屏幕
+        height_spin.setValue(min(5000, max(50, self.config.gui_config.window_height)))
         height_spin.setStyleSheet(STYLE_SPINBOX)
         size_row.addWidget(width_label)
         size_row.addWidget(width_spin)
@@ -511,6 +511,34 @@ class SettingsWindow(QDialog):
         opacity_row_layout.addWidget(opacity_label_value)
         opacity_row_layout.addStretch()
         block2_layout.addWidget(opacity_row)
+        watermark_row = QHBoxLayout()
+        watermark_row.setSpacing(10)
+        watermark_label = QLabel("背景水印:")
+        watermark_label.setStyleSheet(STYLE_LABEL)
+        watermark_edit = QLineEdit()
+        watermark_edit.setPlaceholderText("留空则不显示")
+        watermark_edit.setText(getattr(self.config.gui_config, 'watermark_text', '') or '')
+        watermark_edit.setStyleSheet("font-size: 13px; padding: 4px; border: 1px solid #CCCCCC; border-radius: 4px;")
+        watermark_edit.setMinimumWidth(160)
+        watermark_angle_combo = QComboBox()
+        watermark_angle_combo.addItem("横向", "horizontal")
+        watermark_angle_combo.addItem("斜向 45°", "45")
+        angle_val = getattr(self.config.gui_config, 'watermark_angle', 'horizontal') or 'horizontal'
+        idx = watermark_angle_combo.findData(angle_val)
+        if idx >= 0:
+            watermark_angle_combo.setCurrentIndex(idx)
+        watermark_angle_combo.setStyleSheet(STYLE_COMBOBOX)
+        watermark_row.addWidget(watermark_label)
+        watermark_row.addWidget(watermark_edit)
+        watermark_row.addWidget(QLabel("方向:"))
+        watermark_row.addWidget(watermark_angle_combo)
+        watermark_row.addStretch()
+        block2_layout.addLayout(watermark_row)
+        use_weather_image_nmc_cb = QCheckBox("气象预警图标使用 NMC 在线")
+        use_weather_image_nmc_cb.setChecked(getattr(self.config.gui_config, 'use_weather_image_nmc', True))
+        use_weather_image_nmc_cb.setStyleSheet("font-size: 13px;")
+        use_weather_image_nmc_cb.setToolTip("开启时使用中国气象局在线图标（需联网）；关闭时仅使用本地「气象预警信号图片」目录下的图片。")
+        block2_layout.addWidget(use_weather_image_nmc_cb)
         main_layout.addWidget(block2)
         main_layout.addSpacing(10)
         
@@ -672,6 +700,9 @@ class SettingsWindow(QDialog):
             'vsync_enabled': vsync_checkbox,
             'target_fps': fps_spin,
             'timezone': timezone_combo,
+            'use_weather_image_nmc': use_weather_image_nmc_cb,
+            'watermark_text': watermark_edit,
+            'watermark_angle': watermark_angle_combo,
         }
         self.render_vars = {'cpu_radio': cpu_radio, 'opengl_radio': opengl_radio}
         
@@ -790,12 +821,28 @@ class SettingsWindow(QDialog):
         history_label.setStyleSheet("color: #000000; padding-top: 15px; padding-bottom: 5px;")
         scroll_layout.addWidget(history_label)
         
-        # 日本气象厅地震情报
-        p2p_label = QLabel("日本气象厅地震情报")
+        # 日本气象厅地震情报/海啸（HTTP 与 WebSocket 二选一）
+        p2p_label = QLabel("日本气象厅地震情报/海啸")
         p2p_label.setFont(fs_warning_font)
         scroll_layout.addWidget(p2p_label)
-        self._add_source_checkbox(scrollable_widget, "https://api.p2pquake.net/v2/history?codes=551&limit=3", "日本气象厅地震情报", default_value=True)
-        self._add_source_checkbox(scrollable_widget, "https://api.p2pquake.net/v2/jma/tsunami?limit=1", "日本气象厅海啸预报", default_value=True)
+        p2p_http_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+        p2p_tsunami_url = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
+        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+        self.p2pquake_group = QButtonGroup(scrollable_widget)
+        self.p2pquake_http_radio = QRadioButton("HTTP")
+        self.p2pquake_wss_radio = QRadioButton("WebSocket")
+        self.p2pquake_group.addButton(self.p2pquake_http_radio)
+        self.p2pquake_group.addButton(self.p2pquake_wss_radio)
+        # 根据当前配置设定单选：若已启用 WSS 则选 WSS，否则选 HTTP
+        if self.config.enabled_sources.get(p2p_wss_url, False):
+            self.p2pquake_wss_radio.setChecked(True)
+        else:
+            self.p2pquake_http_radio.setChecked(True)
+        p2p_layout = QHBoxLayout()
+        p2p_layout.addWidget(self.p2pquake_http_radio)
+        p2p_layout.addWidget(self.p2pquake_wss_radio)
+        p2p_layout.addStretch()
+        scroll_layout.addLayout(p2p_layout)
 
         # Wolfx 速报（地震历史区：HTTP + WSS 单项）
         wolfx_report_label = QLabel("Wolfx 速报")
@@ -886,7 +933,7 @@ class SettingsWindow(QDialog):
                 initial_value = True
             elif url == "fanstudio_report":
                 # 确保所有速报数据源启用
-                report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko', 
+                report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
                                  'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']
                 for source in report_sources:
                     source_url = f"wss://ws.{base_domain}/{source}"
@@ -988,11 +1035,9 @@ class SettingsWindow(QDialog):
             self.fanstudio_parse_warning_cb.setChecked(True)
         if hasattr(self, 'fanstudio_parse_report_cb'):
             self.fanstudio_parse_report_cb.setChecked(True)
-        # 选中默认数据源（日本气象厅地震情报、日本气象厅海啸预报；Wolfx/NIED 保持不选）
-        if "https://api.p2pquake.net/v2/history?codes=551&limit=3" in self.source_vars:
-            self.source_vars["https://api.p2pquake.net/v2/history?codes=551&limit=3"].setChecked(True)
-        if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" in self.source_vars:
-            self.source_vars["https://api.p2pquake.net/v2/jma/tsunami?limit=1"].setChecked(True)
+        # 日本气象厅：恢复默认选 HTTP (地震情报 + 海啸预报)
+        if hasattr(self, 'p2pquake_http_radio'):
+            self.p2pquake_http_radio.setChecked(True)
     
     def _create_advanced_tab(self):
         """创建高级设置标签页（地名修正、日志、自定义数据源）"""
@@ -1483,7 +1528,19 @@ class SettingsWindow(QDialog):
             if hasattr(self, 'fanstudio_parse_report_cb'):
                 self.config.message_config.fanstudio_parse_report = self.fanstudio_parse_report_cb.isChecked()
             
-            # 更新其他数据源配置（P2PQuake、Wolfx、NIED 等）
+            # 日本气象厅：HTTP 与 WebSocket 二选一
+            p2p_http_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+            p2p_tsunami_url = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
+            p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+            if getattr(self, 'p2pquake_http_radio', None) and self.p2pquake_http_radio.isChecked():
+                self.config.enabled_sources[p2p_http_url] = True
+                self.config.enabled_sources[p2p_tsunami_url] = True
+                self.config.enabled_sources[p2p_wss_url] = False
+            elif getattr(self, 'p2pquake_wss_radio', None) and self.p2pquake_wss_radio.isChecked():
+                self.config.enabled_sources[p2p_http_url] = False
+                self.config.enabled_sources[p2p_tsunami_url] = False
+                self.config.enabled_sources[p2p_wss_url] = True
+            # 更新其他数据源配置（Wolfx、NIED 等）
             for url, checkbox in self.source_vars.items():
                 if url and url != all_url:
                     self.config.enabled_sources[url] = checkbox.isChecked()
@@ -1650,7 +1707,7 @@ class SettingsWindow(QDialog):
     def _save_display_settings(self):
         """保存显示设置"""
         try:
-            required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_angle')
             if not all(k in self.display_vars for k in required):
                 logger.warning("显示设置未就绪，请先打开「外观与显示」页")
                 return
@@ -1682,13 +1739,16 @@ class SettingsWindow(QDialog):
             self.config.gui_config.vsync_enabled = self.display_vars['vsync_enabled'].isChecked()
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
-            
+            self.config.gui_config.use_weather_image_nmc = self.display_vars['use_weather_image_nmc'].isChecked()
+            self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or '').strip()
+            self.config.gui_config.watermark_angle = self.display_vars['watermark_angle'].currentData() or 'horizontal'
+
             # 保存到文件
             self.config.save_config()
-            
+
             # 通知主窗口更新（热更新，立即生效）
             self.config._notify_config_changed()
-            
+
             if timezone_changed:
                 QMessageBox.information(self, "成功", "显示设置已保存。\n时区已变更，请重启软件后生效。")
             else:
@@ -1753,7 +1813,7 @@ class SettingsWindow(QDialog):
     def _save_appearance_settings(self):
         """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
         try:
-            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps')
+            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_angle')
             render_required = ('cpu_radio', 'opengl_radio')
             if not all(k in self.display_vars for k in display_required) or not all(k in self.render_vars for k in render_required):
                 logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
@@ -1792,9 +1852,12 @@ class SettingsWindow(QDialog):
             self.config.gui_config.vsync_enabled = self.display_vars['vsync_enabled'].isChecked()
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
+            self.config.gui_config.use_weather_image_nmc = self.display_vars['use_weather_image_nmc'].isChecked()
+            self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or '').strip()
+            self.config.gui_config.watermark_angle = self.display_vars['watermark_angle'].currentData() or 'horizontal'
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
-            
+
             # 写入 message_config（颜色 + 自定义文本 + 收到预警更新报立即切换）
             self.config.message_config.report_color = self.current_report_color
             self.config.message_config.warning_color = self.current_warning_color

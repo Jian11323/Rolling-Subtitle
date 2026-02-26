@@ -12,16 +12,29 @@ import websockets
 from typing import Dict, Callable, Optional, Any
 from collections import defaultdict
 from queue import Queue, Empty
+import requests
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
-from adapters import FanStudioAdapter, WolfxAdapter, NiedAdapter, CustomAdapter
+from adapters import (
+    FanStudioAdapter,
+    WolfxAdapter,
+    NiedAdapter,
+    P2PQuakeWebSocketAdapter,
+    CustomAdapter,
+    P2PQuakeAdapter,
+    P2PQuakeTsunamiAdapter,
+)
 from utils.logger import get_logger
 
 logger = get_logger()
+
+P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+P2PQUAKE_TSUNAMI_URL = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
+P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 
 
 class WebSocketManager:
@@ -79,6 +92,11 @@ class WebSocketManager:
             adapter = NiedAdapter('nied', url)
             adapter._manager_source_type = 'nied'
             return adapter
+        # P2PQuake WebSocket（仅解析 551、552）
+        if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
+            adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
+            adapter._manager_source_type = 'p2pquake_ws'
+            return adapter
         # 自定义数据源（WS/WSS）
         config = Config()
         if config.custom_data_source_url and url == config.custom_data_source_url:
@@ -134,6 +152,8 @@ class WebSocketManager:
                 "广西地震局": "guangxi",
                 "山西地震局": "shanxi",
                 "北京地震局": "beijing",
+                "山东地震局": "shandong",
+                "云南地震局": "yunnan",
                 "台湾中央气象署": "cwa",
                 "台湾中央气象署地震预警": "cwa-eew",
                 "日本气象厅": "jma",
@@ -148,6 +168,7 @@ class WebSocketManager:
                 "韩国气象厅地震预警": "kma-eew",
                 "FSSN": "fssn",
                 "气象预警": "weatheralarm",
+                "自然资源部海啸预警中心": "tsunami",
             }
             source = org_mapping.get(organization, default_source)
             return config.get_source_name(f"wss://ws.fanstudio.tech/{source}") if source != default_source else default_source
@@ -202,9 +223,9 @@ class WebSocketManager:
                 # 普通解析（包括update类型、Wolfx、NIED）
                 parsed_data = adapter.parse(data)
                 if parsed_data:
-                    # Wolfx/NIED：用 parsed_data 的 source_type 作为 actual_source
+                    # Wolfx/NIED/P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
-                    if pt and (pt.startswith('wolfx_') or pt == 'nied'):
+                    if pt and (pt.startswith('wolfx_') or pt == 'nied' or pt in ('p2pquake', 'p2pquake_tsunami')):
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -363,6 +384,85 @@ class WebSocketManager:
         
         return True
     
+    async def _fetch_p2p_initial_http(self, config: Config):
+        """
+        在启用 P2PQuake WebSocket 时，启动阶段先通过 HTTP 拉取一次最新地震与海啸情报。
+        """
+        try:
+            logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸情报")
+            
+            async def _fetch_quake():
+                def _request():
+                    try:
+                        resp = requests.get(
+                            P2PQUAKE_HISTORY_URL,
+                            timeout=10,
+                            proxies={"http": None, "https": None},
+                        )
+                        resp.raise_for_status()
+                        return resp.json()
+                    except Exception as e:
+                        logger.error(f"[p2pquake] 启动前 HTTP 获取地震情报失败: {e}")
+                        return None
+                
+                data = await asyncio.to_thread(_request)
+                if not data:
+                    return
+                
+                adapter = P2PQuakeAdapter("p2pquake", P2PQUAKE_HISTORY_URL)
+                try:
+                    events = adapter.parse_all(data)
+                except Exception as e:
+                    logger.error(f"[p2pquake] 启动前 HTTP 解析地震情报失败: {e}", exc_info=True)
+                    return
+                
+                if not events:
+                    logger.info("[p2pquake] 启动前 HTTP 无有效地震事件")
+                    return
+                
+                source_name = config.get_source_name(P2PQUAKE_HISTORY_URL)
+                for item in events:
+                    if item:
+                        self.message_callback(source_name, item)
+                logger.info(f"[p2pquake] 启动前 HTTP 推送 {len(events)} 条地震情报")
+            
+            async def _fetch_tsunami():
+                def _request():
+                    try:
+                        resp = requests.get(
+                            P2PQUAKE_TSUNAMI_URL,
+                            timeout=10,
+                            proxies={"http": None, "https": None},
+                        )
+                        resp.raise_for_status()
+                        return resp.json()
+                    except Exception as e:
+                        logger.error(f"[p2pquake_tsunami] 启动前 HTTP 获取海啸情报失败: {e}")
+                        return None
+                
+                data = await asyncio.to_thread(_request)
+                if data is None:
+                    return
+                
+                adapter = P2PQuakeTsunamiAdapter("p2pquake_tsunami", P2PQUAKE_TSUNAMI_URL)
+                try:
+                    parsed = adapter.parse(data)
+                except Exception as e:
+                    logger.error(f"[p2pquake_tsunami] 启动前 HTTP 解析海啸情报失败: {e}", exc_info=True)
+                    return
+                
+                if not parsed:
+                    logger.info("[p2pquake_tsunami] 启动前 HTTP 无有效海啸情报")
+                    return
+                
+                source_name = config.get_source_name(P2PQUAKE_TSUNAMI_URL)
+                self.message_callback(source_name, parsed)
+                logger.info("[p2pquake_tsunami] 启动前 HTTP 推送 1 条海啸情报")
+            
+            await asyncio.gather(_fetch_quake(), _fetch_tsunami())
+        except Exception as e:
+            logger.error(f"P2PQuake 启动前 HTTP 拉取阶段异常: {e}", exc_info=True)
+    
     async def start_all_connections(self):
         """启动所有数据源连接"""
         config = Config()
@@ -387,6 +487,12 @@ class WebSocketManager:
             logger.warning(f"config.enabled_sources中包含的WebSocket URL: {[url for url in config.enabled_sources.keys() if url.startswith(('ws://', 'wss://'))]}")
         else:
             logger.info(f"准备连接{len(enabled_urls)}个数据源: {enabled_urls}")
+            # 若启用了 P2PQuake WebSocket，则在建立 WSS 连接前先通过 HTTP 获取一次最新的地震/海啸情报
+            if P2PQUAKE_WSS_URL in enabled_urls:
+                try:
+                    await self._fetch_p2p_initial_http(config)
+                except Exception as e:
+                    logger.error(f"P2PQuake 启动前 HTTP 拉取失败: {e}", exc_info=True)
         
         # 创建所有连接任务
         tasks = []

@@ -17,18 +17,18 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.3.4"
+APP_VERSION = "2.3.6"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.3.4
+CHANGELOG_TEXT = """版本 2.3.6
 
-1、修复字体选择框问题
-2、修复字体修改有概率不生效问题。
-3、适当调整设置页面布局。
-4、气象预警图标从 type 字段获取 NMC 官方图片并支持预加载。
-5、新增「收到预警更新报立即切换」选项。
-6、气象预警远程图片加载失败时自动回退至本地预警图片。"""
+1、新增山东地震局、云南地震局数据源。
+2、增加自然资源部海啸预警中心数据源。
+3、P2P 日本气象厅地震/海啸：使用 WebSocket 时，启动先 HTTP 拉取一次最新情报，再转为 WSS 实时连接。
+4、海啸预警正文不再显示「签发」。
+5、背景水印：支持横向或斜向 45° 整面平铺，黑体加粗、右下角/整面显示。
+6、主窗口支持拖拽调整大小并保存；窗口宽高上限放宽。"""
 
 @dataclass
 class GUIConfig:
@@ -50,17 +50,23 @@ class GUIConfig:
     last_seen_changelog_version: str = ""  # 上次已读的更新说明版本，用于弹窗仅展示一次
     use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
     render_backend: str = "cpu"  # "cpu" | "opengl"，默认 cpu
-    
+    use_weather_image_nmc: bool = True  # True=气象预警图标优先 NMC 在线，False=仅本地图片
+    watermark_text: str = ""  # 背景水印文字，空则不显示
+    watermark_angle: str = "horizontal"  # 水印方向："horizontal" 横向，"45" 斜向45度
+
     def validate(self) -> bool:
         """验证配置有效性"""
         try:
             assert 10 <= self.font_size <= 100, "字体大小必须在10-100之间"
             assert 0.1 <= self.text_speed <= 20.0, "滚动速度必须在0.1-20.0之间"
             assert 0.1 <= self.opacity <= 1.0, "透明度必须在0.1-1.0之间"
-            assert 800 <= self.window_width <= 3000, "窗口宽度必须在800-3000之间"
-            assert 100 <= self.window_height <= 500, "窗口高度必须在100-500之间"
+            # 窗口尺寸不受系统分辨率限制，允许超出屏幕；仅做合理范围校验
+            assert 800 <= self.window_width <= 20000, "窗口宽度必须在800-20000之间"
+            assert 100 <= self.window_height <= 5000, "窗口高度必须在100-5000之间"
             assert 1 <= self.target_fps <= 240, "目标帧率必须在1-240之间"
             assert self.render_backend in ("cpu", "opengl"), "render_backend 必须为 cpu 或 opengl"
+            if self.watermark_angle not in ("horizontal", "45"):
+                self.watermark_angle = "horizontal"
             return True
         except AssertionError as e:
             logger.error(f"GUI配置验证失败: {e}")
@@ -266,6 +272,9 @@ class Config:
                 'last_seen_changelog_version': self.gui_config.last_seen_changelog_version,
                 'use_gpu_rendering': self.gui_config.use_gpu_rendering,
                 'render_backend': self.gui_config.render_backend,
+                'use_weather_image_nmc': self.gui_config.use_weather_image_nmc,
+                'watermark_text': self.gui_config.watermark_text,
+                'watermark_angle': self.gui_config.watermark_angle,
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -515,7 +524,7 @@ class Config:
                              "wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
                              "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
                              "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist",
-                             "wss://sismotide.top/nied"]
+                             "wss://sismotide.top/nied", "wss://api.p2pquake.net/v2/ws"]
                 for wss_url in wolfx_wss:
                     if wss_url not in self.enabled_sources:
                         self.enabled_sources[wss_url] = False
@@ -646,6 +655,7 @@ class Config:
                   "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist"]:
             self.enabled_sources[u] = False
         self.enabled_sources["wss://sismotide.top/nied"] = False
+        self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
 
         ws_urls = [all_url]
         for url in self.enabled_sources.keys():
@@ -724,9 +734,10 @@ class Config:
                 fanstudio_path_to_name = {
                     "all": "fanstudio",
                     "weatheralarm": "weatheralarm",
+                    "tsunami": "海啸信息",
                     "cenc": "cenc", "cea": "cea", "cea-pr": "cea-pr",
                     "sichuan": "sichuan", "ningxia": "ningxia", "guangxi": "guangxi",
-                    "shanxi": "shanxi", "beijing": "beijing",
+                    "shanxi": "shanxi", "beijing": "beijing", "shandong": "shandong", "yunnan": "yunnan",
                     "cwa": "cwa", "cwa-eew": "cwa-eew", "jma": "jma", "hko": "hko",
                     "usgs": "usgs", "sa": "sa", "emsc": "emsc", "bcsf": "bcsf",
                     "gfz": "gfz", "usp": "usp", "kma": "kma", "kma-eew": "kma-eew", "fssn": "fssn",
@@ -755,6 +766,7 @@ class Config:
             "wss://ws-api.wolfx.jp/cenc_eqlist": "wolfx_cenc_eqlist",
             "wss://ws-api.wolfx.jp/jma_eqlist": "wolfx_jma_eqlist",
             "wss://sismotide.top/nied": "nied",
+            "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
         }
         return url_to_name.get(normalized_url, url)
     
@@ -772,6 +784,10 @@ class Config:
             "guangxi": "广西地震局",
             "shanxi": "山西地震局",
             "beijing": "北京地震局",
+            "shandong": "山东地震局",
+            "yunnan": "云南地震局",
+            "tsunami": "自然资源部海啸预警中心",
+            "海啸信息": "自然资源部海啸预警中心",
             "cwa": "台湾中央气象署",
             "cwa-eew": "台湾中央气象署地震预警",
             "jma": "日本气象厅地震预警",
@@ -797,6 +813,7 @@ class Config:
             "wolfx_jma_eqlist": "Wolfx JMA 速报",
             "wolfx_all_eew": "Wolfx 全预警 (WSS)",
             "nied": "NIED 日本防災科研所预警",
+            "p2pquake_ws": "日本气象厅地震/海啸 (P2PQuake WSS)",
         }
         
         return organization_name_mapping.get(source_name, source_name)

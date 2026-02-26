@@ -29,8 +29,8 @@ build*.bat
 预警地名修正/
 fe_fix.txt
 fe-fix.txt
-# SA、KMA-EEW 地名修正（需上传）
-!SA、KMA-EEW-Fe Fix/
+# SA、KMA-EEW 地名修正（不上传）
+SA、KMA-EEW-Fe Fix/
 
 # 本地辅助（不上传）
 cleanup_only.sh

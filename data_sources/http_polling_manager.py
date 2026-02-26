@@ -243,7 +243,7 @@ class HTTPPollingManager:
             adapter = self.get_adapter(url)
             
             if adapter is None:
-                logger.error(f"无法找到适配器 for {url}")
+                # 对于未配置适配器的 HTTP 数据源，直接跳过，不再输出错误日志
                 continue
             
             # 轮询间隔：自定义数据源 1 秒，Wolfx 速报 5 秒，其余 2 秒

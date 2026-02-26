@@ -125,6 +125,44 @@ class _ScrollingTextMixin:
             painter.setRenderHint(QPainter.Antialiasing)
             bg_color = QColor(self.config.gui_config.bg_color)
             painter.fillRect(self.rect(), bg_color)
+            # 背景水印（黑体、右下角、字号稍大；在填充背景后、主内容前绘制）
+            watermark_text = (getattr(self.config.gui_config, 'watermark_text', None) or '').strip()
+            if watermark_text:
+                painter.save()
+                try:
+                    watermark_angle = getattr(self.config.gui_config, 'watermark_angle', 'horizontal') or 'horizontal'
+                    font_size = min(44, max(18, int(self.height() * 0.32)))
+                    wm_font = QFont("SimHei", font_size)
+                    wm_font.setBold(True)
+                    wm_font.setItalic(False)
+                    painter.setFont(wm_font)
+                    wm_color = QColor(160, 160, 160, 72)
+                    painter.setPen(wm_color)
+                    painter.setRenderHint(QPainter.TextAntialiasing)
+                    margin = 12
+                    if watermark_angle == "45":
+                        # 参考证书/公文底纹：45° 斜向、整面平铺重复、半透明
+                        w, h = self.width(), self.height()
+                        cx, cy = w / 2.0, h / 2.0
+                        painter.translate(cx, cy)
+                        painter.rotate(-45)
+                        diag = (w * w + h * h) ** 0.5
+                        fm = QFontMetrics(wm_font)
+                        tw = fm.horizontalAdvance(watermark_text)
+                        th = fm.height()
+                        step_x = max(tw + 80, 120)
+                        step_y = max(int(th * 2.2), 60)
+                        n = int(diag / min(step_x, step_y)) + 2
+                        for i in range(-n, n + 1):
+                            for j in range(-n, n + 1):
+                                x, y = i * step_x, j * step_y
+                                wr = QRectF(x - tw / 2 - 20, y - th / 2, tw + 40, th + 4)
+                                painter.drawText(wr, Qt.AlignCenter | Qt.TextSingleLine, watermark_text)
+                    else:
+                        wr = QRectF(margin, margin, self.width() - 2 * margin, self.height() - 2 * margin)
+                        painter.drawText(wr, Qt.AlignRight | Qt.AlignBottom | Qt.TextSingleLine, watermark_text)
+                finally:
+                    painter.restore()
             if not self.current_text:
                 return
             center_y = self.height() / 2.0

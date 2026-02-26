@@ -4,13 +4,17 @@
 Fan Studio数据源适配器
 根据Fan Studio数据服务 API文档实现
 支持所有数据源：
-- 地震速报：cenc, ningxia, guangxi, shanxi, beijing, cwa, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
+- 地震速报：cenc, ningxia, guangxi, shanxi, beijing, shandong, yunnan, cwa, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
 - 地震预警：cea, cea-pr, sichuan, cwa-eew, jma, sa, kma-eew
 - 气象预警：weatheralarm
+- 海啸信息：tsunami
 """
 
 import json
 import re
+import ssl
+import urllib.request
+import urllib.parse
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from .base_adapter import BaseAdapter
@@ -59,8 +63,8 @@ class FanStudioAdapter(BaseAdapter):
 
     # Fan Studio All 时按配置「勾选预警/勾选速报」决定解析范围（不依赖单项 URL）
     FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-    FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko',
-                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'weatheralarm']
+    FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
+                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'weatheralarm', 'tsunami']
 
     def _get_fanstudio_enabled_source_names(self, enabled_sources: Dict[str, bool], config: Any, all_url: str) -> set:
         """当使用 All 数据源时，根据配置 fanstudio_parse_warning / fanstudio_parse_report 得到要解析的数据源名称集合。"""
@@ -124,10 +128,10 @@ class FanStudioAdapter(BaseAdapter):
                 # 地震预警（优先级最高）
                 'cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew',
                 # 地震速报
-                'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'hko', 
+                'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
                 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn',
-                # 气象预警
-                'weatheralarm'
+                # 气象预警、海啸信息
+                'weatheralarm', 'tsunami'
             ]
             
             # 处理所有有效数据源（只处理启用的）
@@ -192,15 +196,15 @@ class FanStudioAdapter(BaseAdapter):
                 # 如果适配器类型是 'all'，需要处理所有数据源
                 if self.data_source_type == 'all':
                     # 遍历所有数据源，返回第一个有效的数据
-                    # 优先级：预警 > 速报 > 气象预警
+                    # 优先级：预警 > 速报 > 气象预警 > 海啸信息
                     priority_sources = [
                         # 地震预警（优先级最高）
                         'cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew',
                         # 地震速报
-                        'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa', 'p2pquake', 'hko', 
+                        'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'p2pquake', 'hko',
                         'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn',
-                        # 气象预警
-                        'weatheralarm'
+                        # 气象预警、海啸信息
+                        'weatheralarm', 'tsunami'
                     ]
                     
                     enabled_sources = getattr(self, '_enabled_sources', {})
@@ -304,7 +308,9 @@ class FanStudioAdapter(BaseAdapter):
             # 根据数据源类型选择不同的解析方法
             if source_type == 'weatheralarm':
                 result = self._parse_weather(data)
-            elif source_type in ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'cwa',
+            elif source_type == 'tsunami':
+                result = self._parse_tsunami(data)
+            elif source_type in ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa',
                                 'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']:
                 result = self._parse_earthquake_report(data, source_type)
             elif source_type in ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']:
@@ -605,7 +611,178 @@ class FanStudioAdapter(BaseAdapter):
             'source_type': 'weatheralarm',  # 添加数据源类型
             'raw_data': data,
         }
-    
+
+    def _parse_tsunami(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        解析海啸信息数据（自然资源部海啸预警中心）。
+        显示格式参考 P2PQuake 海啸：等级 + 震源/海域 + 预计浪高（如有）+ 沿海预报区域及到达时间（如有）。
+        """
+        if not data or not isinstance(data, dict):
+            return None
+        warning_info = data.get('warningInfo') or {}
+        time_info = data.get('timeInfo') or {}
+        shock_info = data.get('shockInfo') or {}
+        details = data.get('details') or {}
+        forecasts = data.get('forecasts') or []
+        shock_time = shock_info.get('shockTime') or time_info.get('alarmDate') or ''
+        if not shock_time:
+            return None
+        if shock_time:
+            shock_time = timezone_utils.cst_to_display(shock_time)
+        organization = warning_info.get('orgUnit') or self._get_organization_name_by_type('tsunami')
+        # 机构名带 LEVEL：第X报 XXX通报
+        batch = (details.get('batch') or '').strip()
+        title = (warning_info.get('title') or '海啸信息').strip()
+        if batch:
+            organization = f"{organization} 第{batch}报 {title}通报".strip()
+        else:
+            organization = f"{organization} {title}通报".strip() if title else organization
+        magnitude = self._safe_float(shock_info.get('magnitude'), 0)
+        depth = self._safe_float(shock_info.get('depth'), 0)
+        latitude = self._safe_float(shock_info.get('latitude'), 0)
+        longitude = self._safe_float(shock_info.get('longitude'), 0)
+        event_id = data.get('id') or data.get('code') or ''
+        # 按 P2PQuake 海啸格式拼接详细说明：等级 + 震源海域 + 预计浪高 + 沿海区域(到达时间)
+        place_name = self._build_tsunami_detail_nmefc(
+            warning_info=warning_info,
+            shock_info=shock_info,
+            details=details,
+            forecasts=forecasts,
+        )
+        logo_url = (details.get('logoUrl') or '').strip()
+        # 相对路径时用 htmlUrl 同源拼成绝对 URL，避免前端请求失败
+        if logo_url and not logo_url.startswith(('http://', 'https://')):
+            html_url_for_base = (details.get('htmlUrl') or '').strip()
+            if html_url_for_base:
+                logo_url = urllib.parse.urljoin(html_url_for_base, logo_url)
+        # 海啸 logo 为 obs.nmefc.cn 时：path 规范化为单次编码，并强制使用 https（该站仅 HTTPS 可访问）
+        if logo_url and 'obs.nmefc.cn' in logo_url:
+            try:
+                parsed_logo = urllib.parse.urlparse(logo_url)
+                path_decoded = urllib.parse.unquote(parsed_logo.path, encoding='utf-8')
+                path_encoded = urllib.parse.quote(path_decoded, safe='/', encoding='utf-8')
+                scheme = 'https' if parsed_logo.scheme == 'http' else parsed_logo.scheme
+                logo_url = urllib.parse.urlunparse((scheme, parsed_logo.netloc, path_encoded, parsed_logo.params, parsed_logo.query, parsed_logo.fragment))
+            except Exception:
+                pass
+        result = {
+            'type': 'report',
+            'is_tsunami': True,
+            'source_type': 'tsunami',
+            'place_name': place_name,
+            'shock_time': shock_time,
+            'organization': organization,
+            'magnitude': magnitude,
+            'depth': depth,
+            'latitude': latitude,
+            'longitude': longitude,
+            'event_id': event_id,
+            'raw_data': data,
+        }
+        if logo_url:
+            result['logo_url'] = logo_url
+        html_url = (details.get('htmlUrl') or '').strip()
+        if html_url:
+            remarks = self._fetch_tsunami_remarks(html_url)
+            if remarks:
+                result['tsunami_remarks'] = remarks
+        return result
+
+    def _fetch_tsunami_remarks(self, html_url: str) -> str:
+        """
+        从 details.htmlUrl 拉取 HTML，解析出备注等通报正文。
+        优先提取「备注」或「|| 备注」后的内容；否则返回主内容区全文。
+        """
+        if not html_url or not isinstance(html_url, str):
+            return ''
+        try:
+            req = urllib.request.Request(html_url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                raw = resp.read()
+            html = raw.decode('utf-8', errors='replace')
+        except Exception as e:
+            logger.debug(f"[海啸] 拉取 htmlUrl 失败: {html_url[:60]}..., {e}")
+            return ''
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            logger.debug("[海啸] 解析 htmlUrl 需要 beautifulsoup4")
+            return ''
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            full_text = soup.get_text(separator='\n', strip=True)
+        except Exception as e:
+            logger.debug(f"[海啸] 解析 HTML 失败: {e}")
+            return ''
+        if not full_text:
+            return ''
+
+        def _strip_note_section(s: str) -> str:
+            """去掉「注：」及之后的说明段，不展示注的内容。"""
+            for note_marker in ['注：', '注:']:
+                if note_marker in s:
+                    s = s.split(note_marker)[0].strip()
+                    break
+            return s
+
+        # 优先提取「备注」或「|| 备注」后的内容
+        for marker in ['|| 备注:', '备注:', '|| 备注：', '备注：']:
+            idx = full_text.find(marker)
+            if idx >= 0:
+                remarks = full_text[idx + len(marker):].strip()
+                remarks = re.sub(r'\n+', '。', remarks)
+                remarks = re.sub(r'\s+', ' ', remarks).strip()
+                remarks = _strip_note_section(remarks)
+                return remarks if remarks else ''
+        full_clean = re.sub(r'\n+', '。', re.sub(r'\s+', ' ', full_text).strip())
+        return _strip_note_section(full_clean)
+
+    def _build_tsunami_detail_nmefc(
+        self,
+        warning_info: Dict[str, Any],
+        shock_info: Dict[str, Any],
+        details: Dict[str, Any],
+        forecasts: List[Dict[str, Any]],
+    ) -> str:
+        """
+        拼接自然资源部海啸详细说明，格式参考 P2PQuake：等级 + 震源海域 + 预计浪高 + 沿海省份(到达时间)。
+        示例：海啸信息 加里曼丹岛(婆罗洲)海域。预计浪高约50厘米。福建(10:30)、广东(11:00)
+        """
+        parts = []
+        level = (warning_info.get('level') or warning_info.get('title') or '').strip()
+        if level:
+            parts.append(level + ' ')
+        place = (shock_info.get('placeName') or warning_info.get('subtitle') or '').strip()
+        if place:
+            parts.append(place)
+        flist = [x for x in (forecasts or []) if isinstance(x, dict)]
+        max_height_str = None
+        for f in flist:
+            if f.get('maxWaveHeight'):
+                max_height_str = f.get('maxWaveHeight')
+                break
+        region_bits = []
+        for f in flist[:8]:
+            prov = (f.get('province') or f.get('warningLevel') or '').strip()
+            eta = (f.get('estimatedArrivalTime') or '').strip()
+            if not prov:
+                continue
+            if eta:
+                region_bits.append(f"{prov}({eta})")
+            else:
+                region_bits.append(prov)
+        if max_height_str or region_bits:
+            if parts:
+                parts.append('。')
+            if max_height_str:
+                parts.append(f"预计浪高约{max_height_str}。")
+            if region_bits:
+                parts.append('、'.join(region_bits))
+        return ''.join(parts).strip() or (place or level or '海啸信息')
+
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         """安全转换为浮点数"""
         if value is None:

@@ -392,12 +392,59 @@ class MessageProcessor:
         # 时间
         message_parts.append(shock_time)
         
-        # 海啸预报：仅显示类型/区域，不显示震级与震源深度
+        # 海啸预报：若有 htmlUrl 解析的备注全文则优先展示，否则展示 place_name
         if data.get('is_tsunami'):
-            if place_name:
+            remarks = (data.get('tsunami_remarks') or '').strip()
+            if remarks:
+                # 去掉备注开头重复的机构名，避免与【机构】时间，后的正文重复显示
+                org = data.get('organization', '')
+                base_org = "自然资源部海啸预警中心"
+                while True:
+                    stripped = False
+                    if org and remarks.startswith(org):
+                        remarks = remarks[len(org):].strip()
+                        stripped = True
+                    if base_org and remarks.startswith(base_org):
+                        remarks = remarks[len(base_org):].strip()
+                        stripped = True
+                    if not stripped:
+                        break
+                # 去掉开头重复的「海啸信息」（标题已有「海啸信息通报」）
+                while remarks == "海啸信息" or remarks.startswith("海啸信息 ") or remarks.startswith("海啸信息　"):
+                    if remarks == "海啸信息":
+                        remarks = ""
+                        break
+                    for prefix in ("海啸信息 ", "海啸信息　"):
+                        if remarks.startswith(prefix):
+                            remarks = remarks[len(prefix):].strip()
+                            break
+                # 正文中「签发： 海啸信息 据…」里的重复「海啸信息」去掉一处
+                if "签发： 海啸信息 " in remarks:
+                    remarks = remarks.replace("签发： 海啸信息 ", " ", 1)
+                # 海啸预警去掉「签发」二字（含「签发：」「签发： 」等）
+                remarks = remarks.replace("签发： ", " ").replace("签发：", "")
+                # 避免时间接时间：正文已有 shock_time，去掉「编号：」前整段「时间：…」
+                if remarks.startswith("时间：") and "编号：" in remarks:
+                    remarks = remarks[remarks.find("编号："):].strip()
+                # 删除「地图如下」类句子（整句去掉，不保留）
+                for phrase in (
+                    "地震位置图如下: ", "地震位置图如下：", "地震位置图如下: ", "地震位置图如下： ",
+                    "地图如下所示：", "地图如下所示: ", "地震位置图如下:", "地图如下所示： ",
+                ):
+                    remarks = remarks.replace(phrase, "").strip()
+                # 去掉结尾可能残留的「如下」类短句
+                for suffix in ("地震位置图如下:", "地震位置图如下：", "地图如下所示：", "地图如下所示:"):
+                    s = suffix.strip()
+                    if remarks.endswith(s):
+                        remarks = remarks[:-len(s)].strip()
+                    elif remarks.endswith(s + " "):
+                        remarks = remarks[: -(len(s) + 1)].strip()
+                if remarks:
+                    message_parts.append(f"，{remarks}")
+            if not remarks and place_name:
                 message_parts.append(f"，{place_name}")
             return "".join(message_parts)
-        
+
         # 地点和震级
         if place_name and magnitude > 0:
             message_parts.append(f"，{place_name}发生{magnitude:.1f}级地震")
@@ -610,18 +657,19 @@ class MessageProcessor:
     
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:
         """
-        获取气象预警图片路径（优先 NMC URL，无 type 时匹配本地 jpg）
-        
+        获取气象预警图片路径（根据配置优先 NMC 在线或仅本地）
+
         Args:
             parsed_data: 解析后的数据字典
-            
+
         Returns:
             图片路径字符串，如果未找到则返回None
         """
         if parsed_data.get('type') != 'weather':
             return None
-        
         raw_data = parsed_data.get('raw_data', {})
+        if not getattr(self.config.gui_config, 'use_weather_image_nmc', True):
+            return self._match_weather_image_local_only(raw_data)
         return self._match_weather_image(raw_data)
 
     def get_weather_image_path_local(self, parsed_data: Dict[str, Any]) -> Optional[str]:

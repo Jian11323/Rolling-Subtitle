@@ -15,5 +15,8 @@ PyQt5>=5.15.0
 # 时区数据（Windows 下 zoneinfo 需要，打包时区功能必需）
 tzdata>=2024.1
 
+# 可选：自然资源部海啸预警中心 htmlUrl 备注解析（不安装时海啸仅显示摘要，不拉取正文）
+# beautifulsoup4>=4.11.0
+
 # 可选：如果需要打包成exe，可以使用以下工具
 # pyinstaller>=5.0

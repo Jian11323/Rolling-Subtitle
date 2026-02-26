@@ -18,28 +18,32 @@ logger = get_logger()
 
 # 数据源优先级定义（数字越小优先级越高）
 # 注意：这是速报消息的优先级，预警消息（除气象预警外）永远优先于速报
-# 速报播放顺序：气象预警、cenc, ningxia, guangxi, shanxi, beijing, cwa, p2pquake, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
+# 速报播放顺序：气象预警、海啸信息、cenc, ningxia, guangxi, shanxi, beijing, shandong, yunnan, cwa, p2pquake, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
 SOURCE_PRIORITY: Dict[str, int] = {
-    # 气象预警 - 优先级最高（速报中）
+    # 气象预警、海啸信息 - 速报中优先级最高（海啸用显示名「海啸信息」传入，需同时登记）
     'weatheralarm': 1,
+    'tsunami': 2,
+    '海啸信息': 2,
     
     # 速报数据源 - 按指定顺序设置优先级
-    'cenc': 2,
-    'ningxia': 3,
-    'guangxi': 4,
-    'shanxi': 5,
-    'beijing': 6,
-           'cwa': 7,
-           'p2pquake': 8,  # P2P日本气象厅地震情报
-           'p2pquake_tsunami': 8,  # P2P日本气象厅海啸预报
-           'hko': 9,
-           'usgs': 10,
-           'emsc': 11,
-           'bcsf': 13,
-           'gfz': 14,
-           'usp': 15,
-           'kma': 16,
-           'fssn': 17,
+    'cenc': 3,
+    'ningxia': 4,
+    'guangxi': 5,
+    'shanxi': 6,
+    'beijing': 7,
+    'shandong': 8,
+    'yunnan': 9,
+           'cwa': 10,
+           'p2pquake': 11,  # P2P日本气象厅地震情报
+           'p2pquake_tsunami': 11,  # P2P日本气象厅海啸预报
+           'hko': 12,
+           'usgs': 13,
+           'emsc': 14,
+           'bcsf': 15,
+           'gfz': 16,
+           'usp': 17,
+           'kma': 18,
+           'fssn': 19,
     
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
     'cea': 0,
@@ -55,9 +59,6 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'wolfx_cenc_eqlist': 8, 'wolfx_jma_eqlist': 8,
     # NIED 预警
     'nied': 0,
-    # 其他数据源
-    'fanstudio': 99, # Fan Studio
-    
     # 默认优先级（未知数据源）
     'default': 99,
 }
