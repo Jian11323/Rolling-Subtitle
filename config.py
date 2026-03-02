@@ -1,0 +1,812 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+配置管理模块 - 优化版
+负责加载和管理应用程序配置，支持动态重载和验证
+"""
+
+import json
+import os
+import threading
+from typing import Dict, List, Any, Optional, Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from utils.logger import get_logger
+
+logger = get_logger()
+
+# 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
+APP_VERSION = "2.4.0"
+
+# 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
+# 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
+CHANGELOG_TEXT = """版本 2.4.0
+
+1、移除Wolfx 数据源"""
+
+@dataclass
+class GUIConfig:
+    """GUI配置类"""
+    font_size: int = 40
+    font_family: str = "SimSun"
+    font_bold: bool = False
+    font_italic: bool = False
+    text_speed: float = 4.0
+    bg_color: str = 'black'
+    info_color: str = '#01FF00'
+    opacity: float = 1.0
+    window_width: int = 1000
+    window_height: int = 100
+    resizable: bool = True
+    vsync_enabled: bool = True  # 垂直同步开关
+    target_fps: int = 60  # 目标帧率
+    timezone: str = "Asia/Shanghai"  # 显示时区（IANA 名称），默认北京时间
+    last_seen_changelog_version: str = ""  # 上次已读的更新说明版本，用于弹窗仅展示一次
+    use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
+    render_backend: str = "cpu"  # "cpu" | "opengl"，默认 cpu
+    always_on_top: bool = False  # 窗口置顶
+    use_weather_image_nmc: bool = True  # True=气象预警图标优先 NMC 在线，False=仅本地图片
+    watermark_text: str = ""  # 背景水印文字，空则不显示
+    watermark_angle: str = "horizontal"  # 水印方向："horizontal" 横向，"45" 斜向45度
+    watermark_font_family: str = ""  # 水印字体族名，空表示跟随主字体
+    watermark_font_size: int = 0  # 水印字体大小，0 表示自动（按主字体比例）
+    watermark_position: str = "diagonal"  # 水印位置: diagonal | top_left | top_right | bottom_left | bottom_right
+
+    def validate(self) -> bool:
+        """验证配置有效性"""
+        try:
+            assert 10 <= self.font_size <= 100, "字体大小必须在10-100之间"
+            assert 0.1 <= self.text_speed <= 20.0, "滚动速度必须在0.1-20.0之间"
+            assert 0.1 <= self.opacity <= 1.0, "透明度必须在0.1-1.0之间"
+            # 窗口尺寸不受系统分辨率限制，允许超出屏幕；仅做合理范围校验
+            assert 800 <= self.window_width <= 20000, "窗口宽度必须在800-20000之间"
+            assert 100 <= self.window_height <= 5000, "窗口高度必须在100-5000之间"
+            assert 1 <= self.target_fps <= 240, "目标帧率必须在1-240之间"
+            assert self.render_backend in ("cpu", "opengl"), "render_backend 必须为 cpu 或 opengl"
+            if getattr(self, 'watermark_angle', 'horizontal') not in ("horizontal", "45"):
+                self.watermark_angle = "horizontal"
+            try:
+                if getattr(self, 'watermark_font_size', 0) < 0:
+                    self.watermark_font_size = 0
+            except Exception:
+                self.watermark_font_size = 0
+            allowed_positions = {"diagonal", "top_left", "top_right", "bottom_left", "bottom_right"}
+            if getattr(self, 'watermark_position', 'diagonal') not in allowed_positions:
+                self.watermark_position = "diagonal"
+            return True
+        except AssertionError as e:
+            logger.error(f"GUI配置验证失败: {e}")
+            return False
+
+
+@dataclass
+class MessageConfig:
+    """消息处理配置"""
+    max_message_length: int = 0
+    display_duration: int = 0
+    # 预警无活动时长（秒）：当前未使用，仅保留配置兼容；与“发震时间有效期/最少展示时长”无直接对应，默认 10 分钟
+    max_warning_inactivity_time: int = 600
+    # 预警按发震时间的有效期（秒）：超过此时长的预警入队时丢弃、展示时移除，默认 5 分钟
+    warning_shock_validity_seconds: int = 300
+    # 预警最少展示时长（秒）：一旦展示则在此时间内不因发震时间过期被移除，默认 5 分钟
+    warning_min_display_seconds: int = 300
+    max_report_inactivity_time: int = 300
+    max_other_inactivity_time: int = 300
+    no_activity_message: str = '系统运行中，等待最新地震信息...'
+    custom_text: str = '系统运行中，等待最新地震信息...'
+    use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
+    # Fan Studio All 数据源：勾选则解析对应类型，不勾选则不解析（不写单项 URL）
+    fanstudio_parse_warning: bool = True  # 勾选则解析所有预警数据源
+    fanstudio_parse_report: bool = True   # 勾选则解析所有速报数据源（含气象预警）
+    warning_color: str = '#FF0000'  # 红色
+    report_color: str = '#00FFFF'  # 青色
+    custom_text_color: str = '#01FF00'  # 自定义文本颜色（绿色，与默认颜色一致）
+    default_color: str = '#01FF00'
+    weather_warning_color: str = '#FFF500'
+    # 收到预警更新报立即切换：开启则同事件更新报立即打断并替换，否则仅后台替换；默认关闭
+    show_one_alert_per_received: bool = False
+    # 强制单行：将数据源中的换行符替换为空格，保证滚动字幕单行显示；默认开启
+    force_single_line: bool = True
+    # 预警后限时显示速报再回自定义：仅在「自定义文本」模式下生效；速报连续显示 custom_text_return_seconds 秒后自动恢复为仅显示自定义文本
+    custom_text_return_after_warning: bool = False
+    custom_text_return_seconds: int = 300  # 限时秒数，默认 5 分钟；仅当 custom_text_return_after_warning 为 True 时生效
+
+    def validate(self) -> bool:
+        """验证配置有效性"""
+        try:
+            assert self.max_message_length >= 0, "消息最大长度不能为负数"
+            assert self.display_duration >= 0, "显示持续时间不能为负数"
+            assert self.max_warning_inactivity_time > 0, "预警无活动时长必须大于0"
+            assert self.warning_shock_validity_seconds > 0, "预警发震时间有效期必须大于0"
+            assert self.warning_min_display_seconds > 0, "预警最少展示时长必须大于0"
+            assert self.max_report_inactivity_time > 0, "速报无活动时长必须大于0"
+            assert self.max_other_inactivity_time > 0, "其他消息无活动时长必须大于0"
+            assert 1 <= self.custom_text_return_seconds <= 3600, "custom_text_return_seconds 必须在 1–3600 之间"
+            return True
+        except AssertionError as e:
+            logger.error(f"消息配置验证失败: {e}")
+            return False
+
+
+@dataclass
+class WebSocketConfig:
+    """WebSocket配置类"""
+    reconnect_interval: int = 5
+    max_reconnect_attempts: int = -1
+    ping_interval: int = 30
+    ping_timeout: int = 10
+    close_timeout: int = 5
+    connection_timeout: int = 10
+    
+    def validate(self) -> bool:
+        """验证配置有效性"""
+        try:
+            assert self.reconnect_interval > 0, "重连间隔必须大于0"
+            assert self.max_reconnect_attempts >= -1, "最大重连次数必须≥-1"
+            assert self.ping_interval > 0, "心跳间隔必须大于0"
+            assert self.ping_timeout > 0, "心跳超时必须大于0"
+            assert self.close_timeout > 0, "关闭超时必须大于0"
+            assert self.connection_timeout > 0, "连接超时必须大于0"
+            return True
+        except AssertionError as e:
+            logger.error(f"WebSocket配置验证失败: {e}")
+            return False
+
+
+@dataclass
+class TranslationConfig:
+    """地名修正配置类（原翻译配置，公开版仅保留地名修正）"""
+    use_place_name_fix: bool = True  # 是否使用地名修正（速报根据经纬度修正地名），默认开启
+    
+    def validate(self) -> bool:
+        """验证配置有效性"""
+        return True
+
+
+@dataclass
+class LogConfig:
+    """日志配置类"""
+    output_to_file: bool = True  # 是否输出日志到文件（默认开启）
+    clear_log_on_startup: bool = True  # 每次程序启动前是否清空日志（默认开启）
+    split_by_date: bool = False  # 是否按日期分割日志（默认关闭）
+    max_log_size: int = 10  # 日志文件最大大小（MB，默认10MB）
+    
+    def validate(self) -> bool:
+        """验证配置有效性"""
+        try:
+            assert self.max_log_size > 0, "日志大小必须大于0"
+            assert self.max_log_size <= 1000, "日志大小不能超过1000MB"
+            return True
+        except AssertionError as e:
+            logger.error(f"日志配置验证失败: {e}")
+            return False
+
+
+class Config:
+    """配置管理类 - 单例模式，支持动态重载"""
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(Config, cls).__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+        
+        # 配置实例
+        self.gui_config = GUIConfig()
+        self.message_config = MessageConfig()
+        self.ws_config = WebSocketConfig()
+        self.translation_config = TranslationConfig()
+        self.log_config = LogConfig()
+
+        # 数据源配置
+        self.enabled_sources: Dict[str, bool] = {}
+        self.ws_urls: List[str] = []
+        self.custom_data_source_url: str = ""  # 自定义数据源 URL（http/https/ws/wss），空为关闭
+        
+        # 配置变更回调
+        self._config_callbacks: List[Callable] = []
+        
+        # 配置文件路径：C:\Users\账户名\AppData\Roaming\subtitl\settings.json
+        # 日志文件：C:\Users\账户名\AppData\Roaming\subtitl\log.txt（或log_YYYYMMDD.txt）
+        # 翻译缓存：C:\Users\账户名\AppData\Roaming\subtitl\translation_cache.json
+        # 注意：日志文件和翻译缓存都在同一个文件夹（subtitl目录）中
+        try:
+            config_dir = Path.home() / 'AppData' / 'Roaming' / 'subtitl'
+            
+            # 如果目录不存在，自动创建（使用try-except避免阻塞）
+            if not config_dir.exists():
+                try:
+                    config_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"已创建配置目录: {config_dir}")
+                except (OSError, PermissionError) as e:
+                    logger.warning(f"无法创建配置目录 {config_dir}: {e}，使用默认配置")
+            else:
+                logger.debug(f"配置目录已存在: {config_dir}")
+            
+            self.config_file = config_dir / 'settings.json'
+        except Exception as e:
+            logger.error(f"配置目录初始化失败: {e}，使用默认配置")
+            self.config_file = None
+        
+        # 加载配置（使用try-except避免阻塞）
+        try:
+            self.load_config()
+        except Exception as e:
+            logger.error(f"配置加载失败: {e}，使用默认配置")
+            self._apply_default_config()
+        
+        self._initialized = True
+        logger.debug("配置管理器初始化完成")
+    
+    def add_config_callback(self, callback: Callable):
+        """添加配置变更回调"""
+        self._config_callbacks.append(callback)
+    
+    def remove_config_callback(self, callback: Callable):
+        """移除配置变更回调"""
+        if callback in self._config_callbacks:
+            self._config_callbacks.remove(callback)
+    
+    def _notify_config_changed(self):
+        """通知配置变更"""
+        for callback in self._config_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"配置变更回调执行失败: {e}")
+    
+    def _get_full_config_dict(self) -> Dict[str, Any]:
+        """根据当前内存中的各 config 对象生成完整配置 dict（与 save 结构一致）"""
+        return {
+            'config_version': APP_VERSION,
+            'GUI_CONFIG': {
+                'font_size': self.gui_config.font_size,
+                'font_family': self.gui_config.font_family,
+                'font_bold': self.gui_config.font_bold,
+                'font_italic': self.gui_config.font_italic,
+                'text_speed': self.gui_config.text_speed,
+                'bg_color': self.gui_config.bg_color,
+                'info_color': self.gui_config.info_color,
+                'opacity': self.gui_config.opacity,
+                'window_width': self.gui_config.window_width,
+                'window_height': self.gui_config.window_height,
+                'resizable': self.gui_config.resizable,
+                'vsync_enabled': self.gui_config.vsync_enabled,
+                'target_fps': self.gui_config.target_fps,
+                'timezone': self.gui_config.timezone,
+                'last_seen_changelog_version': self.gui_config.last_seen_changelog_version,
+                'use_gpu_rendering': self.gui_config.use_gpu_rendering,
+                'render_backend': self.gui_config.render_backend,
+                'always_on_top': self.gui_config.always_on_top,
+                'use_weather_image_nmc': self.gui_config.use_weather_image_nmc,
+                'watermark_text': self.gui_config.watermark_text,
+                'watermark_angle': self.gui_config.watermark_angle,
+                'watermark_font_family': getattr(self.gui_config, 'watermark_font_family', ""),
+                'watermark_font_size': getattr(self.gui_config, 'watermark_font_size', 0),
+                'watermark_position': getattr(self.gui_config, 'watermark_position', "diagonal"),
+            },
+            'MESSAGE_CONFIG': {
+                'max_message_length': self.message_config.max_message_length,
+                'display_duration': self.message_config.display_duration,
+                'max_warning_inactivity_time': self.message_config.max_warning_inactivity_time,
+                'warning_shock_validity_seconds': self.message_config.warning_shock_validity_seconds,
+                'warning_min_display_seconds': self.message_config.warning_min_display_seconds,
+                'max_report_inactivity_time': self.message_config.max_report_inactivity_time,
+                'max_other_inactivity_time': self.message_config.max_other_inactivity_time,
+                'no_activity_message': self.message_config.no_activity_message,
+                'custom_text': self.message_config.custom_text,
+                'use_custom_text': self.message_config.use_custom_text,
+                'fanstudio_parse_warning': self.message_config.fanstudio_parse_warning,
+                'fanstudio_parse_report': self.message_config.fanstudio_parse_report,
+                'warning_color': self.message_config.warning_color,
+                'report_color': self.message_config.report_color,
+                'custom_text_color': self.message_config.custom_text_color,
+                'default_color': self.message_config.default_color,
+                'weather_warning_color': self.message_config.weather_warning_color,
+                'show_one_alert_per_received': self.message_config.show_one_alert_per_received,
+                'force_single_line': getattr(self.message_config, 'force_single_line', True),
+                'custom_text_return_after_warning': getattr(self.message_config, 'custom_text_return_after_warning', False),
+                'custom_text_return_seconds': getattr(self.message_config, 'custom_text_return_seconds', 300),
+            },
+            'WS_CONFIG': {
+                'reconnect_interval': self.ws_config.reconnect_interval,
+                'max_reconnect_attempts': self.ws_config.max_reconnect_attempts,
+                'ping_interval': self.ws_config.ping_interval,
+                'ping_timeout': self.ws_config.ping_timeout,
+                'close_timeout': self.ws_config.close_timeout,
+                'connection_timeout': self.ws_config.connection_timeout,
+            },
+            'TRANSLATION_CONFIG': {
+                'use_place_name_fix': self.translation_config.use_place_name_fix,
+            },
+            'LOG_CONFIG': {
+                'output_to_file': self.log_config.output_to_file,
+                'clear_log_on_startup': self.log_config.clear_log_on_startup,
+                'split_by_date': self.log_config.split_by_date,
+                'max_log_size': self.log_config.max_log_size,
+            },
+            'ENABLED_SOURCES': self._get_persisted_enabled_sources(),
+            'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
+        }
+    
+    def _is_fanstudio_individual_url(self, url: str) -> bool:
+        """是否为 Fan Studio 单项数据源 URL（非 all）。仅 all 用于连接，单项不再持久化。"""
+        if not url or not isinstance(url, str):
+            return False
+        if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
+            return False
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        return url != all_url
+
+    def _get_persisted_enabled_sources(self) -> Dict[str, bool]:
+        """供保存到配置文件的 enabled_sources：仅 all 与非 Fan Studio 数据源（不包含 Fan Studio 单项）。"""
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        return {
+            k: v
+            for k, v in self.enabled_sources.items()
+            if k == all_url or not self._is_fanstudio_individual_url(k)
+        }
+
+    def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
+        """仅对 existing 做缺项补全：只补 full 中有而 existing 中没有的键，不删除 existing 中任何键。"""
+        import copy
+        merged = copy.deepcopy(existing)
+        for key, full_value in full.items():
+            if key not in merged:
+                merged[key] = copy.deepcopy(full_value)
+            elif isinstance(full_value, dict) and isinstance(merged.get(key), dict):
+                # 嵌套 dict：只补全缺失的子键
+                for subkey, subval in full_value.items():
+                    if subkey not in merged[key]:
+                        merged[key][subkey] = copy.deepcopy(subval)
+        return merged
+    
+    def _has_missing_keys(self, existing: Dict[str, Any], full: Dict[str, Any]) -> bool:
+        """检查 existing 是否缺少 full 中的键（用于决定是否写回补全后的配置）。"""
+        for key in full:
+            if key not in existing:
+                return True
+            if isinstance(full[key], dict) and isinstance(existing.get(key), dict):
+                for subkey in full[key]:
+                    if subkey not in existing[key]:
+                        return True
+        return False
+    
+    def _write_config_dict(self, config_data: Dict[str, Any]) -> bool:
+        """将配置 dict 原子写入配置文件。"""
+        if not self.config_file:
+            return False
+        import shutil
+        temp_file = self.config_file.with_suffix('.tmp')
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=2)
+            shutil.move(str(temp_file), str(self.config_file))
+            return True
+        except Exception as e:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except OSError:
+                    pass
+            logger.warning(f"写回配置文件失败: {e}")
+            return False
+    
+    def load_config(self) -> bool:
+        """加载配置文件"""
+        try:
+            if self.config_file is None or not self.config_file.exists():
+                logger.warning(f"配置文件不存在，使用默认配置")
+                self._apply_default_config()
+                return True
+            
+            # 使用try-except包裹文件读取，避免阻塞
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    config_data = json.load(f)
+            except (OSError, PermissionError, json.JSONDecodeError) as e:
+                logger.warning(f"读取配置文件失败: {e}，使用默认配置")
+                self._apply_default_config()
+                return False
+            
+            # 版本不一致或缺少版本时，仅备份并继续按 section 合并加载（缺项补全，保留用户自定义）
+            saved_version = config_data.get('config_version') or config_data.get('app_version') or ''
+            version_changed = (saved_version != APP_VERSION)
+            if version_changed:
+                logger.info(f"配置版本({saved_version or '无'})与当前程序版本({APP_VERSION})不一致，将合并加载并补全缺失项，保留用户设置")
+                try:
+                    if self.config_file and self.config_file.exists():
+                        bak = self.config_file.with_suffix('.json.bak')
+                        import shutil
+                        shutil.copy2(str(self.config_file), str(bak))
+                        logger.debug(f"已备份旧配置到 {bak}")
+                except Exception as e:
+                    logger.debug(f"备份旧配置失败(可忽略): {e}")
+            
+            # 加载各模块配置（缺失的键保持 dataclass 默认值）
+            success = True
+            
+            if 'GUI_CONFIG' in config_data:
+                gui_data = {k: v for k, v in config_data['GUI_CONFIG'].items() if hasattr(self.gui_config, k)}
+                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                for key, value in gui_data.items():
+                    if hasattr(self.gui_config, key):
+                        setattr(self.gui_config, key, value)
+                # 兼容旧配置：无 render_backend 时根据 use_gpu_rendering 推导
+                if 'render_backend' not in config_data.get('GUI_CONFIG', {}):
+                    self.gui_config.render_backend = "opengl" if self.gui_config.use_gpu_rendering else "cpu"
+                # 规范化并迁移：统一为小写，不支持的取值改为 opengl
+                backend = (self.gui_config.render_backend or "").strip().lower()
+                if backend in ("cpu", "opengl"):
+                    self.gui_config.render_backend = backend
+                else:
+                    self.gui_config.render_backend = "opengl"
+                # 根据 render_backend 同步 use_gpu_rendering，保证一致
+                self.gui_config.use_gpu_rendering = (self.gui_config.render_backend == "opengl")
+                if not self.gui_config.validate():
+                    success = False
+            
+            if 'MESSAGE_CONFIG' in config_data:
+                msg_data = {k: v for k, v in config_data['MESSAGE_CONFIG'].items() if hasattr(self.message_config, k)}
+                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                for key, value in msg_data.items():
+                    if hasattr(self.message_config, key):
+                        setattr(self.message_config, key, value)
+                if not self.message_config.validate():
+                    success = False
+            
+            if 'WS_CONFIG' in config_data:
+                ws_data = {k: v for k, v in config_data['WS_CONFIG'].items() if hasattr(self.ws_config, k)}
+                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                for key, value in ws_data.items():
+                    if hasattr(self.ws_config, key):
+                        setattr(self.ws_config, key, value)
+                if not self.ws_config.validate():
+                    success = False
+            
+            if 'TRANSLATION_CONFIG' in config_data:
+                trans_data = {k: v for k, v in config_data['TRANSLATION_CONFIG'].items() if hasattr(self.translation_config, k)}
+                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                for key, value in trans_data.items():
+                    if hasattr(self.translation_config, key):
+                        setattr(self.translation_config, key, value)
+                if not self.translation_config.validate():
+                    success = False
+            
+            if 'LOG_CONFIG' in config_data:
+                log_data = {k: v for k, v in config_data['LOG_CONFIG'].items() if hasattr(self.log_config, k)}
+                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                for key, value in log_data.items():
+                    if hasattr(self.log_config, key):
+                        setattr(self.log_config, key, value)
+                if not self.log_config.validate():
+                    success = False
+            
+            # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
+            raw_sources = config_data.get('ENABLED_SOURCES', {})
+            # 启动时若配置中存在 wolfx 数据源，后续将保留用户自定义设置并覆盖写回一次以移除 wolfx
+            has_wolfx_in_file = any(
+                'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k
+                for k in raw_sources
+            )
+            base_domain = "fanstudio.tech"
+            all_url = f"wss://ws.{base_domain}/all"
+            self.enabled_sources = {
+                k: v for k, v in raw_sources.items()
+                if k == all_url or not self._is_fanstudio_individual_url(k)
+            }
+            # 确保内存中不保留任何 Fan Studio 单项 URL
+            for k in list(self.enabled_sources.keys()):
+                if self._is_fanstudio_individual_url(k):
+                    del self.enabled_sources[k]
+            # 迁移：移除已下线的 Wolfx 数据源
+            for k in list(self.enabled_sources.keys()):
+                if 'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k:
+                    del self.enabled_sources[k]
+            self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
+
+            # 如果配置文件中没有数据源配置，使用默认配置（仅 all + weather + 非 Fan Studio 单项）
+            weather_source = 'weatheralarm'
+            if not self.enabled_sources:
+                self.enabled_sources = {all_url: True}
+                self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
+                # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
+                self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
+                self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+                self.enabled_sources["wss://sismotide.top/nied"] = False
+                self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
+                logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
+            else:
+                if all_url not in self.enabled_sources:
+                    self.enabled_sources[all_url] = True
+                else:
+                    if not self.enabled_sources.get(all_url, False):
+                        self.enabled_sources[all_url] = True
+                # 仅补全非 Fan Studio 数据源缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉 1 条
+                if "https://api.p2pquake.net/v2/history?codes=551&limit=3" not in self.enabled_sources:
+                    self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
+                if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
+                    self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+                other_wss_urls = ["wss://sismotide.top/nied", "wss://api.p2pquake.net/v2/ws"]
+                for wss_url in other_wss_urls:
+                    if wss_url not in self.enabled_sources:
+                        self.enabled_sources[wss_url] = False
+                if f"wss://ws.{base_domain}/fssn-cmt" not in self.enabled_sources:
+                    self.enabled_sources[f"wss://ws.{base_domain}/fssn-cmt"] = False
+                    logger.debug("添加缺失的 FSSN CMT 数据源")
+
+            # 根据服务器选择更新URL
+            self._update_urls_for_server_selection()
+            
+            # 提取WebSocket URL（只包含all数据源和其他非fanstudio数据源）
+            # all数据源必须包含，单项fanstudio数据源不直接连接，只作为过滤器
+            base_domain = "fanstudio.tech"
+            all_url = f"wss://ws.{base_domain}/all"
+            
+            # 确保all数据源在enabled_sources中且为True
+            self.enabled_sources[all_url] = True
+            
+            ws_urls = []
+            # all数据源必须包含（无论enabled_sources中的状态）
+            ws_urls.append(all_url)
+            logger.debug(f"已添加all数据源到ws_urls: {all_url}")
+            
+            # 添加其他非fanstudio数据源（排除已下线的 Wolfx）
+            for url in self.enabled_sources.keys():
+                if url.startswith(('ws://', 'wss://')) and url != all_url:
+                    if ('wolfx' in url.lower() or 'ws-api.wolfx.jp' in url):
+                        continue
+                    if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
+                        if self.enabled_sources.get(url, False):
+                            ws_urls.append(url)
+                            logger.debug(f"已添加非fanstudio数据源到ws_urls: {url}")
+            
+            self.ws_urls = ws_urls
+            
+            logger.info(f"配置加载成功，启用 {len(self.ws_urls)} 个WebSocket数据源")
+            self._notify_config_changed()
+            # 缺项补全：仅添加缺失的键并写回，不覆盖用户已有设置；ENABLED_SOURCES 使用过滤后的值（不含 Fan Studio 单项、不含 wolfx）
+            full = self._get_full_config_dict()
+            merged = self._merge_config_file(config_data, full)
+            merged['ENABLED_SOURCES'] = full['ENABLED_SOURCES']
+            if version_changed:
+                merged['config_version'] = APP_VERSION
+            if version_changed or self._has_missing_keys(config_data, full) or has_wolfx_in_file:
+                try:
+                    if self._write_config_dict(merged):
+                        if has_wolfx_in_file:
+                            logger.info("配置中存在已下线的 Wolfx 数据源，已移除并写回，保留用户自定义设置")
+                        else:
+                            logger.info("已补全缺失配置项并写回，保留用户自定义设置")
+                    else:
+                        logger.warning("补全配置写回失败(可忽略)")
+                except Exception as e:
+                    logger.warning(f"写回补全配置失败(可忽略): {e}")
+            return success
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"配置文件格式错误: {e}")
+            self._apply_default_config()
+            return False
+        except Exception as e:
+            logger.error(f"配置加载失败: {e}")
+            self._apply_default_config()
+            return False
+    
+    def save_config(self) -> bool:
+        """保存当前配置到文件（合并写入：程序已知键用内存值更新，文件中多出的键保留）"""
+        import threading
+        import shutil
+        
+        if not hasattr(self, '_save_lock'):
+            self._save_lock = threading.Lock()
+        
+        if not self._save_lock.acquire(timeout=5):
+            logger.error("配置保存失败: 无法获取文件锁，可能正在被其他线程使用")
+            return False
+        
+        try:
+            our_config = self._get_full_config_dict()
+            # 若配置文件存在，先读取再合并，保留用户自定义键
+            if self.config_file and self.config_file.exists():
+                try:
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        existing = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+                # 逐 section 合并：existing 中多出的键保留，程序已知键用内存值覆盖
+                merged = dict(existing)
+                for key, our_value in our_config.items():
+                    if key == 'ENABLED_SOURCES':
+                        merged[key] = {**existing.get(key, {}), **our_value}
+                    elif isinstance(our_value, dict):
+                        merged[key] = {**existing.get(key, {}), **our_value}
+                    else:
+                        merged[key] = our_value
+                config_data = merged
+            else:
+                config_data = our_config
+            
+            if self.config_file:
+                if self._write_config_dict(config_data):
+                    logger.info("配置保存成功")
+                    return True
+                raise RuntimeError("_write_config_dict 返回 False")
+            logger.error("配置保存失败: 配置文件路径未设置")
+            return False
+        except Exception as e:
+            logger.error(f"配置保存失败: {e}", exc_info=True)
+            return False
+        finally:
+            self._save_lock.release()
+    
+    def _apply_default_config(self):
+        """应用默认配置"""
+        self.gui_config = GUIConfig()
+        self.message_config = MessageConfig()
+        self.ws_config = WebSocketConfig()
+        self.translation_config = TranslationConfig()
+        self.log_config = LogConfig()
+        # 默认数据源：仅聚合/独立源，不加入 Fan Studio 单项 wss URL（实际只连 /all）
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        weather_source = 'weatheralarm'
+
+        self.enabled_sources = {all_url: True}
+        self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
+        # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
+        self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
+        self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+        self.enabled_sources["wss://sismotide.top/nied"] = False
+        self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
+
+        ws_urls = [all_url]
+        for url in self.enabled_sources.keys():
+            if url.startswith(('ws://', 'wss://')) and url != all_url:
+                if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
+                    if self.enabled_sources.get(url, False):
+                        ws_urls.append(url)
+        self.ws_urls = ws_urls
+        self.custom_data_source_url = ""
+        logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
+    
+    def update_enabled_sources(self, sources: Dict[str, bool]):
+        """更新启用的数据源"""
+        self.enabled_sources.update(sources)
+        
+        # 根据服务器选择更新URL
+        self._update_urls_for_server_selection()
+        
+        # 提取WebSocket URL（只包含all数据源和其他非fanstudio数据源）
+        # all数据源必须包含，单项fanstudio数据源不直接连接，只作为过滤器
+        base_domain = "fanstudio.tech"
+        all_url = f"wss://ws.{base_domain}/all"
+        
+        # 确保all数据源在enabled_sources中且为True
+        self.enabled_sources[all_url] = True
+        
+        ws_urls = []
+        # all数据源必须包含（无论enabled_sources中的状态）
+        ws_urls.append(all_url)
+        
+        # 添加其他非fanstudio数据源（排除已下线的 Wolfx）
+        for url in self.enabled_sources.keys():
+            if url.startswith(('ws://', 'wss://')) and url != all_url:
+                if 'wolfx' in url.lower() or 'ws-api.wolfx.jp' in url:
+                    continue
+                if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
+                    if self.enabled_sources.get(url, False):
+                        ws_urls.append(url)
+        
+        self.ws_urls = ws_urls
+        logger.info(f"更新数据源配置，当前启用 {len(self.ws_urls)} 个WebSocket数据源: {self.ws_urls}")
+        self._notify_config_changed()
+    
+    def _update_urls_for_server_selection(self):
+        """
+        根据服务器选择（正式/备用）更新URL中的域名
+        将fanstudio.tech和fanstudio.hk互相替换
+        """
+        try:
+            if not hasattr(self, 'enabled_sources'):
+                return
+            
+            # 创建新的enabled_sources字典，将所有fanstudio.hk替换为fanstudio.tech
+            new_enabled_sources = {}
+            for url, enabled in self.enabled_sources.items():
+                # 只替换fanstudio.hk为fanstudio.tech
+                if 'fanstudio.hk' in url:
+                    new_url = url.replace('fanstudio.hk', 'fanstudio.tech')
+                    new_enabled_sources[new_url] = enabled
+                    logger.debug(f"已更新URL: {url} -> {new_url}")
+                else:
+                    # 其他URL保持不变
+                    new_enabled_sources[url] = enabled
+            
+            self.enabled_sources = new_enabled_sources
+            logger.debug("已将所有fanstudio.hk URL更新为fanstudio.tech")
+        except Exception as e:
+            logger.error(f"更新URL失败: {e}")
+    
+    def get_source_name(self, url: str) -> str:
+        """获取数据源名称。Fan Studio 子源用 path 代号映射（不写完整 wss URL），其余用完整 URL 映射。"""
+        if self.custom_data_source_url and url == self.custom_data_source_url:
+            return "custom"
+        normalized_url = url.replace('fanstudio.hk', 'fanstudio.tech')
+        # Fan Studio wss：从 URL 抽 path，用代号查表，避免在代码中写单项 API 链接
+        if ('fanstudio.tech' in normalized_url or 'fanstudio.hk' in url) and normalized_url.startswith(('wss://', 'ws://')):
+            try:
+                path = normalized_url.rstrip('/').split('/')[-1] or 'all'
+                fanstudio_path_to_name = {
+                    "all": "fanstudio",
+                    "weatheralarm": "weatheralarm",
+                    "tsunami": "海啸信息",
+                    "cenc": "cenc", "cea": "cea", "cea-pr": "cea-pr",
+                    "ningxia": "ningxia", "guangxi": "guangxi",
+                    "shanxi": "shanxi", "beijing": "beijing", "shandong": "shandong", "yunnan": "yunnan",
+                    "cwa": "cwa", "cwa-eew": "cwa-eew", "jma": "jma", "hko": "hko",
+                    "usgs": "usgs", "sa": "sa", "emsc": "emsc", "bcsf": "bcsf",
+                    "gfz": "gfz", "usp": "usp", "kma": "kma", "kma-eew": "kma-eew", "fssn": "fssn",
+                    "fssn-cmt": "fssn-cmt",
+                }
+                if path in fanstudio_path_to_name:
+                    return fanstudio_path_to_name[path]
+            except Exception:
+                pass
+        # 非 Fan Studio：仅保留需完整 URL 的数据源（p2pquake、NIED 等）
+        url_to_name = {
+            "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
+            "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
+            "wss://sismotide.top/nied": "nied",
+            "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
+        }
+        return url_to_name.get(normalized_url, url)
+    
+    def get_organization_name(self, source_name: str) -> str:
+        """获取机构名称"""
+        organization_name_mapping = {
+            "custom": "自定义数据源",
+            "fanstudio": "Fan Studio数据源",
+            "weatheralarm": "气象预警",
+            "cenc": "中国地震台网中心自动测定/正式测定",
+            "cea": "中国地震预警网",
+            "cea-pr": "中国地震预警网-省级预警",
+            "ningxia": "宁夏地震局",
+            "guangxi": "广西地震局",
+            "shanxi": "山西地震局",
+            "beijing": "北京地震局",
+            "shandong": "山东地震局",
+            "yunnan": "云南地震局",
+            "tsunami": "自然资源部海啸预警中心",
+            "海啸信息": "自然资源部海啸预警中心",
+            "cwa": "台湾中央气象署",
+            "cwa-eew": "台湾中央气象署地震预警",
+            "jma": "日本气象厅地震预警",
+            "p2pquake": "日本气象厅地震情报",
+            "p2pquake_tsunami": "日本气象厅海啸预报",
+            "hko": "香港天文台",
+            "usgs": "美国地质调查局",
+            "sa": "美国ShakeAlert地震预警",
+            "emsc": "欧洲地中海地震中心",
+            "bcsf": "法国中央地震研究所",
+            "gfz": "德国地学研究中心",
+            "usp": "巴西圣保罗大学",
+            "kma": "韩国气象厅",
+            "kma-eew": "韩国气象厅地震预警",
+            "fssn": "FSSN",
+            "fssn-cmt": "FSSN 矩心矩张量解",
+            "nied": "NIED 日本防災科研所预警",
+            "p2pquake_ws": "日本气象厅地震/海啸 (P2PQuake WSS)",
+        }
+        
+        return organization_name_mapping.get(source_name, source_name)
