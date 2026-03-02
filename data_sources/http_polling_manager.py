@@ -16,7 +16,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config, APP_VERSION
-from adapters import P2PQuakeAdapter, P2PQuakeTsunamiAdapter, WolfxAdapter, CustomAdapter
+from adapters import P2PQuakeAdapter, P2PQuakeTsunamiAdapter, CustomAdapter
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -206,11 +206,9 @@ class HTTPPollingManager:
         # P2PQuake 地震情报
         if 'api.p2pquake.net' in url:
             return P2PQuakeAdapter('p2pquake', url)
-        # Wolfx HTTP API: https://api.wolfx.jp/{sc_eew,jma_eew,...}.json
-        if 'api.wolfx.jp' in url:
-            path = url.split('/')[-1] or url.rstrip('/').split('/')[-1]
-            source_type = path.replace('.json', '') if path.endswith('.json') else path
-            return WolfxAdapter(source_type, url)
+        # 已下线的 Wolfx HTTP 不提供适配器，跳过
+        if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
+            return None
         return None
     
     def start_all_connections(self):
@@ -246,11 +244,9 @@ class HTTPPollingManager:
                 # 对于未配置适配器的 HTTP 数据源，直接跳过，不再输出错误日志
                 continue
             
-            # 轮询间隔：自定义数据源 1 秒，Wolfx 速报 5 秒，其余 2 秒
+            # 轮询间隔：自定义数据源 1 秒，其余 2 秒
             if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
                 poll_interval = 1
-            elif 'eqlist' in url and 'wolfx' in url.lower():
-                poll_interval = 5
             else:
                 poll_interval = 2
             connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)

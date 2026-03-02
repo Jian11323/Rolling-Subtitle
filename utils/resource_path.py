@@ -44,6 +44,21 @@ def get_executable_dir() -> str:
     return os.path.dirname(get_executable_path())
 
 
+def get_cmt_weather_cache_root():
+    """
+    打包（frozen）时返回 exe 同目录下的 cmt-weather 缓存根目录并确保存在；
+    未打包时返回 None，调用方使用系统 temp 或项目资源路径。
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    root = Path(get_executable_dir()) / "cmt-weather"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return root
+
+
 def get_resource_path(relative_path: str) -> Path:
     """
     获取资源文件路径，兼容PyInstaller打包后的情况

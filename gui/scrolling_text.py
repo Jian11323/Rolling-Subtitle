@@ -11,6 +11,7 @@ from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, 
 from collections import OrderedDict
 from typing import Optional, Dict, Tuple, Any
 from pathlib import Path
+import math
 import threading
 import time
 import urllib.request
@@ -81,6 +82,8 @@ class _ScrollingTextMixin:
         self.current_image_path = None
         self.current_image = None
         self.current_text_image = None
+        self._watermark_45_pixmap: Optional[QPixmap] = None
+        self._watermark_45_cache_key: Optional[Tuple] = None
         font_family = getattr(config.gui_config, 'font_family', None) or "SimSun"
         resolved_family = _resolve_font_family(font_family, config.gui_config.font_size)
         self.font = QFont(resolved_family, config.gui_config.font_size)
@@ -101,6 +104,7 @@ class _ScrollingTextMixin:
         self._current_load_task_id = 0
         self._cached_text_width = 0
         self._cached_image_width = 0
+        self._image_after_text = False  # True 时图片在文字后绘制（CMT 沙滩球在消息末尾）
         self._last_scroll_time = time.time()
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
@@ -119,73 +123,158 @@ class _ScrollingTextMixin:
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
         QTimer.singleShot(1000, self._preload_weather_images)
 
+    def _build_watermark_45_pixmap(self, w: int, h: int, watermark_text: str, wm_font: QFont, wm_color: QColor) -> QPixmap:
+        """
+        将 45° 斜向整面平铺的水印预渲染到一张 Pixmap 上，避免每帧在 QPainter 上做大量 drawText。
+        """
+        if w <= 0 or h <= 0 or not watermark_text:
+            pix = QPixmap(1, 1)
+            pix.fill(Qt.transparent)
+            return pix
+        pixmap = QPixmap(w, h)
+        pixmap.fill(Qt.transparent)
+        p = QPainter(pixmap)
+        try:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            p.setFont(wm_font)
+            p.setPen(wm_color)
+            cx, cy = w / 2.0, h / 2.0
+            p.translate(cx, cy)
+            p.rotate(-45)
+            diag = (w * w + h * h) ** 0.5
+            fm = QFontMetrics(wm_font)
+            tw = fm.horizontalAdvance(watermark_text)
+            th = fm.height()
+            step_x = max(tw + 80, 120)
+            step_y = max(int(th * 2.2), 60)
+            n = int(diag / min(step_x, step_y)) + 2
+            for i in range(-n, n + 1):
+                for j in range(-n, n + 1):
+                    x, y = i * step_x, j * step_y
+                    wr = QRectF(x - tw / 2 - 20, y - th / 2, tw + 40, th + 4)
+                    p.drawText(wr, Qt.AlignCenter | Qt.TextSingleLine, watermark_text)
+        finally:
+            p.end()
+        return pixmap
+
     def _paint_content(self, painter: QPainter):
         """统一的绘制逻辑（供 paintGL / paintEvent 调用）。使用浮点坐标与原生 drawText，避免取整卡顿与位图插值模糊/闪烁。"""
         try:
             painter.setRenderHint(QPainter.Antialiasing)
             bg_color = QColor(self.config.gui_config.bg_color)
             painter.fillRect(self.rect(), bg_color)
-            # 背景水印（黑体、右下角、字号稍大；在填充背景后、主内容前绘制）
-            watermark_text = (getattr(self.config.gui_config, 'watermark_text', None) or '').strip()
-            if watermark_text:
-                painter.save()
-                try:
-                    watermark_angle = getattr(self.config.gui_config, 'watermark_angle', 'horizontal') or 'horizontal'
-                    font_size = min(44, max(18, int(self.height() * 0.32)))
-                    wm_font = QFont("SimHei", font_size)
-                    wm_font.setBold(True)
-                    wm_font.setItalic(False)
-                    painter.setFont(wm_font)
-                    wm_color = QColor(160, 160, 160, 72)
-                    painter.setPen(wm_color)
-                    painter.setRenderHint(QPainter.TextAntialiasing)
-                    margin = 12
-                    if watermark_angle == "45":
-                        # 参考证书/公文底纹：45° 斜向、整面平铺重复、半透明
-                        w, h = self.width(), self.height()
-                        cx, cy = w / 2.0, h / 2.0
-                        painter.translate(cx, cy)
-                        painter.rotate(-45)
-                        diag = (w * w + h * h) ** 0.5
-                        fm = QFontMetrics(wm_font)
-                        tw = fm.horizontalAdvance(watermark_text)
-                        th = fm.height()
-                        step_x = max(tw + 80, 120)
-                        step_y = max(int(th * 2.2), 60)
-                        n = int(diag / min(step_x, step_y)) + 2
-                        for i in range(-n, n + 1):
-                            for j in range(-n, n + 1):
-                                x, y = i * step_x, j * step_y
-                                wr = QRectF(x - tw / 2 - 20, y - th / 2, tw + 40, th + 4)
-                                painter.drawText(wr, Qt.AlignCenter | Qt.TextSingleLine, watermark_text)
-                    else:
-                        wr = QRectF(margin, margin, self.width() - 2 * margin, self.height() - 2 * margin)
-                        painter.drawText(wr, Qt.AlignRight | Qt.AlignBottom | Qt.TextSingleLine, watermark_text)
-                finally:
-                    painter.restore()
+            # 背景水印（支持字体/字号/位置，在填充背景后、主内容前绘制）
+            self._draw_background_watermark(painter, bg_color)
             if not self.current_text:
                 return
             center_y = self.height() / 2.0
-            image_x = self.x_position
+            base_x = self.x_position
+            text_x = base_x
+            image_x = base_x
+            if self.current_image:
+                if getattr(self, '_image_after_text', False):
+                    # CMT 沙滩球等：先文字，后图片
+                    text_x = base_x
+                    image_x = base_x + self._cached_text_width + 10
+                else:
+                    # 气象/海啸等：先图片，后文字
+                    image_x = base_x
+                    text_x = base_x + self._cached_image_width
+            painter.setFont(self.font)
+            painter.setPen(self.current_color)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            if text_x < self.width() and text_x + self._cached_text_width > 0:
+                text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
+                painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
             if self.current_image:
                 pm = self.current_image
                 w, h = pm.width(), pm.height()
                 image_y = center_y - h / 2.0
                 painter.drawPixmap(QRectF(image_x, image_y, w, h), pm, QRectF(0, 0, w, h))
-                image_x += self._cached_image_width
-            text_x = image_x
-            # 始终使用 Qt 原生 drawText（浮点坐标），不再使用 PIL 预渲染位图，避免亚像素平移时的插值模糊与闪烁
-            painter.setFont(self.font)
-            painter.setPen(self.current_color)
-            # OpenGL/CPU 路径均依赖此处设置，保证文字抗锯齿
-            painter.setRenderHint(QPainter.TextAntialiasing)
-            if text_x < self.width() and text_x + self._cached_text_width > 0:
-                text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
-                painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
         except Exception as e:
             logger.error(f"绘制失败: {e}")
             import traceback
             logger.exception("详细错误信息:")
+
+    def _draw_background_watermark(self, painter: QPainter, bg_color: QColor) -> None:
+        """
+        绘制背景水印：支持横向与斜向 45 度，以及四角单行水印。
+        横向/四角：每帧一次 drawText；
+        斜向 45 度：预渲染整面平铺到 QPixmap 并缓存，帧内仅 drawPixmap 一次。
+        """
+        try:
+            watermark_text = (getattr(self.config.gui_config, 'watermark_text', '') or '').strip()
+            if not watermark_text:
+                return
+            position = getattr(self.config.gui_config, 'watermark_position', 'diagonal') or 'diagonal'
+
+            base_color = QColor('#FFFFFF')
+            if bg_color.isValid():
+                lum = 0.299 * bg_color.red() + 0.587 * bg_color.green() + 0.114 * bg_color.blue()
+                if lum > 180:
+                    base_color = QColor(0, 0, 0)
+                else:
+                    base_color = QColor(255, 255, 255)
+            watermark_color = QColor(base_color)
+            watermark_color.setAlpha(80)
+
+            wm_family = getattr(self.config.gui_config, 'watermark_font_family', '') or ''
+            wm_size = int(getattr(self.config.gui_config, 'watermark_font_size', 0) or 0)
+            base_size = getattr(self.config.gui_config, 'font_size', 40)
+            target_pt = wm_size if wm_size > 0 else max(8, int(base_size * 0.7))
+            if wm_family:
+                font = QFont(wm_family, target_pt)
+            else:
+                font = QFont(self.font)
+                font.setPointSize(target_pt)
+
+            w = max(1, self.width())
+            h = max(1, self.height())
+
+            if position == "diagonal":
+                key = (w, h, watermark_text, watermark_color.name(), font.family(), font.pointSize())
+                pix = None
+                if (
+                    self._watermark_45_cache_key == key
+                    and self._watermark_45_pixmap is not None
+                    and not self._watermark_45_pixmap.isNull()
+                ):
+                    pix = self._watermark_45_pixmap
+                else:
+                    pix = self._build_watermark_45_pixmap(w, h, watermark_text, font, watermark_color)
+                    self._watermark_45_pixmap = pix
+                    self._watermark_45_cache_key = key
+                if pix is None or pix.isNull():
+                    return
+                painter.save()
+                painter.drawPixmap(0, 0, pix)
+                painter.restore()
+                return
+
+            painter.save()
+            painter.setPen(watermark_color)
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+            text_w = metrics.horizontalAdvance(watermark_text) if hasattr(metrics, 'horizontalAdvance') else metrics.width(watermark_text)
+            text_h = metrics.height()
+            margin = max(8, int(min(w, h) * 0.02))
+
+            if position == "top_left":
+                rect = QRectF(margin, margin, text_w + 4, text_h + 4)
+            elif position == "top_right":
+                rect = QRectF(w - text_w - margin - 4, margin, text_w + 4, text_h + 4)
+            elif position == "bottom_left":
+                rect = QRectF(margin, h - text_h - margin - 4, text_w + 4, text_h + 4)
+            elif position == "bottom_right":
+                rect = QRectF(w - text_w - margin - 4, h - text_h - margin - 4, text_w + 4, text_h + 4)
+            else:
+                rect = self.rect()
+
+            painter.drawText(rect, Qt.AlignCenter, watermark_text)
+            painter.restore()
+        except Exception as e:
+            logger.debug(f"绘制背景水印失败: {e}")
 
     def _render_text_to_image(self, text: str, color: QColor) -> Optional[QPixmap]:
         """
@@ -400,10 +489,13 @@ class _ScrollingTextMixin:
         move_distance = -pixels_per_second * delta_time
         self.x_position += move_distance
         total_width = 0
-        if self.current_image:
-            total_width += self._cached_image_width
-        if self.current_text:
-            total_width += self._cached_text_width
+        if getattr(self, '_image_after_text', False) and self.current_image and self.current_text:
+            total_width = self._cached_text_width + 10 + self._cached_image_width
+        else:
+            if self.current_image:
+                total_width += self._cached_image_width
+            if self.current_text:
+                total_width += self._cached_text_width
         if total_width > 0 and self.x_position + total_width < 0:
             with self._scrolling_lock:
                 self._is_scrolling = False
@@ -802,10 +894,10 @@ class _ScrollingTextMixin:
             logger.error(f"更新图片显示失败: {e}")
             self.set_loading(False)
     
-    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None, fallback_image_path: Optional[str] = None):
+    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None, fallback_image_path: Optional[str] = None, image_after_text: bool = False):
         """
         更新文本和颜色，可选显示图片（异步加载）
-        
+
         Args:
             text: 文本内容
             color: 文本颜色
@@ -814,6 +906,7 @@ class _ScrollingTextMixin:
             message_type: 消息类型（可选），用于配置热修改时重新获取颜色
             parsed_data: 解析后的数据字典（可选），用于气象预警颜色计算和热修改
             fallback_image_path: 远程图片完全加载失败时回退的本地路径（可选，用于气象预警）
+            image_after_text: True 时图片在文字后绘制（如 CMT 沙滩球在消息末尾）
         """
         # 如果正在滚动且不是强制更新，则忽略
         with self._scrolling_lock:
@@ -823,8 +916,10 @@ class _ScrollingTextMixin:
         
         self.set_loading(True)
         
-        # 强制单行显示：将换行符替换为空格，避免多行溢出
-        text = (text or "").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        # 强制单行显示：仅当配置开启时将换行符替换为空格，否则保留原文
+        text = (text or "").strip()
+        if getattr(self.config.message_config, 'force_single_line', True):
+            text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
         self.current_text = text
         # 如果提供了message_type，优先从配置中获取颜色（确保使用最新配置）
         # 否则使用传入的color参数
@@ -840,7 +935,8 @@ class _ScrollingTextMixin:
         self.current_parsed_data = parsed_data  # 存储解析数据（用于热修改时重新计算气象预警颜色）
         self.current_image_path = image_path
         self._fallback_image_path = fallback_image_path  # 远程加载失败时回退的本地路径
-        
+        self._image_after_text = image_after_text
+
         # 调试日志
         logger.info(f"更新文本: {text[:50]}..., 颜色: {color}, 图片路径: {image_path if image_path else '无'}, 窗口尺寸: {self.width()}x{self.height()}, 初始X位置: {self.width() if self.width() > 1 else self.config.gui_config.window_width}")
         

@@ -17,18 +17,13 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.3.6"
+APP_VERSION = "2.4.0"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.3.6
+CHANGELOG_TEXT = """版本 2.4.0
 
-1、新增山东地震局、云南地震局数据源。
-2、增加自然资源部海啸预警中心数据源。
-3、P2P 日本气象厅地震/海啸：使用 WebSocket 时，启动先 HTTP 拉取一次最新情报，再转为 WSS 实时连接。
-4、海啸预警正文不再显示「签发」。
-5、背景水印：支持横向或斜向 45° 整面平铺，黑体加粗、右下角/整面显示。
-6、主窗口支持拖拽调整大小并保存；窗口宽高上限放宽。"""
+1、移除Wolfx 数据源"""
 
 @dataclass
 class GUIConfig:
@@ -50,9 +45,13 @@ class GUIConfig:
     last_seen_changelog_version: str = ""  # 上次已读的更新说明版本，用于弹窗仅展示一次
     use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
     render_backend: str = "cpu"  # "cpu" | "opengl"，默认 cpu
+    always_on_top: bool = False  # 窗口置顶
     use_weather_image_nmc: bool = True  # True=气象预警图标优先 NMC 在线，False=仅本地图片
     watermark_text: str = ""  # 背景水印文字，空则不显示
     watermark_angle: str = "horizontal"  # 水印方向："horizontal" 横向，"45" 斜向45度
+    watermark_font_family: str = ""  # 水印字体族名，空表示跟随主字体
+    watermark_font_size: int = 0  # 水印字体大小，0 表示自动（按主字体比例）
+    watermark_position: str = "diagonal"  # 水印位置: diagonal | top_left | top_right | bottom_left | bottom_right
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -65,8 +64,16 @@ class GUIConfig:
             assert 100 <= self.window_height <= 5000, "窗口高度必须在100-5000之间"
             assert 1 <= self.target_fps <= 240, "目标帧率必须在1-240之间"
             assert self.render_backend in ("cpu", "opengl"), "render_backend 必须为 cpu 或 opengl"
-            if self.watermark_angle not in ("horizontal", "45"):
+            if getattr(self, 'watermark_angle', 'horizontal') not in ("horizontal", "45"):
                 self.watermark_angle = "horizontal"
+            try:
+                if getattr(self, 'watermark_font_size', 0) < 0:
+                    self.watermark_font_size = 0
+            except Exception:
+                self.watermark_font_size = 0
+            allowed_positions = {"diagonal", "top_left", "top_right", "bottom_left", "bottom_right"}
+            if getattr(self, 'watermark_position', 'diagonal') not in allowed_positions:
+                self.watermark_position = "diagonal"
             return True
         except AssertionError as e:
             logger.error(f"GUI配置验证失败: {e}")
@@ -99,6 +106,11 @@ class MessageConfig:
     weather_warning_color: str = '#FFF500'
     # 收到预警更新报立即切换：开启则同事件更新报立即打断并替换，否则仅后台替换；默认关闭
     show_one_alert_per_received: bool = False
+    # 强制单行：将数据源中的换行符替换为空格，保证滚动字幕单行显示；默认开启
+    force_single_line: bool = True
+    # 预警后限时显示速报再回自定义：仅在「自定义文本」模式下生效；速报连续显示 custom_text_return_seconds 秒后自动恢复为仅显示自定义文本
+    custom_text_return_after_warning: bool = False
+    custom_text_return_seconds: int = 300  # 限时秒数，默认 5 分钟；仅当 custom_text_return_after_warning 为 True 时生效
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -110,6 +122,7 @@ class MessageConfig:
             assert self.warning_min_display_seconds > 0, "预警最少展示时长必须大于0"
             assert self.max_report_inactivity_time > 0, "速报无活动时长必须大于0"
             assert self.max_other_inactivity_time > 0, "其他消息无活动时长必须大于0"
+            assert 1 <= self.custom_text_return_seconds <= 3600, "custom_text_return_seconds 必须在 1–3600 之间"
             return True
         except AssertionError as e:
             logger.error(f"消息配置验证失败: {e}")
@@ -272,9 +285,13 @@ class Config:
                 'last_seen_changelog_version': self.gui_config.last_seen_changelog_version,
                 'use_gpu_rendering': self.gui_config.use_gpu_rendering,
                 'render_backend': self.gui_config.render_backend,
+                'always_on_top': self.gui_config.always_on_top,
                 'use_weather_image_nmc': self.gui_config.use_weather_image_nmc,
                 'watermark_text': self.gui_config.watermark_text,
                 'watermark_angle': self.gui_config.watermark_angle,
+                'watermark_font_family': getattr(self.gui_config, 'watermark_font_family', ""),
+                'watermark_font_size': getattr(self.gui_config, 'watermark_font_size', 0),
+                'watermark_position': getattr(self.gui_config, 'watermark_position', "diagonal"),
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -295,6 +312,9 @@ class Config:
                 'default_color': self.message_config.default_color,
                 'weather_warning_color': self.message_config.weather_warning_color,
                 'show_one_alert_per_received': self.message_config.show_one_alert_per_received,
+                'force_single_line': getattr(self.message_config, 'force_single_line', True),
+                'custom_text_return_after_warning': getattr(self.message_config, 'custom_text_return_after_warning', False),
+                'custom_text_return_seconds': getattr(self.message_config, 'custom_text_return_seconds', 300),
             },
             'WS_CONFIG': {
                 'reconnect_interval': self.ws_config.reconnect_interval,
@@ -474,12 +494,25 @@ class Config:
             
             # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
             raw_sources = config_data.get('ENABLED_SOURCES', {})
+            # 启动时若配置中存在 wolfx 数据源，后续将保留用户自定义设置并覆盖写回一次以移除 wolfx
+            has_wolfx_in_file = any(
+                'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k
+                for k in raw_sources
+            )
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
             self.enabled_sources = {
                 k: v for k, v in raw_sources.items()
                 if k == all_url or not self._is_fanstudio_individual_url(k)
             }
+            # 确保内存中不保留任何 Fan Studio 单项 URL
+            for k in list(self.enabled_sources.keys()):
+                if self._is_fanstudio_individual_url(k):
+                    del self.enabled_sources[k]
+            # 迁移：移除已下线的 Wolfx 数据源
+            for k in list(self.enabled_sources.keys()):
+                if 'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k:
+                    del self.enabled_sources[k]
             self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
 
             # 如果配置文件中没有数据源配置，使用默认配置（仅 all + weather + 非 Fan Studio 单项）
@@ -487,18 +520,11 @@ class Config:
             if not self.enabled_sources:
                 self.enabled_sources = {all_url: True}
                 self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
-                self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
-                self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
-                for u in ["https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json", "https://api.wolfx.jp/fj_eew.json",
-                          "https://api.wolfx.jp/cenc_eew.json", "https://api.wolfx.jp/cwa_eew.json",
-                          "https://api.wolfx.jp/cenc_eqlist.json", "https://api.wolfx.jp/jma_eqlist.json"]:
-                    self.enabled_sources[u] = False
-                self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = False
-                for u in ["wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
-                          "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
-                          "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist"]:
-                    self.enabled_sources[u] = False
+                # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
+                self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
+                self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
                 self.enabled_sources["wss://sismotide.top/nied"] = False
+                self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
                 logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
             else:
                 if all_url not in self.enabled_sources:
@@ -506,28 +532,18 @@ class Config:
                 else:
                     if not self.enabled_sources.get(all_url, False):
                         self.enabled_sources[all_url] = True
-                # 仅补全非 Fan Studio 数据源缺失项
+                # 仅补全非 Fan Studio 数据源缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉 1 条
                 if "https://api.p2pquake.net/v2/history?codes=551&limit=3" not in self.enabled_sources:
-                    self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
+                    self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
-                    self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
-                wolfx_http_sources = [
-                    "https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json",
-                    "https://api.wolfx.jp/fj_eew.json", "https://api.wolfx.jp/cenc_eew.json",
-                    "https://api.wolfx.jp/cwa_eew.json", "https://api.wolfx.jp/cenc_eqlist.json",
-                    "https://api.wolfx.jp/jma_eqlist.json",
-                ]
-                for http_url in wolfx_http_sources:
-                    if http_url not in self.enabled_sources:
-                        self.enabled_sources[http_url] = False
-                wolfx_wss = ["wss://ws-api.wolfx.jp/all_eew",
-                             "wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
-                             "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
-                             "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist",
-                             "wss://sismotide.top/nied", "wss://api.p2pquake.net/v2/ws"]
-                for wss_url in wolfx_wss:
+                    self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+                other_wss_urls = ["wss://sismotide.top/nied", "wss://api.p2pquake.net/v2/ws"]
+                for wss_url in other_wss_urls:
                     if wss_url not in self.enabled_sources:
                         self.enabled_sources[wss_url] = False
+                if f"wss://ws.{base_domain}/fssn-cmt" not in self.enabled_sources:
+                    self.enabled_sources[f"wss://ws.{base_domain}/fssn-cmt"] = False
+                    logger.debug("添加缺失的 FSSN CMT 数据源")
 
             # 根据服务器选择更新URL
             self._update_urls_for_server_selection()
@@ -545,9 +561,11 @@ class Config:
             ws_urls.append(all_url)
             logger.debug(f"已添加all数据源到ws_urls: {all_url}")
             
-            # 添加其他非fanstudio数据源
+            # 添加其他非fanstudio数据源（排除已下线的 Wolfx）
             for url in self.enabled_sources.keys():
                 if url.startswith(('ws://', 'wss://')) and url != all_url:
+                    if ('wolfx' in url.lower() or 'ws-api.wolfx.jp' in url):
+                        continue
                     if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
                         if self.enabled_sources.get(url, False):
                             ws_urls.append(url)
@@ -557,16 +575,19 @@ class Config:
             
             logger.info(f"配置加载成功，启用 {len(self.ws_urls)} 个WebSocket数据源")
             self._notify_config_changed()
-            # 缺项补全：仅添加缺失的键并写回，不覆盖用户已有设置；ENABLED_SOURCES 使用过滤后的值（不含 Fan Studio 单项）
+            # 缺项补全：仅添加缺失的键并写回，不覆盖用户已有设置；ENABLED_SOURCES 使用过滤后的值（不含 Fan Studio 单项、不含 wolfx）
             full = self._get_full_config_dict()
             merged = self._merge_config_file(config_data, full)
             merged['ENABLED_SOURCES'] = full['ENABLED_SOURCES']
             if version_changed:
                 merged['config_version'] = APP_VERSION
-            if version_changed or self._has_missing_keys(config_data, full):
+            if version_changed or self._has_missing_keys(config_data, full) or has_wolfx_in_file:
                 try:
                     if self._write_config_dict(merged):
-                        logger.info("已补全缺失配置项并写回，保留用户自定义设置")
+                        if has_wolfx_in_file:
+                            logger.info("配置中存在已下线的 Wolfx 数据源，已移除并写回，保留用户自定义设置")
+                        else:
+                            logger.info("已补全缺失配置项并写回，保留用户自定义设置")
                     else:
                         logger.warning("补全配置写回失败(可忽略)")
                 except Exception as e:
@@ -643,17 +664,9 @@ class Config:
 
         self.enabled_sources = {all_url: True}
         self.enabled_sources[f"wss://ws.{base_domain}/{weather_source}"] = True
-        self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = True
-        self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = True
-        for u in ["https://api.wolfx.jp/sc_eew.json", "https://api.wolfx.jp/jma_eew.json", "https://api.wolfx.jp/fj_eew.json",
-                  "https://api.wolfx.jp/cenc_eew.json", "https://api.wolfx.jp/cwa_eew.json",
-                  "https://api.wolfx.jp/cenc_eqlist.json", "https://api.wolfx.jp/jma_eqlist.json"]:
-            self.enabled_sources[u] = False
-        self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = False
-        for u in ["wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
-                  "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
-                  "wss://ws-api.wolfx.jp/cenc_eqlist", "wss://ws-api.wolfx.jp/jma_eqlist"]:
-            self.enabled_sources[u] = False
+        # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
+        self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
+        self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
         self.enabled_sources["wss://sismotide.top/nied"] = False
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
 
@@ -661,7 +674,8 @@ class Config:
         for url in self.enabled_sources.keys():
             if url.startswith(('ws://', 'wss://')) and url != all_url:
                 if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
-                    ws_urls.append(url)
+                    if self.enabled_sources.get(url, False):
+                        ws_urls.append(url)
         self.ws_urls = ws_urls
         self.custom_data_source_url = ""
         logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
@@ -685,9 +699,11 @@ class Config:
         # all数据源必须包含（无论enabled_sources中的状态）
         ws_urls.append(all_url)
         
-        # 添加其他非fanstudio数据源
+        # 添加其他非fanstudio数据源（排除已下线的 Wolfx）
         for url in self.enabled_sources.keys():
             if url.startswith(('ws://', 'wss://')) and url != all_url:
+                if 'wolfx' in url.lower() or 'ws-api.wolfx.jp' in url:
+                    continue
                 if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
                     if self.enabled_sources.get(url, False):
                         ws_urls.append(url)
@@ -736,35 +752,21 @@ class Config:
                     "weatheralarm": "weatheralarm",
                     "tsunami": "海啸信息",
                     "cenc": "cenc", "cea": "cea", "cea-pr": "cea-pr",
-                    "sichuan": "sichuan", "ningxia": "ningxia", "guangxi": "guangxi",
+                    "ningxia": "ningxia", "guangxi": "guangxi",
                     "shanxi": "shanxi", "beijing": "beijing", "shandong": "shandong", "yunnan": "yunnan",
                     "cwa": "cwa", "cwa-eew": "cwa-eew", "jma": "jma", "hko": "hko",
                     "usgs": "usgs", "sa": "sa", "emsc": "emsc", "bcsf": "bcsf",
                     "gfz": "gfz", "usp": "usp", "kma": "kma", "kma-eew": "kma-eew", "fssn": "fssn",
+                    "fssn-cmt": "fssn-cmt",
                 }
                 if path in fanstudio_path_to_name:
                     return fanstudio_path_to_name[path]
             except Exception:
                 pass
-        # 非 Fan Studio：仅保留需完整 URL 的数据源（p2pquake、Wolfx、NIED 等）
+        # 非 Fan Studio：仅保留需完整 URL 的数据源（p2pquake、NIED 等）
         url_to_name = {
             "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
             "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
-            "https://api.wolfx.jp/sc_eew.json": "wolfx_sc_eew",
-            "https://api.wolfx.jp/jma_eew.json": "wolfx_jma_eew",
-            "https://api.wolfx.jp/fj_eew.json": "wolfx_fj_eew",
-            "https://api.wolfx.jp/cenc_eew.json": "wolfx_cenc_eew",
-            "https://api.wolfx.jp/cwa_eew.json": "wolfx_cwa_eew",
-            "https://api.wolfx.jp/cenc_eqlist.json": "wolfx_cenc_eqlist",
-            "https://api.wolfx.jp/jma_eqlist.json": "wolfx_jma_eqlist",
-            "wss://ws-api.wolfx.jp/all_eew": "wolfx_all_eew",
-            "wss://ws-api.wolfx.jp/sc_eew": "wolfx_sc_eew",
-            "wss://ws-api.wolfx.jp/jma_eew": "wolfx_jma_eew",
-            "wss://ws-api.wolfx.jp/fj_eew": "wolfx_fj_eew",
-            "wss://ws-api.wolfx.jp/cenc_eew": "wolfx_cenc_eew",
-            "wss://ws-api.wolfx.jp/cwa_eew": "wolfx_cwa_eew",
-            "wss://ws-api.wolfx.jp/cenc_eqlist": "wolfx_cenc_eqlist",
-            "wss://ws-api.wolfx.jp/jma_eqlist": "wolfx_jma_eqlist",
             "wss://sismotide.top/nied": "nied",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
         }
@@ -779,7 +781,6 @@ class Config:
             "cenc": "中国地震台网中心自动测定/正式测定",
             "cea": "中国地震预警网",
             "cea-pr": "中国地震预警网-省级预警",
-            "sichuan": "四川地震局地震预警",
             "ningxia": "宁夏地震局",
             "guangxi": "广西地震局",
             "shanxi": "山西地震局",
@@ -803,15 +804,7 @@ class Config:
             "kma": "韩国气象厅",
             "kma-eew": "韩国气象厅地震预警",
             "fssn": "FSSN",
-            # Wolfx
-            "wolfx_sc_eew": "Wolfx 四川地震局预警",
-            "wolfx_jma_eew": "Wolfx JMA 预警",
-            "wolfx_fj_eew": "Wolfx 福建地震局预警",
-            "wolfx_cenc_eew": "Wolfx CENC 预警",
-            "wolfx_cwa_eew": "Wolfx CWA 预警",
-            "wolfx_cenc_eqlist": "Wolfx CENC 速报",
-            "wolfx_jma_eqlist": "Wolfx JMA 速报",
-            "wolfx_all_eew": "Wolfx 全预警 (WSS)",
+            "fssn-cmt": "FSSN 矩心矩张量解",
             "nied": "NIED 日本防災科研所预警",
             "p2pquake_ws": "日本气象厅地震/海啸 (P2PQuake WSS)",
         }

@@ -13,9 +13,9 @@
 支持的数据源
 
 WebSocket数据源
-1. **Wolfx防灾** (`wss://ws-api.wolfx.jp/all_eew`)
-2. **NIED** (`wss://sismotide.top/nied`)
-3. **Fan Studio** (`wss://ws.fanstudio.tech/all`)
+1. **Fan Studio** (`wss://ws.fanstudio.tech/all`)
+2. **NIED 日本防災科研所** (`wss://sismotide.top/nied`)
+3. **P2PQuake 日本气象厅地震/海啸** (`wss://api.p2pquake.net/v2/ws`)
 
 安装依赖
 
@@ -49,9 +49,9 @@ python main.py
 │   └── message_manager.py     # 消息管理
 ├── adapters/                  # 数据源适配器
 │   ├── base_adapter.py
-│   ├── wolfx_adapter.py
+│   ├── fanstudio_adapter.py
 │   ├── nied_adapter.py
-│   └── fanstudio_adapter.py
+│   └── p2pquake_adapter.py 等
 ├── data_sources/              # 数据源管理
 │   └── websocket_manager.py
 └── utils/                     # 工具模块

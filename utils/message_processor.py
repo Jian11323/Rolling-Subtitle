@@ -95,6 +95,8 @@ class MessageProcessor:
                     logger.error(f"格式化预警消息时发生异常: {e}, 数据: {parsed_data}", exc_info=True)
                     return None
             elif message_type == 'report':
+                if parsed_data.get('source_type') == 'fssn-cmt':
+                    return self._format_fssn_cmt_message(parsed_data)
                 return self._format_report_message(parsed_data)
             elif message_type == 'weather':
                 return self._format_weather_message(parsed_data)
@@ -228,7 +230,6 @@ class MessageProcessor:
                 source_name_map = {
                     'cea': '中国地震预警网',
                     'cea-pr': '省级地震局',
-                    'sichuan': '四川地震局',
                     'cwa-eew': '台湾中央气象局',
                     'jma': '日本气象厅',
                     'sa': '美国ShakeAlert',
@@ -236,8 +237,6 @@ class MessageProcessor:
                     'nied': '日本防災科研所预警',
                 }
                 default_org = source_name_map.get(source_type, '地震预警')
-                if default_org == '地震预警' and source_type and str(source_type).startswith('wolfx_'):
-                    default_org = 'Wolfx 预警'
                 message_parts.append(f"【{default_org}预警】")
 
             # 报数（放在机构名称后面）
@@ -298,7 +297,6 @@ class MessageProcessor:
                     source_name_map = {
                         'cea': '中国地震预警网',
                         'cea-pr': '省级地震局',
-                        'sichuan': '四川地震局',
                         'cwa-eew': '台湾中央气象局',
                         'jma': '日本气象厅',
                         'sa': '美国ShakeAlert',
@@ -319,7 +317,69 @@ class MessageProcessor:
             except Exception:
                 pass
             return "【地震预警】数据更新"
-    
+
+    @staticmethod
+    def _shock_time_to_cmt_display(shock_time: str) -> str:
+        """将 shock_time（YYYY-MM-DD HH:mm:ss）转为 CMT 展示格式：YYYY年M月D日HH:mm:ss。"""
+        if not shock_time or not shock_time.strip():
+            return shock_time or ""
+        dt = timezone_utils.parse_display_time(shock_time.strip())
+        if dt is None:
+            return shock_time
+        return dt.strftime("%Y年%-m月%-d日%H:%M:%S") if sys.platform != "win32" else f"{dt.year}年{dt.month}月{dt.day}日{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+
+    @staticmethod
+    def _parse_depth_with_error(depth_str: str) -> tuple:
+        """解析 depth 字符串如 '612(+/- 8)'，返回 (主值km, 误差km或None)。"""
+        if not depth_str:
+            return (10.0, None)
+        s = depth_str.strip()
+        main_match = re.match(r'^([\d.]+)', s)
+        main_km = float(main_match.group(1)) if main_match else 10.0
+        err_match = re.search(r'[+＋]\s*/\s*-\s*([\d.]+)', s)
+        err_km = float(err_match.group(1)) if err_match else None
+        return (main_km, err_km)
+
+    def _format_fssn_cmt_message(self, data: Dict[str, Any]) -> str:
+        """
+        格式化 FSSN 矩心矩张量解 (CMT) 消息。
+        """
+        raw = data.get('raw_data') or {}
+        shock_time = data.get('shock_time', '')
+        time_display = self._shock_time_to_cmt_display(shock_time) if shock_time else timezone_utils.now_display_str()
+        place_name = data.get('place_name', '') or raw.get('placeName', '')
+        all_mag = raw.get('allMagnitudes') or {}
+        mww = self._safe_float(all_mag.get('Mww') or all_mag.get('M') or data.get('magnitude', 0), 0)
+        depth_str = raw.get('depth', '')
+        depth_km, depth_err = self._parse_depth_with_error(depth_str)
+        centroid_str = raw.get('centroidDepth', '')
+        try:
+            centroid_km = int(round(float(centroid_str))) if centroid_str else int(round(depth_km))
+        except (ValueError, TypeError):
+            centroid_km = int(round(depth_km))
+        np1 = data.get('nodal_plane_1') or raw.get('nodalPlane1', '')
+        np2 = data.get('nodal_plane_2') or raw.get('nodalPlane2', '')
+        parts = ["【FSSN 矩心矩张量解】", time_display]
+        if place_name:
+            parts.append(f"，{place_name}")
+        parts.append(f"发生Mw {mww:.1f}级地震")
+        if depth_err is not None:
+            parts.append(f"，震源深度{int(round(depth_km))} km（±{int(round(depth_err))} km）")
+        else:
+            parts.append(f"，震源深度{int(round(depth_km))} km")
+        parts.append(f"，矩心深度{centroid_km} km")
+        parts.append("，震源机制解：")
+        if np1 and '/' in np1:
+            p1 = np1.strip().split('/')
+            if len(p1) == 3:
+                parts.append(f"节面1走向{p1[0]}°、倾角{p1[1]}°、滑动角{p1[2]}°")
+        if np2 and '/' in np2:
+            p2 = np2.strip().split('/')
+            if len(p2) == 3:
+                parts.append("，节面2走向{}°、倾角{}°、滑动角{}°".format(p2[0], p2[1], p2[2]))
+        parts.append("。")
+        return "".join(parts)
+
     def _format_report_message(self, data: Dict[str, Any]) -> str:
         """
         格式化速报消息

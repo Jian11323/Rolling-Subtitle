@@ -61,6 +61,9 @@ class MainWindow(QMainWindow):
         self._current_displaying_message: Optional[MessageItem] = None
         # 待更新的消息（如果当前显示的消息收到更新，等滚动完成后替换）
         self._pending_update_message: Optional[MessageItem] = None
+        # 预警后限时显示速报再回自定义：到期时间戳（None 表示未在限时中）
+        self._custom_text_return_at: Optional[float] = None
+        self._post_warning_showing_report: bool = False
         
         # 设置窗口引用
         self.settings_window = None
@@ -253,7 +256,7 @@ class MainWindow(QMainWindow):
         # 设置菜单项
         settings_action = self.context_menu.addAction("设置")
         settings_action.triggered.connect(self._open_settings)
-        
+
         # 退出菜单项
         exit_action = self.context_menu.addAction("退出")
         exit_action.triggered.connect(self.close)
@@ -465,11 +468,20 @@ class MainWindow(QMainWindow):
                 # 清理过期的预警消息
                 self._clean_expired_warnings()
                 
-                # 如果清理后预警缓冲区为空，切换到速报模式
+                # 如果清理后预警缓冲区为空，根据配置切换到速报或仅自定义文本
                 if self.warning_buffer.size() == 0:
                     if self.report_buffer.size() > 0 and not self._switching_to_report:
-                        self._switch_to_report_mode()
-                        logger.info("预警缓冲区已空（清理过期消息后），切换到速报轮播模式")
+                        use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+                        enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                        has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+                        if use_custom_text and enable_limited and has_non_custom:
+                            self._start_limited_report_mode(from_warning=True)
+                            self._switch_to_report_mode()
+                        elif use_custom_text:
+                            self._switch_to_custom_text_only("no_report_after_warning")
+                        else:
+                            self._switch_to_report_mode()
+                        logger.info("预警缓冲区已空（清理过期消息后），切换到速报/自定义模式")
                     return
                 
                 next_msg = self.warning_buffer.get_next()
@@ -487,18 +499,36 @@ class MainWindow(QMainWindow):
                         # 再次清理过期预警，确保所有过期消息都被移除
                         self._clean_expired_warnings()
                         
-                        # 如果清理后预警缓冲区为空，切换到速报模式
+                        # 如果清理后预警缓冲区为空，根据配置切换到速报或仅自定义文本
                         if self.warning_buffer.size() == 0:
                             if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                self._switch_to_report_mode()
+                                use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+                                enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                                has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+                                if use_custom_text and enable_limited and has_non_custom:
+                                    self._start_limited_report_mode(from_warning=True)
+                                    self._switch_to_report_mode()
+                                elif use_custom_text:
+                                    self._switch_to_custom_text_only("no_report_after_warning")
+                                else:
+                                    self._switch_to_report_mode()
                             return
                         else:
                             # 如果还有有效预警，继续获取下一条
                             next_msg = self.warning_buffer.get_next()
                             if not next_msg or not self._is_warning_still_valid(next_msg):
-                                # 如果下一条也过期或不存在，切换到速报
+                                # 如果下一条也过期或不存在，根据配置切换到速报或仅自定义文本
                                 if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                    self._switch_to_report_mode()
+                                    use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+                                    enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                                    has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+                                    if use_custom_text and enable_limited and has_non_custom:
+                                        self._start_limited_report_mode(from_warning=True)
+                                        self._switch_to_report_mode()
+                                    elif use_custom_text:
+                                        self._switch_to_custom_text_only("no_report_after_warning")
+                                    else:
+                                        self._switch_to_report_mode()
                                 return
                     
                     # 预警消息在当前滚动完成后进入播放
@@ -510,7 +540,8 @@ class MainWindow(QMainWindow):
                         force=False,
                         message_type=next_msg.message_type,
                         parsed_data=next_msg.parsed_data,
-                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None)
+                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None),
+                        image_after_text=getattr(next_msg, 'image_after_text', False)
                     )
                     if success:
                         self.current_display_type = 'warning'
@@ -534,6 +565,11 @@ class MainWindow(QMainWindow):
                                 f"to source={next_msg.source}, type={next_msg.message_type}, event_id={next_msg.event_id}"
                             )
             elif self.report_buffer.size() > 0:
+                # 预警后限时显示速报再回自定义：到期则强制只显示自定义文本
+                if (getattr(self.config.message_config, 'custom_text_return_after_warning', False) and
+                        self._custom_text_return_at is not None and time.time() >= self._custom_text_return_at):
+                    self._switch_to_custom_text_only("timeout")
+                    return
                 # 检查是否有待更新的消息（当前数据源的消息收到更新）
                 if self._pending_update_message:
                     # 使用待更新的消息（当前数据源的最新消息）
@@ -564,8 +600,19 @@ class MainWindow(QMainWindow):
                         logger.warning(f"无法在缓冲区中找到数据源【{next_msg.source}】的最新消息")
                     logger.info(f"使用待更新的数据源【{next_msg.source}】消息: {next_msg.text[:50]}...")
                 else:
-                    # 轮播速报消息（不强制，确保上一条滚动完）
-                    next_msg = self.report_buffer.get_next()
+                    # 无待更新消息时：根据是否启用自定义文本模式选择下一条
+                    use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+                    enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                    if use_custom_text:
+                        custom_msg = self.report_buffer.find_by_source('__custom_text__')
+                        next_msg = self.report_buffer.get_next_excluding_sources(['__custom_text__']) or custom_msg
+                        if (enable_limited and self._custom_text_return_at is None and
+                                next_msg is not None and next_msg.source != '__custom_text__'):
+                            has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+                            if has_non_custom:
+                                self._start_limited_report_mode(from_warning=False)
+                    else:
+                        next_msg = self.report_buffer.get_next()
                 
                 if next_msg:
                     # 滚动完成后，应该立即显示下一条消息
@@ -579,7 +626,8 @@ class MainWindow(QMainWindow):
                         force=False,
                         message_type=next_msg.message_type,
                         parsed_data=next_msg.parsed_data,
-                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None)
+                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None),
+                        image_after_text=getattr(next_msg, 'image_after_text', False)
                     )
                     if success:
                         self.current_display_type = 'report'
@@ -598,14 +646,25 @@ class MainWindow(QMainWindow):
                     else:
                         logger.warning(f"速报消息更新失败: {next_msg.source} - {next_msg.text[:50]}...")
             
-            # 如果当前显示的是预警，但预警缓冲区已空，立即切换到速报模式
+            # 如果当前显示的是预警，但预警缓冲区已空，根据配置切换到速报或仅自定义文本
             if self.current_display_type == 'warning' and self.warning_buffer.size() == 0:
                 if self.report_buffer.size() > 0 and not self._switching_to_report:
-                    logger.info("预警缓冲区已空，立即切换到速报轮播模式")
-                    self._switch_to_report_mode()
+                    use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+                    enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                    has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+                    if use_custom_text and enable_limited and has_non_custom:
+                        self._start_limited_report_mode(from_warning=True)
+                        self._switch_to_report_mode()
+                    elif use_custom_text:
+                        self._switch_to_custom_text_only("no_report_after_warning")
+                    else:
+                        self._switch_to_report_mode()
+                    logger.info("预警缓冲区已空，立即切换到速报/自定义模式")
                 elif self.report_buffer.size() == 0:
-                    # 如果速报缓冲区也为空，保持当前显示但记录日志
-                    logger.debug("预警和速报缓冲区都为空，保持当前显示")
+                    if getattr(self.config.message_config, 'use_custom_text', False):
+                        self._switch_to_custom_text_only("no_report_after_warning")
+                    else:
+                        logger.debug("预警和速报缓冲区都为空，保持当前显示")
         except Exception as e:
             logger.error(f"处理滚动完成事件失败: {e}")
     
@@ -728,7 +787,8 @@ class MainWindow(QMainWindow):
                     force=force_interrupt,
                     message_type=message.message_type,
                     parsed_data=message.parsed_data,
-                    fallback_image_path=getattr(message, 'fallback_image_path', None)
+                    fallback_image_path=getattr(message, 'fallback_image_path', None),
+                    image_after_text=getattr(message, 'image_after_text', False)
                 )
                 if success:
                     self.current_display_type = 'warning'
@@ -754,6 +814,57 @@ class MainWindow(QMainWindow):
                     self._current_displaying_message = message
         except Exception as e:
             logger.error(f"切换到预警模式失败: {e}", exc_info=True)
+
+    def _start_limited_report_mode(self, from_warning: bool = False) -> None:
+        """启动「预警后限时显示速报再回自定义」计时逻辑。仅在自定义文本模式且功能开启时生效。"""
+        try:
+            if not getattr(self.config.message_config, 'use_custom_text', False):
+                return
+            if not getattr(self.config.message_config, 'custom_text_return_after_warning', False):
+                return
+            sec = getattr(self.config.message_config, 'custom_text_return_seconds', 300)
+            try:
+                sec_int = int(sec)
+            except (TypeError, ValueError):
+                sec_int = 300
+            sec_int = max(1, min(sec_int, 3600))
+            self._custom_text_return_at = time.time() + sec_int
+            self._post_warning_showing_report = from_warning
+            logger.debug(f"[FSM] 预警后限时显示速报已启动 from_warning={from_warning}, sec={sec_int}")
+        except Exception as e:
+            logger.error(f"启动限时速报模式失败: {e}", exc_info=True)
+
+    def _switch_to_custom_text_only(self, reason: str = "") -> None:
+        """强制切换为仅显示自定义文本（CustomOnly 状态）。"""
+        try:
+            custom_msg = self.report_buffer.find_by_source('__custom_text__')
+            self._custom_text_return_at = None
+            self._post_warning_showing_report = False
+            if not custom_msg or not self.scrolling_text:
+                logger.info(f"[FSM] 试图切换为仅显示自定义文本，但未找到自定义文本消息或滚动组件不存在，reason={reason}")
+                return
+            with self.report_buffer._lock:
+                self.report_buffer.buffer = [m for m in self.report_buffer.buffer if m.source == '__custom_text__']
+                self.report_buffer.current_index = 0
+                if self.report_buffer.buffer:
+                    self.report_buffer._current_displaying_msg_id = id(self.report_buffer.buffer[0])
+            success = self.scrolling_text.update_text(
+                custom_msg.text,
+                custom_msg.color,
+                custom_msg.image_path,
+                force=False,
+                message_type=custom_msg.message_type,
+                parsed_data=custom_msg.parsed_data,
+                image_after_text=getattr(custom_msg, 'image_after_text', False)
+            )
+            if success:
+                self.current_display_type = 'report'
+                self._current_displaying_message = custom_msg
+                logger.info(f"[FSM] 已切换为仅显示自定义文本，reason={reason}")
+            else:
+                logger.warning(f"[FSM] 切换为仅显示自定义文本失败，reason={reason}")
+        except Exception as e:
+            logger.error(f"切换为仅显示自定义文本失败: {e}", exc_info=True)
     
     def _switch_to_report_mode(self):
         """切换到轮播模式"""
@@ -826,7 +937,8 @@ class MainWindow(QMainWindow):
                     force=not is_scrolling,
                     message_type=current_msg.message_type,
                     parsed_data=current_msg.parsed_data,
-                    fallback_image_path=getattr(current_msg, 'fallback_image_path', None)
+                    fallback_image_path=getattr(current_msg, 'fallback_image_path', None),
+                    image_after_text=getattr(current_msg, 'image_after_text', False)
                 )
                 if success:
                     self.current_display_type = 'report'
@@ -998,12 +1110,32 @@ class MainWindow(QMainWindow):
                 image_path = parsed_data.get('logo_url')
                 if image_path:
                     logger.info(f"✓ 海啸预警图标路径: {image_path}")
-            
+            elif message_type == 'report' and (parsed_data.get('source_type') == 'fssn-cmt' or parsed_data.get('nodal_plane_1')):
+                # FSSN CMT：用 PyGMT 或 Pillow 绘制震源机制沙滩球，按深度着色，输出透明 PNG
+                try:
+                    from utils.beachball import render_beachball_to_file
+                    nodal_plane_1 = parsed_data.get('nodal_plane_1') or (parsed_data.get('raw_data') or {}).get('nodalPlane1', '')
+                    event_id_for_cmt = parsed_data.get('event_id', '')
+                    if nodal_plane_1:
+                        image_path = render_beachball_to_file(
+                            nodal_plane_1,
+                            parsed_data=parsed_data,
+                            event_id=event_id_for_cmt or None,
+                        )
+                        if image_path:
+                            logger.info(f"✓ FSSN CMT 沙滩球已生成: {image_path}")
+                except Exception as e:
+                    logger.warning(f"FSSN CMT 沙滩球生成失败: {e}")
+                    image_path = None
+
             # 获取event_id（用于识别同一条地震事件的更新）
             event_id = parsed_data.get('event_id', '')
             # 获取发震时间（用于预警消息有效期检查）
             shock_time = parsed_data.get('shock_time', '')
-            
+
+            image_after_text = bool(
+                message_type == 'report' and (parsed_data.get('source_type') == 'fssn-cmt' or parsed_data.get('nodal_plane_1')) and image_path
+            )
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -1012,6 +1144,7 @@ class MainWindow(QMainWindow):
                 source=source_name,
                 image_path=image_path,
                 fallback_image_path=fallback_image_path if message_type == 'weather' else None,
+                image_after_text=image_after_text,
                 event_id=event_id,
                 shock_time=shock_time if message_type == 'warning' else None,  # 只保存预警消息的发震时间
                 parsed_data=parsed_data if message_type == 'weather' else None  # 只保存气象预警的parsed_data（用于热修改时重新计算颜色和异步获取图片路径）
@@ -1146,9 +1279,12 @@ class MainWindow(QMainWindow):
                                         )
                         will_update_text = True
                     
-                    # 处理气象预警和速报消息（自定义文本模式下不写入 report_buffer，仅显示自定义文本）
-                    if (weather_messages or report_messages) and not getattr(self.config.message_config, 'use_custom_text', False):
-                        all_messages = weather_messages + report_messages
+                    # 处理气象预警和速报消息：速报始终入队；气象预警仅在非自定义或开启「预警后限时显示速报再回自定义」时入队
+                    use_custom = getattr(self.config.message_config, 'use_custom_text', False)
+                    return_after_warning = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+                    allow_weather = not use_custom or (use_custom and return_after_warning)
+                    all_messages = (weather_messages if allow_weather else []) + report_messages
+                    if all_messages:
                         
                         # 对于气象预警/海啸预警消息，检查图片路径并预加载；气象预警无图时异步获取
                         for msg in all_messages:

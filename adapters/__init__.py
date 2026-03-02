@@ -10,7 +10,6 @@ from .fanstudio_adapter import FanStudioAdapter
 from .p2pquake_adapter import P2PQuakeAdapter
 from .p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
 from .p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
-from .wolfx_adapter import WolfxAdapter
 from .nied_adapter import NiedAdapter
 from .custom_adapter import CustomAdapter
 
@@ -20,7 +19,6 @@ __all__ = [
     'P2PQuakeAdapter',
     'P2PQuakeTsunamiAdapter',
     'P2PQuakeWebSocketAdapter',
-    'WolfxAdapter',
     'NiedAdapter',
     'CustomAdapter',
 ]

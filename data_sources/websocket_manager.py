@@ -21,7 +21,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from adapters import (
     FanStudioAdapter,
-    WolfxAdapter,
     NiedAdapter,
     P2PQuakeWebSocketAdapter,
     CustomAdapter,
@@ -33,6 +32,8 @@ from utils.logger import get_logger
 logger = get_logger()
 
 P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
+# 启动时仅拉取最新 1 条地震情报，随后使用 WSS
+P2PQUAKE_HISTORY_INITIAL_URL = "https://api.p2pquake.net/v2/history?codes=551&limit=1"
 P2PQUAKE_TSUNAMI_URL = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 
@@ -73,18 +74,14 @@ class WebSocketManager:
         Returns:
             适配器实例
         """
+        # 已下线的 Wolfx 不连接
+        if 'wolfx' in url.lower() or 'ws-api.wolfx.jp' in url:
+            return None
         # 检查是否为Fan Studio数据源
         if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
             parts = url.split('/')
             source_type = parts[-1] if parts[-1] else parts[-2]
             adapter = FanStudioAdapter(source_type, url)
-            adapter._manager_source_type = source_type
-            return adapter
-        # Wolfx WebSocket
-        if 'ws-api.wolfx.jp' in url:
-            parts = url.split('/')
-            source_type = parts[-1] if parts[-1] else 'all_eew'
-            adapter = WolfxAdapter(source_type, url)
             adapter._manager_source_type = source_type
             return adapter
         # NIED WebSocket
@@ -137,9 +134,9 @@ class WebSocketManager:
                 source = raw_data['_update_source']
                 return config.get_source_name(f"wss://ws.fanstudio.tech/{source}")
             
-            # Wolfx/NIED：用 source_type 作为 source 名称，便于优先级与机构名解析
+            # NIED：用 source_type 作为 source 名称，便于优先级与机构名解析
             source_type = parsed_data.get('source_type', '')
-            if source_type and (source_type.startswith('wolfx_') or source_type == 'nied'):
+            if source_type == 'nied':
                 return source_type
             # 根据organization推断
             organization = parsed_data.get('organization', '')
@@ -147,7 +144,6 @@ class WebSocketManager:
                 "中国地震台网中心自动测定/正式测定": "cenc",
                 "中国地震预警网": "cea",
                 "中国地震预警网-省级预警": "cea-pr",
-                "四川地震局": "sichuan",
                 "宁夏地震局": "ningxia",
                 "广西地震局": "guangxi",
                 "山西地震局": "shanxi",
@@ -220,12 +216,12 @@ class WebSocketManager:
                         logger.info(f"[{actual_source}] {msg_type}消息")
                         self.message_callback(actual_source, parsed_data)
             else:
-                # 普通解析（包括update类型、Wolfx、NIED）
+                # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = adapter.parse(data)
                 if parsed_data:
-                    # Wolfx/NIED/P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
+                    # NIED/P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
-                    if pt and (pt.startswith('wolfx_') or pt == 'nied' or pt in ('p2pquake', 'p2pquake_tsunami')):
+                    if pt and (pt == 'nied' or pt in ('p2pquake', 'p2pquake_tsunami')):
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -494,13 +490,19 @@ class WebSocketManager:
                 except Exception as e:
                     logger.error(f"P2PQuake 启动前 HTTP 拉取失败: {e}", exc_info=True)
         
-        # 创建所有连接任务
+        # 创建所有连接任务（跳过无适配器的 URL，如已下线的 Wolfx）
         tasks = []
+        urls_for_tasks = []
         for url in enabled_urls:
+            adapter = self.get_adapter(url)
+            if adapter is None:
+                logger.debug(f"跳过无适配器的数据源: {url}")
+                continue
             source_name = config.get_source_name(url)
             logger.debug(f"创建连接任务: {url} -> {source_name}")
             task = asyncio.create_task(self.connect_to_source(url, source_name))
             tasks.append(task)
+            urls_for_tasks.append(url)
             self._connection_tasks[url] = task
         
         logger.info(f"已创建{len(tasks)}个连接任务，开始连接...")
@@ -511,7 +513,7 @@ class WebSocketManager:
         # 检查是否有任务异常退出
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                url = enabled_urls[i] if i < len(enabled_urls) else "unknown"
+                url = urls_for_tasks[i] if i < len(urls_for_tasks) else "unknown"
                 logger.error(f"连接任务异常退出: {url}, 错误: {result}", exc_info=True)
     
     async def send_message_async(self, url: str, message: str) -> bool:

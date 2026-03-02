@@ -5,7 +5,7 @@ Fan Studio数据源适配器
 根据Fan Studio数据服务 API文档实现
 支持所有数据源：
 - 地震速报：cenc, ningxia, guangxi, shanxi, beijing, shandong, yunnan, cwa, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
-- 地震预警：cea, cea-pr, sichuan, cwa-eew, jma, sa, kma-eew
+- 地震预警：cea, cea-pr, cwa-eew, jma, sa, kma-eew
 - 气象预警：weatheralarm
 - 海啸信息：tsunami
 """
@@ -62,9 +62,9 @@ class FanStudioAdapter(BaseAdapter):
         return self.source_name.lower()
 
     # Fan Studio All 时按配置「勾选预警/勾选速报」决定解析范围（不依赖单项 URL）
-    FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
+    FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew']
     FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
-                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'weatheralarm', 'tsunami']
+                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt', 'weatheralarm', 'tsunami']
 
     def _get_fanstudio_enabled_source_names(self, enabled_sources: Dict[str, bool], config: Any, all_url: str) -> set:
         """当使用 All 数据源时，根据配置 fanstudio_parse_warning / fanstudio_parse_report 得到要解析的数据源名称集合。"""
@@ -109,27 +109,18 @@ class FanStudioAdapter(BaseAdapter):
             
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
-            # 始终使用 All 时：由配置「勾选预警/勾选速报」决定解析范围
+            # 仅由配置「勾选预警/勾选速报」决定解析范围，不合并单项 URL
             enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
-            # 兼容旧配置：若仍有单项 Fan Studio URL 则合并
-            for url, enabled in enabled_sources.items():
-                if enabled and url != all_url:
-                    if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
-                        parts = url.split('/')
-                        source_name = parts[-1] if parts[-1] else parts[-2]
-                        enabled_source_names.add(source_name)
-                    elif 'p2pquake.net' in url:
-                        enabled_source_names.add('p2pquake')
             logger.info(f"[FanStudio适配器] 启用的数据源名称集合: {sorted(enabled_source_names)}")
             
             results = []
             # 所有数据源（按优先级排序）
             priority_sources = [
                 # 地震预警（优先级最高）
-                'cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew',
+                'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
                 # 地震速报
                 'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
-                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn',
+                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt',
                 # 气象预警、海啸信息
                 'weatheralarm', 'tsunami'
             ]
@@ -199,10 +190,10 @@ class FanStudioAdapter(BaseAdapter):
                     # 优先级：预警 > 速报 > 气象预警 > 海啸信息
                     priority_sources = [
                         # 地震预警（优先级最高）
-                        'cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew',
+                        'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
                         # 地震速报
                         'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'p2pquake', 'hko',
-                        'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn',
+                        'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt',
                         # 气象预警、海啸信息
                         'weatheralarm', 'tsunami'
                     ]
@@ -216,15 +207,6 @@ class FanStudioAdapter(BaseAdapter):
                     base_domain = "fanstudio.tech"
                     all_url = f"wss://ws.{base_domain}/all"
                     enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
-                    for url, enabled in enabled_sources.items():
-                        if enabled and url != all_url:
-                            if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
-                                parts = url.split('/')
-                                source_name = parts[-1] if parts[-1] else parts[-2]
-                                enabled_source_names.add(source_name)
-                            elif 'p2pquake.net' in url:
-                                enabled_source_names.add('p2pquake')
-                    
                     # 按优先级查找第一个有效数据（只查找启用的数据源）
                     for source_type in priority_sources:
                         # 检查该数据源是否启用
@@ -310,10 +292,12 @@ class FanStudioAdapter(BaseAdapter):
                 result = self._parse_weather(data)
             elif source_type == 'tsunami':
                 result = self._parse_tsunami(data)
+            elif source_type == 'fssn-cmt':
+                result = self._parse_fssn_cmt(data)
             elif source_type in ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa',
                                 'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']:
                 result = self._parse_earthquake_report(data, source_type)
-            elif source_type in ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']:
+            elif source_type in ['cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew']:
                 result = self._parse_earthquake_warning(data, source_type)
             else:
                 # 默认按速报处理
@@ -364,7 +348,60 @@ class FanStudioAdapter(BaseAdapter):
         # 如果需要，可以在后续处理中通过翻译服务转换
         
         return location
-    
+
+    def _parse_fssn_cmt(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        解析 FSSN 矩心矩张量解 (CMT) 数据。
+        返回与速报一致的结构，并保留 nodal_plane_1 / nodal_plane_2 供沙滩球绘制使用。
+        """
+        place_name = data.get('placeName', '')
+        shock_time = data.get('shockTime', '')
+        if not place_name and not shock_time:
+            return None
+        latitude = self._safe_float(data.get('latitude', 0))
+        longitude = self._safe_float(data.get('longitude', 0))
+        depth_str = data.get('depth', '')
+        if isinstance(depth_str, str):
+            match = re.match(r'^([\d.]+)', depth_str.strip())
+            depth = self._safe_float(match.group(1), 10.0) if match else 10.0
+        else:
+            depth = self._safe_float(depth_str, 10.0)
+        all_mag = data.get('allMagnitudes') or {}
+        magnitude = self._safe_float(
+            all_mag.get('Mww') or all_mag.get('M') or all_mag.get('mB') or all_mag.get('mb') or all_mag.get('Mwp') or 0
+        )
+        event_id = data.get('eventId', data.get('id', ''))
+        nodal_plane_1 = data.get('nodalPlane1', '')
+        nodal_plane_2 = data.get('nodalPlane2', '')
+        if shock_time:
+            shock_time = timezone_utils.cst_to_display(shock_time)
+        if self.data_source_type == 'all':
+            organization = self._get_organization_name_by_type('fssn-cmt')
+        else:
+            organization = self.get_organization_name()
+        result = {
+            'type': 'report',
+            'source_type': 'fssn-cmt',
+            'place_name': place_name,
+            'shock_time': shock_time,
+            'magnitude': magnitude,
+            'latitude': latitude,
+            'longitude': longitude,
+            'depth': depth,
+            'organization': organization,
+            'event_id': event_id,
+            'raw_data': data,
+        }
+        if nodal_plane_1:
+            result['nodal_plane_1'] = nodal_plane_1
+        if nodal_plane_2:
+            result['nodal_plane_2'] = nodal_plane_2
+        for key in ('mnn', 'mee', 'mdd', 'mne', 'mnd', 'med'):
+            val = data.get(key)
+            if val is not None and (val != '' if isinstance(val, str) else True):
+                result[key] = val
+        return result
+
     def _parse_earthquake_report(self, data: Dict[str, Any], source_type: str) -> Dict[str, Any]:
         """解析地震速报数据"""
         # CWA数据源使用特殊的地名提取逻辑
@@ -568,13 +605,6 @@ class FanStudioAdapter(BaseAdapter):
         # KMA-EEW特殊字段
         if source_type == 'kma-eew' and 'affectedAreas' in data:
             result['affected_areas'] = data.get('affectedAreas')
-        
-        # Sichuan特殊字段
-        if source_type == 'sichuan':
-            if 'infoTypeName' in data:
-                result['info_type'] = data.get('infoTypeName')
-            if 'producer' in data:
-                result['producer'] = data.get('producer')
         
         return result
     

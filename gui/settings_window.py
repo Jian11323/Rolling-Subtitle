@@ -10,7 +10,8 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QTabWidget, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
-    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox
+    QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QGroupBox,
+    QSizePolicy,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase
@@ -34,10 +35,10 @@ MARGIN_TAB = 16
 SPACING_TAB = 16
 SPACING_BLOCK = 20
 
-# 共用 QSS（区块标题、正文标签、输入控件、保存按钮）
-STYLE_SECTION_TITLE = "font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 4px;"
-STYLE_LABEL = "font-size: 13px; color: #555555;"
-STYLE_HINT = "font-size: 12px; color: #888888;"
+# 共用 QSS（与高级版一致：16pt/16px 字号与新布局）
+STYLE_SECTION_TITLE = "font-weight: bold; font-size: 16pt; color: #333333; margin-bottom: 4px;"
+STYLE_LABEL = "font-size: 16px; color: #555555;"
+STYLE_HINT = "font-size: 16px; color: #888888;"
 STYLE_SLIDER = """
     QSlider::groove:horizontal {
         border: 1px solid #CCCCCC;
@@ -60,7 +61,7 @@ STYLE_SPINBOX = """
         padding: 6px;
         border: 1px solid #CCCCCC;
         border-radius: 4px;
-        font-size: 13px;
+        font-size: 16px;
     }
     QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #4A90E2; }
 """
@@ -69,11 +70,15 @@ STYLE_COMBOBOX = """
         padding: 6px;
         border: 1px solid #CCCCCC;
         border-radius: 4px;
-        font-size: 13px;
-        min-height: 20px;
+        font-size: 16px;
+        min-height: 24px;
     }
     QComboBox:focus { border: 1px solid #4A90E2; }
 """
+STYLE_LINEEDIT = "QLineEdit { padding: 6px; border: 1px solid #CCCCCC; border-radius: 4px; font-size: 16px; } QLineEdit:focus { border: 1px solid #4A90E2; }"
+STYLE_GROUPBOX = "QGroupBox { font-weight: bold; font-size: 16pt; color: #333333; border: 1px solid #CCCCCC; border-radius: 4px; margin-top: 10px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+STYLE_SOURCE_TITLE = "font-weight: bold; font-size: 16px; color: #000000;"
+STYLE_ABOUT_ITEM = "font-size: 18px; color: #555555;"
 
 # 字体列表去重与精简：去掉「中」「中文」「_GB2312」等变体后缀，每种字体只保留一条，显示名用精简后的名称
 _FONT_SUFFIXES: Tuple[str, ...] = (
@@ -123,12 +128,25 @@ STYLE_SAVE_BTN = """
         color: white;
         border: none;
         border-radius: 4px;
-        font-size: 14px;
+        font-size: 16px;
         font-weight: bold;
         padding: 8px 20px;
     }
     QPushButton:hover { background-color: #45a049; }
     QPushButton:pressed { background-color: #3d8b40; }
+"""
+STYLE_SELECT_ALL_BTN = """
+    QPushButton {
+        background-color: #4A90E2;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 16px;
+        font-weight: bold;
+        padding: 8px 20px;
+    }
+    QPushButton:hover { background-color: #357ABD; }
+    QPushButton:pressed { background-color: #2E5F8F; }
 """
 
 
@@ -175,11 +193,11 @@ class SettingsWindow(QDialog):
         # 获取屏幕尺寸，确保窗口不超出屏幕
         from PyQt5.QtWidgets import QApplication
         screen = QApplication.desktop().screenGeometry()
-        max_width = min(440, screen.width() - 40)  # 初始宽度 520，留出边距
-        max_height = min(550, screen.height() - 100)  # 高度 550，留出边距（含任务栏）
+        max_width = min(500, screen.width() - 40)   # 宽度 500，留出边距
+        max_height = min(700, screen.height() - 100)  # 高度 700，留出边距（含任务栏）
         
         self.setMinimumSize(420, 300)  # 最小宽度 420，避免内容挤在一起
-        self.resize(max_width, max_height)  # 初始尺寸
+        self.resize(max_width, max_height)  # 初始尺寸 500×700
         # 最大尺寸不超过屏幕，留出更多边距
         self.setMaximumSize(screen.width() - 20, screen.height() - 40)  # 最大尺寸不超过屏幕
         # 使用非模态窗口，避免阻塞主界面事件循环
@@ -350,14 +368,13 @@ class SettingsWindow(QDialog):
         main_layout.setSpacing(8)
         
         # ---------- 1. 基本显示 ----------
+        group_basic = QGroupBox("基本显示")
+        group_basic.setStyleSheet(STYLE_GROUPBOX)
         block1 = QWidget()
         block1_layout = QGridLayout(block1)
         block1_layout.setContentsMargins(0, 0, 0, 0)
         block1_layout.setHorizontalSpacing(4)
         block1_layout.setVerticalSpacing(2)
-        sec1 = QLabel("基本显示")
-        sec1.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block1_layout.addWidget(sec1, 0, 0, 1, 6)
         
         # 滚动速度
         speed_label = QLabel("滚动速度:")
@@ -370,7 +387,7 @@ class SettingsWindow(QDialog):
         speed_slider.setStyleSheet(STYLE_SLIDER)
         speed_slider.setFixedWidth(240)
         speed_label_value = QLabel(f"{self.config.gui_config.text_speed:.1f}")
-        speed_label_value.setStyleSheet("font-size: 13px; color: #333333; min-width: 40px;")
+        speed_label_value.setStyleSheet("font-size: 16px; color: #333333; min-width: 40px;")
         speed_slider.valueChanged.connect(lambda v: speed_label_value.setText(f"{v / 10.0:.1f}"))
         block1_layout.addWidget(speed_label, 1, 0)
         block1_layout.addWidget(speed_slider, 1, 1)
@@ -408,10 +425,10 @@ class SettingsWindow(QDialog):
         font_size_combo.setFixedWidth(88)
         font_bold_cb = QCheckBox("字体加粗")
         font_bold_cb.setChecked(getattr(self.config.gui_config, 'font_bold', False))
-        font_bold_cb.setStyleSheet("font-size: 13px;")
+        font_bold_cb.setStyleSheet("font-size: 16px;")
         font_italic_cb = QCheckBox("字体倾斜")
         font_italic_cb.setChecked(getattr(self.config.gui_config, 'font_italic', False))
-        font_italic_cb.setStyleSheet("font-size: 13px;")
+        font_italic_cb.setStyleSheet("font-size: 16px;")
         font_block = QWidget()
         font_block_layout = QGridLayout(font_block)
         font_block_layout.setContentsMargins(0, 0, 0, 0)
@@ -455,19 +472,21 @@ class SettingsWindow(QDialog):
         tz_row_layout.addWidget(timezone_combo)
         tz_row_layout.addWidget(timezone_hint)
         tz_row_layout.addStretch()
-        block1_layout.addWidget(timezone_label, 4, 0)
-        block1_layout.addWidget(tz_row, 4, 1, 1, 5)
-        main_layout.addWidget(block1)
+        block1_layout.addWidget(timezone_label, 3, 0)
+        block1_layout.addWidget(tz_row, 3, 1, 1, 5)
+        group_basic_layout = QVBoxLayout(group_basic)
+        group_basic_layout.setContentsMargins(10, 12, 10, 10)
+        group_basic_layout.addWidget(block1)
+        main_layout.addWidget(group_basic)
         main_layout.addSpacing(10)
         
         # ---------- 2. 窗口 ----------
+        group_window = QGroupBox("窗口")
+        group_window.setStyleSheet(STYLE_GROUPBOX)
         block2 = QWidget()
         block2_layout = QVBoxLayout(block2)
         block2_layout.setContentsMargins(0, 0, 0, 0)
         block2_layout.setSpacing(6)
-        sec2 = QLabel("窗口")
-        sec2.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block2_layout.addWidget(sec2)
         size_row = QHBoxLayout()
         size_row.setSpacing(10)
         width_label = QLabel("窗口宽度:")
@@ -505,51 +524,127 @@ class SettingsWindow(QDialog):
         opacity_slider.setStyleSheet(STYLE_SLIDER)
         opacity_slider.setFixedWidth(240)
         opacity_label_value = QLabel(f"{self.config.gui_config.opacity:.1f}")
-        opacity_label_value.setStyleSheet("font-size: 13px; color: #333333; min-width: 40px;")
+        opacity_label_value.setStyleSheet("font-size: 16px; color: #333333; min-width: 40px;")
         opacity_slider.valueChanged.connect(lambda v: opacity_label_value.setText(f"{v / 10.0:.1f}"))
         opacity_row_layout.addWidget(opacity_slider)
         opacity_row_layout.addWidget(opacity_label_value)
         opacity_row_layout.addStretch()
         block2_layout.addWidget(opacity_row)
-        watermark_row = QHBoxLayout()
-        watermark_row.setSpacing(10)
+        always_on_top_cb = QCheckBox("窗口置顶")
+        always_on_top_cb.setChecked(getattr(self.config.gui_config, 'always_on_top', False))
+        always_on_top_cb.setStyleSheet("font-size: 16px;")
+        always_on_top_cb.setToolTip("开启后主窗口始终置于其他窗口之上")
+        block2_layout.addWidget(always_on_top_cb)
+        use_weather_image_nmc_cb = QCheckBox("气象预警图标使用 NMC 在线")
+        use_weather_image_nmc_cb.setChecked(getattr(self.config.gui_config, 'use_weather_image_nmc', True))
+        use_weather_image_nmc_cb.setStyleSheet("font-size: 16px;")
+        use_weather_image_nmc_cb.setToolTip("开启时使用中国气象局在线图标（需联网）；关闭时仅使用本地「气象预警信号图片」目录下的图片。")
+        block2_layout.addWidget(use_weather_image_nmc_cb)
+        group_window_layout = QVBoxLayout(group_window)
+        group_window_layout.setContentsMargins(10, 12, 10, 10)
+        group_window_layout.addWidget(block2)
+        main_layout.addWidget(group_window)
+        main_layout.addSpacing(10)
+
+        # 水印设置（QGroupBox，含背景水印文字 + 字体/字号/位置）
+        group_wm = QGroupBox("水印设置")
+        group_wm.setStyleSheet(STYLE_GROUPBOX)
+        block_wm = QWidget()
+        block_wm_layout = QVBoxLayout(block_wm)
+        block_wm_layout.setContentsMargins(0, 0, 0, 0)
+        block_wm_layout.setSpacing(8)
         watermark_label = QLabel("背景水印:")
         watermark_label.setStyleSheet(STYLE_LABEL)
         watermark_edit = QLineEdit()
         watermark_edit.setPlaceholderText("留空则不显示")
-        watermark_edit.setText(getattr(self.config.gui_config, 'watermark_text', '') or '')
-        watermark_edit.setStyleSheet("font-size: 13px; padding: 4px; border: 1px solid #CCCCCC; border-radius: 4px;")
-        watermark_edit.setMinimumWidth(160)
-        watermark_angle_combo = QComboBox()
-        watermark_angle_combo.addItem("横向", "horizontal")
-        watermark_angle_combo.addItem("斜向 45°", "45")
-        angle_val = getattr(self.config.gui_config, 'watermark_angle', 'horizontal') or 'horizontal'
-        idx = watermark_angle_combo.findData(angle_val)
-        if idx >= 0:
-            watermark_angle_combo.setCurrentIndex(idx)
-        watermark_angle_combo.setStyleSheet(STYLE_COMBOBOX)
-        watermark_row.addWidget(watermark_label)
-        watermark_row.addWidget(watermark_edit)
-        watermark_row.addWidget(QLabel("方向:"))
-        watermark_row.addWidget(watermark_angle_combo)
-        watermark_row.addStretch()
-        block2_layout.addLayout(watermark_row)
-        use_weather_image_nmc_cb = QCheckBox("气象预警图标使用 NMC 在线")
-        use_weather_image_nmc_cb.setChecked(getattr(self.config.gui_config, 'use_weather_image_nmc', True))
-        use_weather_image_nmc_cb.setStyleSheet("font-size: 13px;")
-        use_weather_image_nmc_cb.setToolTip("开启时使用中国气象局在线图标（需联网）；关闭时仅使用本地「气象预警信号图片」目录下的图片。")
-        block2_layout.addWidget(use_weather_image_nmc_cb)
-        main_layout.addWidget(block2)
+        watermark_edit.setText(getattr(self.config.gui_config, 'watermark_text', "") or "")
+        watermark_edit.setStyleSheet(STYLE_LINEEDIT)
+        watermark_text_row = QHBoxLayout()
+        watermark_text_row.setSpacing(8)
+        watermark_text_row.addWidget(watermark_label)
+        watermark_text_row.addWidget(watermark_edit)
+        watermark_text_row.addStretch()
+        block_wm_layout.addLayout(watermark_text_row)
+        wm_hint = QLabel("可为背景水印单独设置字体/字号和显示位置；自动字号按主字体大小缩放。")
+        wm_hint.setStyleSheet(STYLE_HINT)
+        wm_hint.setWordWrap(True)
+        wm_hint.setMaximumWidth(380)
+        block_wm_layout.addWidget(wm_hint)
+        watermark_font_combo = QComboBox()
+        watermark_font_combo.setEditable(False)
+        current_main_font = getattr(self.config.gui_config, 'font_family', None) or "SimSun"
+        follow_label = f"跟随主字体（当前：{current_main_font}）"
+        watermark_font_combo.addItem(follow_label, "")
+        for display_name, actual_family in _get_deduplicated_font_list():
+            watermark_font_combo.addItem(display_name, actual_family)
+        wm_ff = getattr(self.config.gui_config, 'watermark_font_family', "") or ""
+        if wm_ff:
+            idx_ff = watermark_font_combo.findData(wm_ff)
+            if idx_ff >= 0:
+                watermark_font_combo.setCurrentIndex(idx_ff)
+        watermark_font_combo.setStyleSheet(STYLE_COMBOBOX)
+        watermark_font_combo.setMaximumWidth(280)
+        wm_font_row = QHBoxLayout()
+        wm_adv_label = QLabel("水印字体:")
+        wm_adv_label.setStyleSheet(STYLE_LABEL)
+        wm_font_row.addWidget(wm_adv_label)
+        wm_font_row.addWidget(watermark_font_combo)
+        wm_font_row.addStretch()
+        block_wm_layout.addLayout(wm_font_row)
+        watermark_font_auto_cb = QCheckBox("自动字号")
+        wm_fs = int(getattr(self.config.gui_config, 'watermark_font_size', 0) or 0)
+        auto_initial = (wm_fs <= 0)
+        watermark_font_auto_cb.setChecked(auto_initial)
+        watermark_font_size_spin = QSpinBox()
+        watermark_font_size_spin.setRange(8, 100)
+        base_fs = getattr(self.config.gui_config, 'font_size', 40)
+        auto_fs = max(8, int(base_fs * 0.7))
+        watermark_font_size_spin.setValue(wm_fs if wm_fs > 0 else auto_fs)
+        watermark_font_size_spin.setStyleSheet(STYLE_SPINBOX)
+        watermark_font_size_spin.setFixedWidth(72)
+        watermark_font_size_spin.setEnabled(not auto_initial)
+        def _on_wm_font_auto_changed(checked: bool):
+            watermark_font_size_spin.setEnabled(not checked)
+        watermark_font_auto_cb.toggled.connect(_on_wm_font_auto_changed)
+        wm_size_row = QHBoxLayout()
+        wm_size_row.setSpacing(12)
+        wm_size_row.addWidget(watermark_font_auto_cb)
+        wm_size_row.addWidget(watermark_font_size_spin)
+        wm_size_row.addStretch()
+        block_wm_layout.addLayout(wm_size_row)
+        watermark_pos_combo = QComboBox()
+        watermark_pos_combo.setStyleSheet(STYLE_COMBOBOX)
+        watermark_pos_combo.setMaximumWidth(200)
+        watermark_pos_combo.addItem("斜向 45 度平铺（整屏）", "diagonal")
+        watermark_pos_combo.addItem("左上角", "top_left")
+        watermark_pos_combo.addItem("右上角", "top_right")
+        watermark_pos_combo.addItem("左下角", "bottom_left")
+        watermark_pos_combo.addItem("右下角", "bottom_right")
+        current_pos = getattr(self.config.gui_config, 'watermark_position', 'diagonal') or 'diagonal'
+        idx_pos = watermark_pos_combo.findData(current_pos)
+        if idx_pos < 0:
+            idx_pos = watermark_pos_combo.findData("diagonal")
+        watermark_pos_combo.setCurrentIndex(max(0, idx_pos))
+        wm_pos_row = QHBoxLayout()
+        wm_pos_label = QLabel("水印位置:")
+        wm_pos_label.setStyleSheet(STYLE_LABEL)
+        wm_pos_row.addWidget(wm_pos_label)
+        wm_pos_row.addWidget(watermark_pos_combo)
+        wm_pos_row.addStretch()
+        block_wm_layout.addLayout(wm_pos_row)
+        group_wm_layout = QVBoxLayout(group_wm)
+        group_wm_layout.setContentsMargins(10, 12, 10, 10)
+        group_wm_layout.addWidget(block_wm)
+        main_layout.addWidget(group_wm)
         main_layout.addSpacing(10)
-        
+
         # ---------- 3. 性能与渲染 ----------
+        group_render = QGroupBox("性能与渲染")
+        group_render.setStyleSheet(STYLE_GROUPBOX)
         block3 = QWidget()
         block3_layout = QVBoxLayout(block3)
         block3_layout.setContentsMargins(0, 0, 0, 0)
         block3_layout.setSpacing(6)
-        sec3 = QLabel("性能与渲染")
-        sec3.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block3_layout.addWidget(sec3)
         render_row = QHBoxLayout()
         cpu_radio = QRadioButton("CPU 渲染（软件）")
         opengl_radio = QRadioButton("GPU 渲染（OpenGL）")
@@ -593,17 +688,19 @@ class SettingsWindow(QDialog):
         perf_row_layout.addWidget(fps_group)
         perf_row_layout.addStretch()
         block3_layout.addWidget(perf_row)
-        main_layout.addWidget(block3)
+        group_render_layout = QVBoxLayout(group_render)
+        group_render_layout.setContentsMargins(10, 12, 10, 10)
+        group_render_layout.addWidget(block3)
+        main_layout.addWidget(group_render)
         main_layout.addSpacing(10)
-        
+
         # ---------- 4. 颜色 ----------
+        group_color = QGroupBox("颜色")
+        group_color.setStyleSheet(STYLE_GROUPBOX)
         block4 = QWidget()
         block4_layout = QVBoxLayout(block4)
         block4_layout.setContentsMargins(0, 0, 0, 0)
         block4_layout.setSpacing(2)
-        sec4 = QLabel("颜色")
-        sec4.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block4_layout.addWidget(sec4)
         report_color_value = self.config.message_config.report_color.upper()
         warning_color_value = self.config.message_config.warning_color.upper()
         custom_text_color_value = getattr(self.config.message_config, 'custom_text_color', '#01FF00').upper()
@@ -617,7 +714,7 @@ class SettingsWindow(QDialog):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(8)
             lbl = QLabel(label_text)
-            lbl.setStyleSheet("font-size: 13px; color: #555555;")
+            lbl.setStyleSheet(STYLE_LABEL)
             lbl.setMinimumWidth(120)  # 统一标签宽度，三行颜色预览/色值/按钮纵向对齐
             row_layout.addWidget(lbl)
             preview = QLabel()
@@ -626,14 +723,14 @@ class SettingsWindow(QDialog):
             row_layout.addWidget(preview)
             value_label = QLabel(color_value)
             value_label.setMinimumWidth(80)
-            value_label.setStyleSheet("font-size: 13px; color: #333333; font-family: monospace;")
+            value_label.setStyleSheet("font-size: 16px; color: #333333; font-family: monospace;")
             # value_label 不加入 layout，仅保留引用供颜色更新使用
             btn = QPushButton("修改颜色")
-            btn.setStyleSheet("font-size: 13px; padding: 4px 10px;")
+            btn.setStyleSheet("font-size: 16px; padding: 4px 10px;")
             btn.clicked.connect(lambda: self._open_color_picker(color_type))
             row_layout.addWidget(btn)
             reset_btn = QPushButton("恢复默认")
-            reset_btn.setStyleSheet("font-size: 12px; padding: 4px 10px;")
+            reset_btn.setStyleSheet(STYLE_HINT + " padding: 4px 10px;")
             reset_btn.clicked.connect(lambda: self._reset_color(color_type))
             row_layout.addWidget(reset_btn)
             row_layout.addStretch()
@@ -643,17 +740,19 @@ class SettingsWindow(QDialog):
         self.report_color_preview, self.report_color_label = _add_color_row(block4_layout, "地震信息颜色:", report_color_value, 'report')
         self.warning_color_preview, self.warning_color_label = _add_color_row(block4_layout, "地震预警颜色:", warning_color_value, 'warning')
         self.custom_text_color_preview, self.custom_text_color_label = _add_color_row(block4_layout, "自定义文本颜色:", custom_text_color_value, 'custom_text')
-        main_layout.addWidget(block4)
+        group_color_layout = QVBoxLayout(group_color)
+        group_color_layout.setContentsMargins(10, 12, 10, 10)
+        group_color_layout.addWidget(block4)
+        main_layout.addWidget(group_color)
         main_layout.addSpacing(10)
-        
+
         # ---------- 预警/消息更新 ----------
+        group_alert = QGroupBox("预警/消息更新")
+        group_alert.setStyleSheet(STYLE_GROUPBOX)
         block_alert_update = QWidget()
         block_alert_update_layout = QVBoxLayout(block_alert_update)
         block_alert_update_layout.setContentsMargins(0, 0, 0, 0)
         block_alert_update_layout.setSpacing(6)
-        sec_alert = QLabel("预警/消息更新")
-        sec_alert.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block_alert_update_layout.addWidget(sec_alert)
         self.show_one_alert_per_received_checkbox = QCheckBox("收到预警更新报立即切换")
         self.show_one_alert_per_received_checkbox.setChecked(
             getattr(self.config.message_config, 'show_one_alert_per_received', False)
@@ -661,19 +760,77 @@ class SettingsWindow(QDialog):
         self.show_one_alert_per_received_checkbox.setToolTip(
             "开启后，收到预警更新报时立即切换并显示最新内容；关闭时仅后台替换，不打断当前滚动。默认关闭。"
         )
-        self.show_one_alert_per_received_checkbox.setStyleSheet("font-size: 13px;")
+        self.show_one_alert_per_received_checkbox.setStyleSheet("font-size: 16px;")
         block_alert_update_layout.addWidget(self.show_one_alert_per_received_checkbox)
-        main_layout.addWidget(block_alert_update)
+        self.force_single_line_checkbox = QCheckBox("强制单行")
+        self.force_single_line_checkbox.setChecked(
+            getattr(self.config.message_config, 'force_single_line', True)
+        )
+        self.force_single_line_checkbox.setToolTip(
+            "开启后，将数据源中的换行符替换为空格，保证滚动字幕始终单行显示。关闭则保留多行（由数据源决定）。"
+        )
+        self.force_single_line_checkbox.setStyleSheet("font-size: 16px;")
+        block_alert_update_layout.addWidget(self.force_single_line_checkbox)
+        mc = self.config.message_config
+        self.custom_text_return_after_warning_checkbox = QCheckBox("预警后限时显示速报再回自定义（beta版）")
+        self.custom_text_return_after_warning_checkbox.setChecked(
+            getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+        )
+        self.custom_text_return_after_warning_checkbox.setToolTip(
+            "仅在「数据源」为「自定义文本」时生效。开启后：默认显示自定义文本；有预警时优先显示预警；预警结束且有速报或在无预警时直接收到速报时，将限时显示速报，超时（默认 5 分钟，可在配置中调整）后自动恢复为仅显示自定义文本。"
+        )
+        self.custom_text_return_after_warning_checkbox.setStyleSheet("font-size: 16px;")
+        block_alert_update_layout.addWidget(self.custom_text_return_after_warning_checkbox)
+        custom_text_return_row = QHBoxLayout()
+        custom_text_return_row.setSpacing(8)
+        custom_text_return_label = QLabel("速报最多显示（分钟）:")
+        custom_text_return_label.setStyleSheet(STYLE_LABEL)
+        custom_text_return_minutes_spin = QSpinBox()
+        custom_text_return_minutes_spin.setRange(1, 60)
+        return_sec = getattr(mc, 'custom_text_return_seconds', 300) or 300
+        current_return_min = max(1, min(60, return_sec // 60))
+        custom_text_return_minutes_spin.setValue(current_return_min)
+        custom_text_return_minutes_spin.setStyleSheet(STYLE_SPINBOX)
+        custom_text_return_minutes_spin.setToolTip("默认 5 分钟；越大则速报展示越久再切回自定义文本。")
+        return_after_checked = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+        custom_text_return_minutes_spin.setEnabled(return_after_checked)
+        self.custom_text_return_after_warning_checkbox.toggled.connect(
+            lambda checked: self._on_custom_text_return_after_warning_toggled(checked, custom_text_return_minutes_spin)
+        )
+        custom_text_return_row.addWidget(custom_text_return_label)
+        custom_text_return_row.addWidget(custom_text_return_minutes_spin)
+        custom_text_return_row.addStretch()
+        block_alert_update_layout.addLayout(custom_text_return_row)
+        warning_min_display_row = QHBoxLayout()
+        warning_min_display_row.setSpacing(8)
+        min_display_label = QLabel("预警最少展示时长（分钟）:")
+        min_display_label.setStyleSheet(STYLE_LABEL)
+        warning_min_display_spin = QSpinBox()
+        warning_min_display_spin.setRange(1, 60)
+        current_min = max(1, int(getattr(mc, 'warning_min_display_seconds', 300)) // 60)
+        warning_min_display_spin.setValue(current_min)
+        warning_min_display_spin.setStyleSheet(STYLE_SPINBOX)
+        warning_min_display_spin.setToolTip("一旦展示则在此时间内不因发震时间过期被移除。单位：分钟，默认 5 分钟。")
+        warning_min_display_row.addWidget(min_display_label)
+        warning_min_display_row.addWidget(warning_min_display_spin)
+        warning_min_display_row.addStretch()
+        block_alert_update_layout.addLayout(warning_min_display_row)
+        alert_hint = QLabel("保存后立即生效，无需重启。")
+        alert_hint.setStyleSheet(STYLE_HINT)
+        block_alert_update_layout.addWidget(alert_hint)
+        group_alert_layout = QVBoxLayout(group_alert)
+        group_alert_layout.setContentsMargins(10, 12, 10, 10)
+        group_alert_layout.addWidget(block_alert_update)
+        main_layout.addWidget(group_alert)
         main_layout.addSpacing(10)
-        
+
         # ---------- 5. 自定义文本 ----------
+        group_custom = QGroupBox("自定义文本")
+        group_custom.setStyleSheet(STYLE_GROUPBOX)
         block5 = QWidget()
         block5_layout = QVBoxLayout(block5)
         block5_layout.setContentsMargins(0, 0, 0, 0)
         block5_layout.setSpacing(6)
-        sec5 = QLabel("自定义文本")
-        sec5.setStyleSheet("font-weight: bold; font-size: 13pt; color: #333333; margin-bottom: 2px;")
-        block5_layout.addWidget(sec5)
         custom_hint = QLabel("在「数据源」页选择「自定义文本」后，非预警时将显示此处编辑的文本。修改并保存后立即生效，无需重启。")
         custom_hint.setStyleSheet(STYLE_HINT)
         custom_hint.setWordWrap(True)
@@ -685,8 +842,11 @@ class SettingsWindow(QDialog):
         self.custom_text_edit.setMaximumWidth(360)
         self.custom_text_edit.setPlainText(self.config.message_config.custom_text or "")
         block5_layout.addWidget(self.custom_text_edit)
-        main_layout.addWidget(block5)
-        
+        group_custom_layout = QVBoxLayout(group_custom)
+        group_custom_layout.setContentsMargins(10, 12, 10, 10)
+        group_custom_layout.addWidget(block5)
+        main_layout.addWidget(group_custom)
+
         # 保存变量引用（供 _save_appearance_settings 使用）
         self.display_vars = {
             'speed': speed_slider,
@@ -700,9 +860,15 @@ class SettingsWindow(QDialog):
             'vsync_enabled': vsync_checkbox,
             'target_fps': fps_spin,
             'timezone': timezone_combo,
+            'always_on_top': always_on_top_cb,
             'use_weather_image_nmc': use_weather_image_nmc_cb,
             'watermark_text': watermark_edit,
-            'watermark_angle': watermark_angle_combo,
+            'watermark_font_family': watermark_font_combo,
+            'watermark_font_auto': watermark_font_auto_cb,
+            'watermark_font_size': watermark_font_size_spin,
+            'watermark_position': watermark_pos_combo,
+            'warning_min_display_seconds': warning_min_display_spin,
+            'custom_text_return_seconds': custom_text_return_minutes_spin,
         }
         self.render_vars = {'cpu_radio': cpu_radio, 'opengl_radio': opengl_radio}
         
@@ -727,79 +893,59 @@ class SettingsWindow(QDialog):
     
     def _create_data_source_tab(self):
         """创建数据源设置标签页"""
-        # 创建滚动区域
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        
         scrollable_widget = QWidget()
+        scrollable_widget.setMinimumWidth(0)
+        scrollable_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         scroll_layout = QVBoxLayout(scrollable_widget)
         scroll_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         scroll_layout.setSpacing(SPACING_TAB)
         
-        # 说明文字
+        # 说明（QGroupBox，与高级版一致）
+        group_info = QGroupBox("说明")
+        group_info.setStyleSheet(STYLE_GROUPBOX)
         info_label = QLabel("提示：预警数据源只解析预警数据，历史数据源只解析速报数据。修改数据源后需重启程序生效。")
-        info_label.setStyleSheet("color: #666; font-size: 14px; padding: 10px; background-color: #F0F0F0; border-radius: 4px;")
+        info_label.setStyleSheet(STYLE_HINT)
         info_label.setWordWrap(True)
-        scroll_layout.addWidget(info_label)
-        
-        font = QFont()
-        font.setBold(True)
-        font.setPointSize(16)
-        
-        # 地震预警
-        warning_label = QLabel("地震预警")
-        warning_label.setFont(font)
-        warning_label.setStyleSheet("color: #000000; padding-top: 10px; padding-bottom: 5px;")
-        scroll_layout.addWidget(warning_label)
-        
-        # Fan Studio（All 数据源）：勾选预警/速报则解析，不勾选则不解析
-        fs_warning_font = QFont()
-        fs_warning_font.setBold(True)
-        fs_warning_font.setPointSize(15)
+        info_layout = QVBoxLayout(group_info)
+        info_layout.setContentsMargins(10, 12, 10, 10)
+        info_layout.addWidget(info_label)
+        scroll_layout.addWidget(group_info)
+
+        # 地震预警（QGroupBox）
+        group_warning = QGroupBox("地震预警")
+        group_warning.setStyleSheet(STYLE_GROUPBOX)
+        gw_layout = QVBoxLayout(group_warning)
+        gw_layout.setContentsMargins(10, 12, 10, 10)
+        gw_layout.setSpacing(6)
         fs_all_label = QLabel("Fan Studio（All 数据源）")
-        fs_all_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(fs_all_label)
+        fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        gw_layout.addWidget(fs_all_label)
         fs_hint = QLabel("始终使用 All 数据源。勾选则解析对应类型，不勾选则不解析。")
-        fs_hint.setStyleSheet("color: #666; font-size: 13px; padding-left: 8px; padding-bottom: 4px;")
-        scroll_layout.addWidget(fs_hint)
+        fs_hint.setStyleSheet(STYLE_HINT)
+        fs_hint.setWordWrap(True)
+        gw_layout.addWidget(fs_hint)
         self.fanstudio_parse_warning_cb = QCheckBox("解析预警数据")
         self.fanstudio_parse_warning_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_warning', True))
-        self.fanstudio_parse_warning_cb.setStyleSheet("font-size: 14px; padding: 4px;")
-        scroll_layout.addWidget(self.fanstudio_parse_warning_cb)
+        self.fanstudio_parse_warning_cb.setStyleSheet("font-size: 16px;")
+        gw_layout.addWidget(self.fanstudio_parse_warning_cb)
         self.fanstudio_parse_report_cb = QCheckBox("解析速报数据（含气象预警）")
         self.fanstudio_parse_report_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_report', True))
-        self.fanstudio_parse_report_cb.setStyleSheet("font-size: 14px; padding: 4px;")
-        scroll_layout.addWidget(self.fanstudio_parse_report_cb)
-
-        # Wolfx 预警（地震预警区：HTTP + WSS 全预警 与 WSS 单项互斥）
-        wolfx_warning_label = QLabel("Wolfx 预警")
-        wolfx_warning_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(wolfx_warning_label)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/sc_eew.json", "四川地震局预警 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/jma_eew.json", "日本气象厅预警 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/fj_eew.json", "福建地震局预警 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/cenc_eew.json", "中国地震预警网预警 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/cwa_eew.json", "台湾气象署预警 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/all_eew", "Wolfx 全预警 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/sc_eew", "四川地震局预警 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/jma_eew", "日本气象厅预警 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/fj_eew", "福建地震局预警 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/cenc_eew", "中国地震预警网预警 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/cwa_eew", "台湾气象署预警 (WSS)", default_value=False)
-        self._setup_wolfx_eew_mutual_exclusion()
-
-        # NIED 数据源（地震预警区）
+        self.fanstudio_parse_report_cb.setStyleSheet("font-size: 16px;")
+        gw_layout.addWidget(self.fanstudio_parse_report_cb)
         nied_label = QLabel("NIED 数据源")
-        nied_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(nied_label)
-        self._add_source_checkbox(scrollable_widget, "wss://sismotide.top/nied", "日本防災科研所预警 (WSS)", default_value=False)
-        
-        # 地震速报 / 自定义文本 二选一（仅允许：地震预警+地震速报 或 地震预警+自定义文本）
-        mode_label = QLabel("非预警时显示")
-        mode_label.setFont(font)
-        mode_label.setStyleSheet("color: #000000; padding-top: 15px; padding-bottom: 5px;")
-        scroll_layout.addWidget(mode_label)
+        nied_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        gw_layout.addWidget(nied_label)
+        self._add_source_checkbox(group_warning, "wss://sismotide.top/nied", "日本防災科研所预警 (WSS)", default_value=False)
+        scroll_layout.addWidget(group_warning)
+
+        # 非预警时显示（QGroupBox）
+        group_mode = QGroupBox("非预警时显示")
+        group_mode.setStyleSheet(STYLE_GROUPBOX)
+        gm_layout = QVBoxLayout(group_mode)
+        gm_layout.setContentsMargins(10, 12, 10, 10)
         self.report_mode_group = QButtonGroup(scrollable_widget)
         self.radio_report = QRadioButton("地震速报")
         self.radio_custom_text = QRadioButton("自定义文本")
@@ -808,110 +954,49 @@ class SettingsWindow(QDialog):
         use_custom = getattr(self.config.message_config, 'use_custom_text', False)
         self.radio_report.setChecked(not use_custom)
         self.radio_custom_text.setChecked(use_custom)
-        scroll_layout.addWidget(self.radio_report)
-        scroll_layout.addWidget(self.radio_custom_text)
+        self.radio_report.setStyleSheet(STYLE_LABEL)
+        self.radio_custom_text.setStyleSheet(STYLE_LABEL)
+        gm_layout.addWidget(self.radio_report)
+        gm_layout.addWidget(self.radio_custom_text)
         mode_hint = QLabel("提示：切换「地震速报」/「自定义文本」需重启软件后生效。自定义文本内容在「外观与显示」页的「自定义文本」区块编辑。")
-        mode_hint.setStyleSheet("color: #666; font-size: 14px;")
+        mode_hint.setStyleSheet(STYLE_HINT)
         mode_hint.setWordWrap(True)
-        scroll_layout.addWidget(mode_hint)
-        
-        # 地震历史
-        history_label = QLabel("地震历史")
-        history_label.setFont(font)
-        history_label.setStyleSheet("color: #000000; padding-top: 15px; padding-bottom: 5px;")
-        scroll_layout.addWidget(history_label)
-        
-        # 日本气象厅地震情报/海啸（HTTP 与 WebSocket 二选一）
-        p2p_label = QLabel("日本气象厅地震情报/海啸")
-        p2p_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(p2p_label)
-        p2p_http_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
-        p2p_tsunami_url = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
-        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
-        self.p2pquake_group = QButtonGroup(scrollable_widget)
-        self.p2pquake_http_radio = QRadioButton("HTTP")
-        self.p2pquake_wss_radio = QRadioButton("WebSocket")
-        self.p2pquake_group.addButton(self.p2pquake_http_radio)
-        self.p2pquake_group.addButton(self.p2pquake_wss_radio)
-        # 根据当前配置设定单选：若已启用 WSS 则选 WSS，否则选 HTTP
-        if self.config.enabled_sources.get(p2p_wss_url, False):
-            self.p2pquake_wss_radio.setChecked(True)
-        else:
-            self.p2pquake_http_radio.setChecked(True)
-        p2p_layout = QHBoxLayout()
-        p2p_layout.addWidget(self.p2pquake_http_radio)
-        p2p_layout.addWidget(self.p2pquake_wss_radio)
-        p2p_layout.addStretch()
-        scroll_layout.addLayout(p2p_layout)
+        gm_layout.addWidget(mode_hint)
+        scroll_layout.addWidget(group_mode)
 
-        # Wolfx 速报（地震历史区：HTTP + WSS 单项）
-        wolfx_report_label = QLabel("Wolfx 速报")
-        wolfx_report_label.setFont(fs_warning_font)
-        scroll_layout.addWidget(wolfx_report_label)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/cenc_eqlist.json", "中国地震台网中心速报 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "https://api.wolfx.jp/jma_eqlist.json", "日本气象厅速报 (HTTP)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/cenc_eqlist", "中国地震台网中心速报 (WSS)", default_value=False)
-        self._add_source_checkbox(scrollable_widget, "wss://ws-api.wolfx.jp/jma_eqlist", "日本气象厅速报 (WSS)", default_value=False)
+        # 地震历史（QGroupBox）
+        group_history = QGroupBox("地震历史")
+        group_history.setStyleSheet(STYLE_GROUPBOX)
+        gh_layout = QVBoxLayout(group_history)
+        gh_layout.setContentsMargins(10, 12, 10, 10)
+        gh_layout.setSpacing(6)
+        p2p_label = QLabel("日本气象厅地震情报/海啸")
+        p2p_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        gh_layout.addWidget(p2p_label)
+        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+        self._add_source_checkbox(group_history, p2p_wss_url, "P2PQuake 日本气象厅地震/海啸（启动时 HTTP 拉 1 条后 WSS）", default_value=False)
+        scroll_layout.addWidget(group_history)
         
         scroll_layout.addStretch()
         
-        # 按钮区域（全选和保存）
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
         button_layout.setContentsMargins(0, 10, 0, 0)
         button_layout.addStretch()
-        
-        # 全选按钮
         self.select_all_btn = QPushButton("全选")
         self.select_all_btn.setMinimumWidth(100)
         self.select_all_btn.setMinimumHeight(35)
-        self.select_all_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4A90E2;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #357ABD;
-            }
-            QPushButton:pressed {
-                background-color: #2E5F8F;
-            }
-        """)
+        self.select_all_btn.setStyleSheet(STYLE_SELECT_ALL_BTN)
         self.select_all_btn.clicked.connect(self._toggle_select_all)
         button_layout.addWidget(self.select_all_btn)
-        
         button_layout.addSpacing(10)
-        
-        # 保存按钮
         save_btn = QPushButton("保存")
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 4px;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 8px 20px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
+        save_btn.setStyleSheet(STYLE_SAVE_BTN)
         save_btn.clicked.connect(self._save_data_source_settings)
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
-        
         scroll_layout.addWidget(button_frame)
         
         scroll_area.setWidget(scrollable_widget)
@@ -919,26 +1004,12 @@ class SettingsWindow(QDialog):
     
     def _add_source_checkbox(self, parent, url, name, is_all_source=False, default_value=False):
         """添加数据源复选框"""
-        # 特殊处理：fanstudio_warning和fanstudio_report
+        # 特殊处理：fanstudio_warning和fanstudio_report（仅用勾选控制解析范围，不写入单项 URL）
         if url in ["fanstudio_warning", "fanstudio_report"]:
-            # 所有数据源默认启用，所以fanstudio_warning和fanstudio_report也默认启用
-            base_domain = "fanstudio.tech"
-            
             if url == "fanstudio_warning":
-                # 确保所有预警数据源启用
-                warning_sources = ['cea', 'cea-pr', 'sichuan', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-                for source in warning_sources:
-                    source_url = f"wss://ws.{base_domain}/{source}"
-                    self.config.enabled_sources[source_url] = True
-                initial_value = True
+                initial_value = getattr(self.config.message_config, 'fanstudio_parse_warning', True)
             elif url == "fanstudio_report":
-                # 确保所有速报数据源启用
-                report_sources = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'shandong', 'yunnan', 'cwa', 'hko',
-                                 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']
-                for source in report_sources:
-                    source_url = f"wss://ws.{base_domain}/{source}"
-                    self.config.enabled_sources[source_url] = True
-                initial_value = True
+                initial_value = getattr(self.config.message_config, 'fanstudio_parse_report', True)
             else:
                 initial_value = True
         else:
@@ -952,6 +1023,7 @@ class SettingsWindow(QDialog):
         
         checkbox = QCheckBox(name, parent)
         checkbox.setChecked(initial_value)
+        checkbox.setStyleSheet("font-size: 16px;")
         self.source_vars[url] = checkbox
         
         # 如果不是All源，记录到单项数据源列表
@@ -967,41 +1039,6 @@ class SettingsWindow(QDialog):
         if isinstance(parent.layout(), QVBoxLayout):
             parent.layout().addWidget(checkbox)
 
-    # Wolfx 预警 WSS：全预警(all_eew) 与 单项(sc_eew, jma_eew, ...) 互斥
-    WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
-    WOLFX_WSS_EEW_INDIVIDUAL = [
-        "wss://ws-api.wolfx.jp/sc_eew", "wss://ws-api.wolfx.jp/jma_eew", "wss://ws-api.wolfx.jp/fj_eew",
-        "wss://ws-api.wolfx.jp/cenc_eew", "wss://ws-api.wolfx.jp/cwa_eew",
-    ]
-
-    def _setup_wolfx_eew_mutual_exclusion(self):
-        """Wolfx 全预警 (WSS) 与 单项预警 (WSS) 互斥：勾选全预警则取消所有单项，勾选任一项单项则取消全预警"""
-        if self.WOLFX_ALL_EEW_URL not in self.source_vars:
-            return
-        all_cb = self.source_vars[self.WOLFX_ALL_EEW_URL]
-        individual_cbs = [self.source_vars[u] for u in self.WOLFX_WSS_EEW_INDIVIDUAL if u in self.source_vars]
-
-        def on_all_toggled(checked):
-            if not checked:
-                return
-            for cb in individual_cbs:
-                if cb.isChecked():
-                    cb.blockSignals(True)
-                    cb.setChecked(False)
-                    cb.blockSignals(False)
-
-        def on_individual_toggled(checked):
-            if not checked:
-                return
-            if all_cb.isChecked():
-                all_cb.blockSignals(True)
-                all_cb.setChecked(False)
-                all_cb.blockSignals(False)
-
-        all_cb.toggled.connect(on_all_toggled)
-        for cb in individual_cbs:
-            cb.toggled.connect(on_individual_toggled)
-    
     def _toggle_select_all(self):
         """切换全选/恢复默认选中状态"""
         if self._is_all_selected:
@@ -1016,13 +1053,10 @@ class SettingsWindow(QDialog):
             self.select_all_btn.setText("恢复默认")
     
     def _select_all_sources(self):
-        """全选所有数据源（Wolfx 预警 WSS 取全预警，与单项互斥）"""
+        """全选所有数据源"""
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:  # 跳过空URL和all数据源
                 checkbox.setChecked(True)
-        # 全选时 Wolfx 预警 WSS 使用「全预警」，取消单项 WSS
-        if self.WOLFX_ALL_EEW_URL in self.source_vars:
-            self.source_vars[self.WOLFX_ALL_EEW_URL].setChecked(True)
     
     def _restore_default_selection(self):
         """恢复默认选中状态"""
@@ -1035,9 +1069,6 @@ class SettingsWindow(QDialog):
             self.fanstudio_parse_warning_cb.setChecked(True)
         if hasattr(self, 'fanstudio_parse_report_cb'):
             self.fanstudio_parse_report_cb.setChecked(True)
-        # 日本气象厅：恢复默认选 HTTP (地震情报 + 海啸预报)
-        if hasattr(self, 'p2pquake_http_radio'):
-            self.p2pquake_http_radio.setChecked(True)
     
     def _create_advanced_tab(self):
         """创建高级设置标签页（地名修正、日志、自定义数据源）"""
@@ -1055,10 +1086,10 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(sec1_title)
         fix_checkbox = QCheckBox("速报使用地名修正")
         fix_checkbox.setChecked(self.config.translation_config.use_place_name_fix)
-        fix_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        fix_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
         main_layout.addWidget(fix_checkbox)
         fix_info = QLabel("速报消息根据经纬度自动修正地名（支持 usgs、emsc、bcsf、gfz、usp、kma 等数据源），无需 API 密钥。")
-        fix_info.setStyleSheet("color: #666666; font-size: 12px; padding-left: 25px; line-height: 1.5;")
+        fix_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
         fix_info.setWordWrap(True)
         main_layout.addWidget(fix_info)
         
@@ -1075,31 +1106,31 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(sec2_title)
         output_file_checkbox = QCheckBox("输出日志到文件")
         output_file_checkbox.setChecked(self.config.log_config.output_to_file)
-        output_file_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        output_file_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
         main_layout.addWidget(output_file_checkbox)
         output_file_desc = QLabel("启用后，日志将保存到 log.txt 文件中")
-        output_file_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        output_file_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
         output_file_desc.setWordWrap(True)
         main_layout.addWidget(output_file_desc)
         clear_log_checkbox = QCheckBox("每次程序启动前清空日志")
         clear_log_checkbox.setChecked(self.config.log_config.clear_log_on_startup)
-        clear_log_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        clear_log_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
         main_layout.addWidget(clear_log_checkbox)
         clear_log_desc = QLabel("启用后，每次启动程序时会清空日志文件")
-        clear_log_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        clear_log_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
         clear_log_desc.setWordWrap(True)
         main_layout.addWidget(clear_log_desc)
         split_date_checkbox = QCheckBox("按日期分割日志")
         split_date_checkbox.setChecked(self.config.log_config.split_by_date)
-        split_date_checkbox.setStyleSheet("font-size: 14px; padding: 5px;")
+        split_date_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
         main_layout.addWidget(split_date_checkbox)
         split_date_desc = QLabel("启用后，日志文件将按日期命名（log_YYYYMMDD.txt），每天自动创建新文件")
-        split_date_desc.setStyleSheet("color: #888; font-size: 12px; padding-left: 25px;")
+        split_date_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
         split_date_desc.setWordWrap(True)
         main_layout.addWidget(split_date_desc)
         log_size_layout = QHBoxLayout()
         log_size_label = QLabel("日志文件最大大小（MB）：")
-        log_size_label.setStyleSheet("font-size: 14px;")
+        log_size_label.setStyleSheet(STYLE_LABEL)
         log_size_layout.addWidget(log_size_label)
         log_size_spinbox = QSpinBox()
         log_size_spinbox.setMinimum(1)
@@ -1111,7 +1142,7 @@ class SettingsWindow(QDialog):
         log_size_layout.addStretch()
         main_layout.addLayout(log_size_layout)
         log_size_desc = QLabel("当日志文件达到此大小时，将自动创建备份文件（仅在未启用按日期分割时生效）")
-        log_size_desc.setStyleSheet("color: #888; font-size: 12px;")
+        log_size_desc.setStyleSheet(STYLE_HINT)
         log_size_desc.setWordWrap(True)
         main_layout.addWidget(log_size_desc)
         
@@ -1132,13 +1163,10 @@ class SettingsWindow(QDialog):
         custom_url_entry = QLineEdit()
         custom_url_entry.setPlaceholderText("输入 http/https/ws/wss URL，留空则关闭")
         custom_url_entry.setText(self.config.custom_data_source_url or "")
-        custom_url_entry.setStyleSheet("""
-            QLineEdit { padding: 8px; border: 1px solid #CCCCCC; border-radius: 4px; font-size: 13px; }
-            QLineEdit:focus { border: 1px solid #4A90E2; }
-        """)
+        custom_url_entry.setStyleSheet(STYLE_LINEEDIT)
         main_layout.addWidget(custom_url_entry)
         custom_source_status_label = QLabel("状态：—")
-        custom_source_status_label.setStyleSheet("color: #666; font-size: 12px;")
+        custom_source_status_label.setStyleSheet(STYLE_HINT)
         custom_source_status_label.setObjectName("custom_source_status_label")
         self.custom_source_status_label = custom_source_status_label
         main_layout.addWidget(custom_source_status_label)
@@ -1146,12 +1174,12 @@ class SettingsWindow(QDialog):
             "• HTTP/HTTPS：软件将每秒向该 URL 发送一次 GET 请求以获取预警数据；留空即关闭。\n"
             "• WS/WSS：请确保数据格式符合要求并能连接到服务器。"
         )
-        custom_hint.setStyleSheet("color: #666; font-size: 12px; line-height: 1.5;")
+        custom_hint.setStyleSheet(STYLE_HINT + " line-height: 1.5;")
         custom_hint.setWordWrap(True)
         main_layout.addWidget(custom_hint)
         # 格式示例
         format_label = QLabel("预警源数据格式示例（二选一）：")
-        format_label.setStyleSheet("font-size: 12px; color: #555; margin-top: 8px;")
+        format_label.setStyleSheet(STYLE_LABEL + " margin-top: 8px;")
         main_layout.addWidget(format_label)
         example_flat = (
             '格式一（平铺）：\n'
@@ -1284,7 +1312,7 @@ class SettingsWindow(QDialog):
         layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         layout.setSpacing(SPACING_TAB)
         sep_style = "background-color: #E0E0E0; max-height: 1px;"
-        body_style = "color: #555555; font-size: 13px; padding-left: 10px; padding-bottom: 2px;"
+        body_style = STYLE_ABOUT_ITEM + " padding-left: 10px; padding-bottom: 2px;"
 
         # 标题与版本（上方留白，避免贴顶）
         layout.addSpacing(12)
@@ -1305,7 +1333,7 @@ class SettingsWindow(QDialog):
         data_source_label = QLabel("数据源支持")
         data_source_label.setStyleSheet(STYLE_SECTION_TITLE)
         layout.addWidget(data_source_label)
-        for name in ["Fan Studio", "P2PQuake", "Wolfx防灾", "NIED 日本防災科研所"]:
+        for name in ["Fan Studio", "P2PQuake", "NIED 日本防災科研所"]:
             lb = QLabel(f"• {name}")
             lb.setStyleSheet(body_style)
             layout.addWidget(lb)
@@ -1348,6 +1376,25 @@ class SettingsWindow(QDialog):
         layout.addWidget(sep3)
         layout.addSpacing(4)
 
+        # 项目地址（GitHub）
+        github_label = QLabel("项目地址")
+        github_label.setStyleSheet(STYLE_SECTION_TITLE)
+        layout.addWidget(github_label)
+        github_url = "https://github.com/Jian11323/Rolling-Subtitle"
+        github_link = QLabel(f'<a href="{github_url}">{github_url}</a>')
+        github_link.setStyleSheet(body_style)
+        github_link.setOpenExternalLinks(True)
+        github_link.setTextFormat(Qt.RichText)
+        github_link.setWordWrap(True)
+        layout.addWidget(github_link)
+        layout.addSpacing(SPACING_BLOCK - 4)
+        sep_github = QFrame()
+        sep_github.setFrameShape(QFrame.HLine)
+        sep_github.setFrameShadow(QFrame.Sunken)
+        sep_github.setStyleSheet(sep_style)
+        layout.addWidget(sep_github)
+        layout.addSpacing(4)
+
         # 特别致谢
         thanks_label = QLabel("特别致谢")
         thanks_label.setStyleSheet(STYLE_SECTION_TITLE)
@@ -1362,7 +1409,7 @@ class SettingsWindow(QDialog):
         for text in ["感谢所有数据源提供方为地震监测事业做出的贡献。", "感谢所有用户的支持与反馈。"]:
             tl = QLabel(text)
             tl.setWordWrap(True)
-            tl.setStyleSheet("color: #555555; font-size: 13px; line-height: 1.4;")
+            tl.setStyleSheet(STYLE_ABOUT_ITEM + " line-height: 1.4;")
             thanks_layout.addWidget(tl)
         layout.addWidget(thanks_frame)
         layout.addStretch()
@@ -1528,19 +1575,12 @@ class SettingsWindow(QDialog):
             if hasattr(self, 'fanstudio_parse_report_cb'):
                 self.config.message_config.fanstudio_parse_report = self.fanstudio_parse_report_cb.isChecked()
             
-            # 日本气象厅：HTTP 与 WebSocket 二选一
+            # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
             p2p_http_url = "https://api.p2pquake.net/v2/history?codes=551&limit=3"
             p2p_tsunami_url = "https://api.p2pquake.net/v2/jma/tsunami?limit=1"
-            p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
-            if getattr(self, 'p2pquake_http_radio', None) and self.p2pquake_http_radio.isChecked():
-                self.config.enabled_sources[p2p_http_url] = True
-                self.config.enabled_sources[p2p_tsunami_url] = True
-                self.config.enabled_sources[p2p_wss_url] = False
-            elif getattr(self, 'p2pquake_wss_radio', None) and self.p2pquake_wss_radio.isChecked():
-                self.config.enabled_sources[p2p_http_url] = False
-                self.config.enabled_sources[p2p_tsunami_url] = False
-                self.config.enabled_sources[p2p_wss_url] = True
-            # 更新其他数据源配置（Wolfx、NIED 等）
+            self.config.enabled_sources[p2p_http_url] = False
+            self.config.enabled_sources[p2p_tsunami_url] = False
+            # 更新其他数据源配置（NIED、P2PQuake WSS 等）
             for url, checkbox in self.source_vars.items():
                 if url and url != all_url:
                     self.config.enabled_sources[url] = checkbox.isChecked()
@@ -1707,7 +1747,7 @@ class SettingsWindow(QDialog):
     def _save_display_settings(self):
         """保存显示设置"""
         try:
-            required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_angle')
+            required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position')
             if not all(k in self.display_vars for k in required):
                 logger.warning("显示设置未就绪，请先打开「外观与显示」页")
                 return
@@ -1741,7 +1781,24 @@ class SettingsWindow(QDialog):
             self.config.gui_config.timezone = new_timezone
             self.config.gui_config.use_weather_image_nmc = self.display_vars['use_weather_image_nmc'].isChecked()
             self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or '').strip()
-            self.config.gui_config.watermark_angle = self.display_vars['watermark_angle'].currentData() or 'horizontal'
+            wm_ff_widget = self.display_vars.get('watermark_font_family')
+            if wm_ff_widget is not None:
+                ff = wm_ff_widget.currentData() or wm_ff_widget.currentText() or ""
+                self.config.gui_config.watermark_font_family = (ff or "").strip() if isinstance(ff, str) else ""
+            wm_auto_widget = self.display_vars.get('watermark_font_auto')
+            wm_size_widget = self.display_vars.get('watermark_font_size')
+            if wm_auto_widget is not None and wm_size_widget is not None:
+                if wm_auto_widget.isChecked():
+                    self.config.gui_config.watermark_font_size = 0
+                else:
+                    self.config.gui_config.watermark_font_size = max(8, wm_size_widget.value())
+            wm_pos_widget = self.display_vars.get('watermark_position')
+            if wm_pos_widget is not None:
+                pos = wm_pos_widget.currentData() or 'diagonal'
+                self.config.gui_config.watermark_position = pos
+                self.config.gui_config.watermark_angle = "45" if pos == "diagonal" else "horizontal"
+            if 'always_on_top' in self.display_vars:
+                self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked()
 
             # 保存到文件
             self.config.save_config()
@@ -1809,11 +1866,37 @@ class SettingsWindow(QDialog):
         except Exception as e:
             logger.error(f"保存字体颜色设置失败: {e}")
             QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+
+    def _on_custom_text_return_after_warning_toggled(self, checked: bool, minutes_spin):
+        """勾选「预警后限时显示速报再回自定义（beta版）」时弹出二次确认；取消则恢复未勾选。"""
+        minutes_spin.setEnabled(checked)
+        if not checked:
+            return
+        warning_text = (
+            "功能仅为 Beta 测试版本，仅供测试与评估使用，不建议在直播场景中使用；"
+            "开发者不提供任何明示或默示的适用性、稳定性保证，由此产生的一切后果及相关责任均由用户自行承担！"
+        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle("请确认")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            f'<p style="font-weight: bold; color: #000000;">{warning_text}</p>'
+        )
+        msg.setIcon(QMessageBox.Warning)
+        confirm_btn = msg.addButton("确认", QMessageBox.AcceptRole)
+        cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
+        msg.setDefaultButton(cancel_btn)
+        msg.exec_()
+        if msg.clickedButton() != confirm_btn:
+            self.custom_text_return_after_warning_checkbox.blockSignals(True)
+            self.custom_text_return_after_warning_checkbox.setChecked(False)
+            self.custom_text_return_after_warning_checkbox.blockSignals(False)
+            minutes_spin.setEnabled(False)
     
     def _save_appearance_settings(self):
         """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
         try:
-            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_angle')
+            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position', 'warning_min_display_seconds', 'custom_text_return_seconds')
             render_required = ('cpu_radio', 'opengl_radio')
             if not all(k in self.display_vars for k in display_required) or not all(k in self.render_vars for k in render_required):
                 logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
@@ -1852,18 +1935,42 @@ class SettingsWindow(QDialog):
             self.config.gui_config.vsync_enabled = self.display_vars['vsync_enabled'].isChecked()
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
+            self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked() if 'always_on_top' in self.display_vars else False
             self.config.gui_config.use_weather_image_nmc = self.display_vars['use_weather_image_nmc'].isChecked()
-            self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or '').strip()
-            self.config.gui_config.watermark_angle = self.display_vars['watermark_angle'].currentData() or 'horizontal'
+            self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or "").strip()
+            wm_ff_widget = self.display_vars.get('watermark_font_family')
+            if wm_ff_widget is not None:
+                ff = wm_ff_widget.currentData() or wm_ff_widget.currentText() or ""
+                self.config.gui_config.watermark_font_family = (ff or "").strip() if isinstance(ff, str) else ""
+            wm_auto_widget = self.display_vars.get('watermark_font_auto')
+            wm_size_widget = self.display_vars.get('watermark_font_size')
+            if wm_auto_widget is not None and wm_size_widget is not None:
+                if wm_auto_widget.isChecked():
+                    self.config.gui_config.watermark_font_size = 0
+                else:
+                    self.config.gui_config.watermark_font_size = max(8, wm_size_widget.value())
+            wm_pos_widget = self.display_vars.get('watermark_position')
+            if wm_pos_widget is not None:
+                pos = wm_pos_widget.currentData() or 'diagonal'
+                self.config.gui_config.watermark_position = pos
+                self.config.gui_config.watermark_angle = "45" if pos == "diagonal" else "horizontal"
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
 
-            # 写入 message_config（颜色 + 自定义文本 + 收到预警更新报立即切换）
+            # 写入 message_config（颜色 + 自定义文本 + 预警/消息更新）
             self.config.message_config.report_color = self.current_report_color
             self.config.message_config.warning_color = self.current_warning_color
             self.config.message_config.custom_text_color = self.current_custom_text_color
             self.config.message_config.custom_text = self.custom_text_edit.toPlainText().strip() or ""
             self.config.message_config.show_one_alert_per_received = self.show_one_alert_per_received_checkbox.isChecked()
+            self.config.message_config.force_single_line = self.force_single_line_checkbox.isChecked()
+            self.config.message_config.custom_text_return_after_warning = self.custom_text_return_after_warning_checkbox.isChecked()
+            wm_min_spin = self.display_vars.get('warning_min_display_seconds')
+            if wm_min_spin is not None:
+                self.config.message_config.warning_min_display_seconds = max(60, wm_min_spin.value() * 60)
+            ct_min_spin = self.display_vars.get('custom_text_return_seconds')
+            if ct_min_spin is not None:
+                self.config.message_config.custom_text_return_seconds = max(60, min(3600, ct_min_spin.value() * 60))
 
             self.config.save_config()
             self.config._notify_config_changed()

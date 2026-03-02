@@ -44,19 +44,15 @@ SOURCE_PRIORITY: Dict[str, int] = {
            'usp': 17,
            'kma': 18,
            'fssn': 19,
+           'fssn-cmt': 20,
     
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
     'cea': 0,
     'cea-pr': 0,
-    'sichuan': 0,
     'cwa-eew': 0,
     'jma': 0,
     'sa': 0,
     'kma-eew': 0,
-    # Wolfx 预警/速报
-    'wolfx_sc_eew': 0, 'wolfx_jma_eew': 0, 'wolfx_fj_eew': 0,
-    'wolfx_cenc_eew': 0, 'wolfx_cwa_eew': 0, 'wolfx_all_eew': 0,
-    'wolfx_cenc_eqlist': 8, 'wolfx_jma_eqlist': 8,
     # NIED 预警
     'nied': 0,
     # 默认优先级（未知数据源）
@@ -91,7 +87,8 @@ class MessageItem:
     shock_time: Optional[str] = None  # 发震时间（用于预警消息有效期检查）
     parsed_data: Optional[Dict] = None  # 解析后的数据字典（用于气象预警颜色计算和热修改）
     first_displayed_at: Optional[float] = None  # 首次在窗口显示的时间（用于预警至少展示5分钟）
-    
+    image_after_text: bool = False  # True 时图片在文字后绘制（如 CMT 沙滩球在消息末尾）
+
     def __post_init__(self):
         if not hasattr(self, 'timestamp') or self.timestamp is None:
             self.timestamp = time.time()
@@ -718,7 +715,45 @@ class MessageBuffer:
             
             # 按优先级轮播
             return self._get_next_by_priority()
-    
+
+    def get_next_excluding_sources(self, exclude_sources: List[str]) -> Optional[MessageItem]:
+        """
+        获取下一条消息（按优先级轮播），但跳过 source 在 exclude_sources 中的消息。
+        若有非排除消息则返回其中下一条；若全部被排除则返回第一条（用于回退到如自定义文本）。
+        """
+        with self._lock:
+            if not self.buffer:
+                self._current_displaying_msg_id = None
+                return None
+            exclude_set = set(exclude_sources)
+            self._sort_by_priority()
+            current_msg_index = -1
+            if self._current_displaying_msg_id is not None:
+                for i, msg in enumerate(self.buffer):
+                    if id(msg) == self._current_displaying_msg_id:
+                        current_msg_index = i
+                        break
+            start_index = (current_msg_index + 1) % len(self.buffer) if current_msg_index >= 0 else 0
+            first_excluded_msg = None
+            for _ in range(len(self.buffer)):
+                msg = self.buffer[start_index]
+                if msg.source not in exclude_set:
+                    self.current_index = start_index
+                    self._current_displaying_msg_id = id(msg)
+                    return msg
+                if first_excluded_msg is None:
+                    first_excluded_msg = msg
+                start_index = (start_index + 1) % len(self.buffer)
+            if first_excluded_msg is not None:
+                for i, m in enumerate(self.buffer):
+                    if id(m) == id(first_excluded_msg):
+                        self.current_index = i
+                        self._current_displaying_msg_id = id(m)
+                        break
+                return first_excluded_msg
+            self._current_displaying_msg_id = None
+            return None
+
     def _get_next_by_priority(self) -> Optional[MessageItem]:
         """
         按优先级轮播消息
