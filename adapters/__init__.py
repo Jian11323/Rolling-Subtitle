@@ -12,6 +12,7 @@ from .p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
 from .p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
 from .nied_adapter import NiedAdapter
 from .custom_adapter import CustomAdapter
+from .jma_volcano_adapter import JmaVolcanoAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -21,4 +22,5 @@ __all__ = [
     'P2PQuakeWebSocketAdapter',
     'NiedAdapter',
     'CustomAdapter',
+    'JmaVolcanoAdapter',
 ]

@@ -17,13 +17,13 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.0
+CHANGELOG_TEXT = """版本 2.4.1
 
-1、移除Wolfx 数据源"""
+1、新增火山情报数据源（日本气象厅火山情报）"""
 
 @dataclass
 class GUIConfig:
@@ -158,6 +158,9 @@ class WebSocketConfig:
 class TranslationConfig:
     """地名修正配置类（原翻译配置，公开版仅保留地名修正）"""
     use_place_name_fix: bool = True  # 是否使用地名修正（速报根据经纬度修正地名），默认开启
+    use_volcano_translation: bool = False  # 是否对火山情报使用百度翻译（日文→中文）
+    baidu_app_id: str = ""  # 百度翻译开放平台 AppID
+    baidu_secret: str = ""  # 百度翻译开放平台密钥
     
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -326,6 +329,9 @@ class Config:
             },
             'TRANSLATION_CONFIG': {
                 'use_place_name_fix': self.translation_config.use_place_name_fix,
+                'use_volcano_translation': getattr(self.translation_config, 'use_volcano_translation', False),
+                'baidu_app_id': getattr(self.translation_config, 'baidu_app_id', ''),
+                'baidu_secret': getattr(self.translation_config, 'baidu_secret', ''),
             },
             'LOG_CONFIG': {
                 'output_to_file': self.log_config.output_to_file,
@@ -524,6 +530,7 @@ class Config:
                 self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
                 self.enabled_sources["wss://sismotide.top/nied"] = False
+                self.enabled_sources["wss://sismotide.top/jma-long"] = True  # 火山情报默认启用
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
                 logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
             else:
@@ -537,10 +544,10 @@ class Config:
                     self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
                     self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
-                other_wss_urls = ["wss://sismotide.top/nied", "wss://api.p2pquake.net/v2/ws"]
+                other_wss_urls = ["wss://sismotide.top/nied", "wss://sismotide.top/jma-long", "wss://api.p2pquake.net/v2/ws"]
                 for wss_url in other_wss_urls:
                     if wss_url not in self.enabled_sources:
-                        self.enabled_sources[wss_url] = False
+                        self.enabled_sources[wss_url] = (wss_url == "wss://sismotide.top/jma-long")  # 火山情报默认启用
                 if f"wss://ws.{base_domain}/fssn-cmt" not in self.enabled_sources:
                     self.enabled_sources[f"wss://ws.{base_domain}/fssn-cmt"] = False
                     logger.debug("添加缺失的 FSSN CMT 数据源")
@@ -668,6 +675,7 @@ class Config:
         self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
         self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
         self.enabled_sources["wss://sismotide.top/nied"] = False
+        self.enabled_sources["wss://sismotide.top/jma-long"] = True  # 火山情报默认启用
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
 
         ws_urls = [all_url]

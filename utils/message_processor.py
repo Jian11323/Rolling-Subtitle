@@ -100,6 +100,8 @@ class MessageProcessor:
                 return self._format_report_message(parsed_data)
             elif message_type == 'weather':
                 return self._format_weather_message(parsed_data)
+            elif message_type == 'volcano':
+                return self._format_volcano_message(parsed_data)
             else:
                 return self._format_generic_message(parsed_data)
         except Exception as e:
@@ -801,6 +803,45 @@ class MessageProcessor:
             logger.debug(f"本地气象预警图片匹配失败: {e}")
             return None
     
+    def _format_volcano_message(self, data: Dict[str, Any]) -> str:
+        """
+        格式化 JMA 火山情报消息
+        格式：【日本气象厅火山情报  title】volcano：description，name time发布
+        """
+        title = (data.get('title') or '').strip()
+        volcano = (data.get('volcano') or '').strip()
+        description = (data.get('description') or '').strip()
+        name = (data.get('name') or '').strip()
+        shock_time = (data.get('shock_time') or '').strip()
+        if getattr(self.config.translation_config, 'use_volcano_translation', False):
+            app_id = getattr(self.config.translation_config, 'baidu_app_id', '') or ''
+            secret = getattr(self.config.translation_config, 'baidu_secret', '') or ''
+            if app_id and secret:
+                try:
+                    from utils.translation_service import TranslationService
+                    if not hasattr(self, '_volcano_translation_service'):
+                        self._volcano_translation_service = TranslationService(self.config.translation_config)
+                    svc = self._volcano_translation_service
+                    if title:
+                        title = svc.translate(title, force_lang='zh', skip_cache=False)
+                    if volcano:
+                        volcano = svc.translate(volcano, force_lang='zh', skip_cache=False)
+                    if description:
+                        description = svc.translate(description, force_lang='zh', skip_cache=False)
+                    if name:
+                        name = svc.translate(name, force_lang='zh', skip_cache=False)
+                except Exception as e:
+                    logger.debug(f"火山情报翻译跳过: {e}")
+        if getattr(self.config.message_config, 'force_single_line', True):
+            title = (title or '').replace('\n', ' ')
+            volcano = (volcano or '').replace('\n', ' ')
+            description = (description or '').replace('\n', ' ')
+            name = (name or '').replace('\n', ' ')
+        head = f"【日本气象厅火山情报  {title}】" if title else "【日本气象厅火山情报】"
+        volcano_part = f"{volcano}：" if volcano else ""
+        tail = f"，{name} {shock_time}发布".strip() if (name or shock_time) else "发布"
+        return f"{head}{volcano_part}{description}{tail}"
+
     def _format_generic_message(self, data: Dict[str, Any]) -> str:
         """格式化通用消息"""
         organization = data.get('organization', '')
@@ -844,6 +885,9 @@ class MessageProcessor:
         elif message_type == 'weather':
             # 气象预警默认颜色（如果无法提取预警颜色时使用）
             return '#FFF500'
+        elif message_type == 'volcano':
+            # 火山情报：与速报同一颜色
+            return self.config.message_config.report_color
         else:
             # 默认颜色：绿色
             return '#01FF00'

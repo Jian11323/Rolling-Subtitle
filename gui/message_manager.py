@@ -18,7 +18,7 @@ logger = get_logger()
 
 # 数据源优先级定义（数字越小优先级越高）
 # 注意：这是速报消息的优先级，预警消息（除气象预警外）永远优先于速报
-# 速报播放顺序：气象预警、海啸信息、cenc, ningxia, guangxi, shanxi, beijing, shandong, yunnan, cwa, p2pquake, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
+# 速报播放顺序：气象预警、海啸信息、cenc, ningxia, guangxi, shanxi, beijing, shandong, yunnan, cwa, p2pquake, p2pquake_tsunami, jma_volcano, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
 SOURCE_PRIORITY: Dict[str, int] = {
     # 气象预警、海啸信息 - 速报中优先级最高（海啸用显示名「海啸信息」传入，需同时登记）
     'weatheralarm': 1,
@@ -35,16 +35,17 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'yunnan': 9,
            'cwa': 10,
            'p2pquake': 11,  # P2P日本气象厅地震情报
-           'p2pquake_tsunami': 11,  # P2P日本气象厅海啸预报
-           'hko': 12,
-           'usgs': 13,
-           'emsc': 14,
-           'bcsf': 15,
-           'gfz': 16,
-           'usp': 17,
-           'kma': 18,
-           'fssn': 19,
-           'fssn-cmt': 20,
+           'p2pquake_tsunami': 12,  # P2P日本气象厅海啸预报
+           'jma_volcano': 13,  # JMA 火山情报
+           'hko': 14,
+           'usgs': 15,
+           'emsc': 16,
+           'bcsf': 17,
+           'gfz': 18,
+           'usp': 19,
+           'kma': 20,
+           'fssn': 21,
+           'fssn-cmt': 22,
     
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
     'cea': 0,

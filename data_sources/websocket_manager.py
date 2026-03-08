@@ -26,6 +26,7 @@ from adapters import (
     CustomAdapter,
     P2PQuakeAdapter,
     P2PQuakeTsunamiAdapter,
+    JmaVolcanoAdapter,
 )
 from utils.logger import get_logger
 
@@ -88,6 +89,11 @@ class WebSocketManager:
         if 'sismotide.top' in url and '/nied' in url:
             adapter = NiedAdapter('nied', url)
             adapter._manager_source_type = 'nied'
+            return adapter
+        # JMA 火山情报 WebSocket
+        if 'sismotide.top' in url and 'jma-long' in url:
+            adapter = JmaVolcanoAdapter('jma_volcano', url)
+            adapter._manager_source_type = 'jma_volcano'
             return adapter
         # P2PQuake WebSocket（仅解析 551、552）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
@@ -221,7 +227,7 @@ class WebSocketManager:
                 if parsed_data:
                     # NIED/P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
-                    if pt and (pt == 'nied' or pt in ('p2pquake', 'p2pquake_tsunami')):
+                    if pt and (pt == 'nied' or pt == 'jma_volcano' or pt in ('p2pquake', 'p2pquake_tsunami')):
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)

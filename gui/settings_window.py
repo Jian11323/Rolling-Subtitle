@@ -37,8 +37,8 @@ SPACING_BLOCK = 20
 
 # 共用 QSS（与高级版一致：16pt/16px 字号与新布局）
 STYLE_SECTION_TITLE = "font-weight: bold; font-size: 16pt; color: #333333; margin-bottom: 4px;"
-STYLE_LABEL = "font-size: 16px; color: #555555;"
-STYLE_HINT = "font-size: 16px; color: #888888;"
+STYLE_LABEL = "font-size: 16px; color: #555555; line-height: 22pt;"
+STYLE_HINT = "font-size: 16px; color: #888888; line-height: 22pt;"
 STYLE_SLIDER = """
     QSlider::groove:horizontal {
         border: 1px solid #CCCCCC;
@@ -901,16 +901,17 @@ class SettingsWindow(QDialog):
         scrollable_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         scroll_layout = QVBoxLayout(scrollable_widget)
         scroll_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
-        scroll_layout.setSpacing(SPACING_TAB)
+        scroll_layout.setSpacing(22)
         
         # 说明（QGroupBox，与高级版一致）
         group_info = QGroupBox("说明")
         group_info.setStyleSheet(STYLE_GROUPBOX)
         info_label = QLabel("提示：预警数据源只解析预警数据，历史数据源只解析速报数据。修改数据源后需重启程序生效。")
-        info_label.setStyleSheet(STYLE_HINT)
+        info_label.setStyleSheet(STYLE_HINT + " padding: 4px 0;")
         info_label.setWordWrap(True)
         info_layout = QVBoxLayout(group_info)
-        info_layout.setContentsMargins(10, 12, 10, 10)
+        info_layout.setContentsMargins(12, 14, 12, 12)
+        info_layout.setSpacing(8)
         info_layout.addWidget(info_label)
         scroll_layout.addWidget(group_info)
 
@@ -918,10 +919,10 @@ class SettingsWindow(QDialog):
         group_warning = QGroupBox("地震预警")
         group_warning.setStyleSheet(STYLE_GROUPBOX)
         gw_layout = QVBoxLayout(group_warning)
-        gw_layout.setContentsMargins(10, 12, 10, 10)
-        gw_layout.setSpacing(6)
-        fs_all_label = QLabel("Fan Studio（All 数据源）")
-        fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        gw_layout.setContentsMargins(12, 14, 12, 12)
+        gw_layout.setSpacing(12)
+        fs_all_label = QLabel("Fan Studio")
+        fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
         gw_layout.addWidget(fs_all_label)
         fs_hint = QLabel("始终使用 All 数据源。勾选则解析对应类型，不勾选则不解析。")
         fs_hint.setStyleSheet(STYLE_HINT)
@@ -929,14 +930,14 @@ class SettingsWindow(QDialog):
         gw_layout.addWidget(fs_hint)
         self.fanstudio_parse_warning_cb = QCheckBox("解析预警数据")
         self.fanstudio_parse_warning_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_warning', True))
-        self.fanstudio_parse_warning_cb.setStyleSheet("font-size: 16px;")
+        self.fanstudio_parse_warning_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         gw_layout.addWidget(self.fanstudio_parse_warning_cb)
         self.fanstudio_parse_report_cb = QCheckBox("解析速报数据（含气象预警）")
         self.fanstudio_parse_report_cb.setChecked(getattr(self.config.message_config, 'fanstudio_parse_report', True))
-        self.fanstudio_parse_report_cb.setStyleSheet("font-size: 16px;")
+        self.fanstudio_parse_report_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         gw_layout.addWidget(self.fanstudio_parse_report_cb)
         nied_label = QLabel("NIED 数据源")
-        nied_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        nied_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
         gw_layout.addWidget(nied_label)
         self._add_source_checkbox(group_warning, "wss://sismotide.top/nied", "日本防災科研所预警 (WSS)", default_value=False)
         scroll_layout.addWidget(group_warning)
@@ -945,7 +946,8 @@ class SettingsWindow(QDialog):
         group_mode = QGroupBox("非预警时显示")
         group_mode.setStyleSheet(STYLE_GROUPBOX)
         gm_layout = QVBoxLayout(group_mode)
-        gm_layout.setContentsMargins(10, 12, 10, 10)
+        gm_layout.setContentsMargins(12, 14, 12, 12)
+        gm_layout.setSpacing(12)
         self.report_mode_group = QButtonGroup(scrollable_widget)
         self.radio_report = QRadioButton("地震速报")
         self.radio_custom_text = QRadioButton("自定义文本")
@@ -954,8 +956,8 @@ class SettingsWindow(QDialog):
         use_custom = getattr(self.config.message_config, 'use_custom_text', False)
         self.radio_report.setChecked(not use_custom)
         self.radio_custom_text.setChecked(use_custom)
-        self.radio_report.setStyleSheet(STYLE_LABEL)
-        self.radio_custom_text.setStyleSheet(STYLE_LABEL)
+        self.radio_report.setStyleSheet(STYLE_LABEL + " padding: 2px 0;")
+        self.radio_custom_text.setStyleSheet(STYLE_LABEL + " padding: 2px 0;")
         gm_layout.addWidget(self.radio_report)
         gm_layout.addWidget(self.radio_custom_text)
         mode_hint = QLabel("提示：切换「地震速报」/「自定义文本」需重启软件后生效。自定义文本内容在「外观与显示」页的「自定义文本」区块编辑。")
@@ -968,13 +970,17 @@ class SettingsWindow(QDialog):
         group_history = QGroupBox("地震历史")
         group_history.setStyleSheet(STYLE_GROUPBOX)
         gh_layout = QVBoxLayout(group_history)
-        gh_layout.setContentsMargins(10, 12, 10, 10)
-        gh_layout.setSpacing(6)
+        gh_layout.setContentsMargins(12, 14, 12, 12)
+        gh_layout.setSpacing(12)
         p2p_label = QLabel("日本气象厅地震情报/海啸")
-        p2p_label.setStyleSheet(STYLE_SOURCE_TITLE)
+        p2p_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
         gh_layout.addWidget(p2p_label)
         p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
-        self._add_source_checkbox(group_history, p2p_wss_url, "P2PQuake 日本气象厅地震/海啸（启动时 HTTP 拉 1 条后 WSS）", default_value=False)
+        self._add_source_checkbox(group_history, p2p_wss_url, "P2PQuake 日本气象厅地震/海啸", default_value=False)
+        jma_volcano_label = QLabel("日本气象厅火山情报")
+        jma_volcano_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
+        gh_layout.addWidget(jma_volcano_label)
+        self._add_source_checkbox(group_history, "wss://sismotide.top/jma-long", "JMA 火山情报", default_value=True)
         scroll_layout.addWidget(group_history)
         
         scroll_layout.addStretch()
@@ -1023,7 +1029,7 @@ class SettingsWindow(QDialog):
         
         checkbox = QCheckBox(name, parent)
         checkbox.setChecked(initial_value)
-        checkbox.setStyleSheet("font-size: 16px;")
+        checkbox.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         self.source_vars[url] = checkbox
         
         # 如果不是All源，记录到单项数据源列表
@@ -1092,6 +1098,42 @@ class SettingsWindow(QDialog):
         fix_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
         fix_info.setWordWrap(True)
         main_layout.addWidget(fix_info)
+
+        # 百度翻译（火山情报）
+        volcano_trans_checkbox = QCheckBox("百度翻译")
+        volcano_trans_checkbox.setChecked(getattr(self.config.translation_config, 'use_volcano_translation', False))
+        volcano_trans_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
+        main_layout.addWidget(volcano_trans_checkbox)
+        volcano_trans_info = QLabel("用于火山情报日文→中文翻译。勾选后填写下方 AppID 与密钥。")
+        volcano_trans_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
+        volcano_trans_info.setWordWrap(True)
+        main_layout.addWidget(volcano_trans_info)
+        baidu_app_id_label = QLabel("百度翻译 AppID：")
+        baidu_app_id_label.setStyleSheet(STYLE_LABEL)
+        main_layout.addWidget(baidu_app_id_label)
+        baidu_app_id_entry = QLineEdit()
+        baidu_app_id_entry.setPlaceholderText("在百度翻译开放平台申请")
+        baidu_app_id_entry.setText(getattr(self.config.translation_config, 'baidu_app_id', '') or '')
+        baidu_app_id_entry.setStyleSheet(STYLE_LINEEDIT)
+        main_layout.addWidget(baidu_app_id_entry)
+        baidu_secret_label = QLabel("百度翻译密钥：")
+        baidu_secret_label.setStyleSheet(STYLE_LABEL)
+        main_layout.addWidget(baidu_secret_label)
+        baidu_secret_entry = QLineEdit()
+        baidu_secret_entry.setPlaceholderText("与 AppID 对应的密钥")
+        baidu_secret_entry.setEchoMode(QLineEdit.Password)
+        baidu_secret_entry.setText(getattr(self.config.translation_config, 'baidu_secret', '') or '')
+        baidu_secret_entry.setStyleSheet(STYLE_LINEEDIT)
+        main_layout.addWidget(baidu_secret_entry)
+
+        def _update_baidu_visible(checked):
+            volcano_trans_info.setVisible(checked)
+            baidu_app_id_label.setVisible(checked)
+            baidu_app_id_entry.setVisible(checked)
+            baidu_secret_label.setVisible(checked)
+            baidu_secret_entry.setVisible(checked)
+        volcano_trans_checkbox.toggled.connect(_update_baidu_visible)
+        _update_baidu_visible(volcano_trans_checkbox.isChecked())
         
         # 分隔线
         sep1 = QFrame()
@@ -1243,7 +1285,8 @@ class SettingsWindow(QDialog):
         save_btn.setStyleSheet(STYLE_SAVE_BTN)
         save_btn.clicked.connect(lambda: self._save_advanced_settings(
             fix_checkbox, output_file_checkbox, clear_log_checkbox,
-            split_date_checkbox, log_size_spinbox, custom_url_entry
+            split_date_checkbox, log_size_spinbox, custom_url_entry,
+            volcano_trans_checkbox, baidu_app_id_entry, baidu_secret_entry
         ))
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
@@ -1257,12 +1300,17 @@ class SettingsWindow(QDialog):
             'log_size_spinbox': log_size_spinbox,
             'custom_url_entry': custom_url_entry,
             'custom_source_status_label': custom_source_status_label,
+            'volcano_trans_checkbox': volcano_trans_checkbox,
+            'baidu_app_id_entry': baidu_app_id_entry,
+            'baidu_secret_entry': baidu_secret_entry,
         }
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "高级")
     
     def _save_advanced_settings(self, fix_checkbox, output_file_checkbox, clear_log_checkbox,
-                                  split_date_checkbox, log_size_spinbox, custom_url_entry, show_message=True):
+                                  split_date_checkbox, log_size_spinbox, custom_url_entry,
+                                  volcano_trans_checkbox=None, baidu_app_id_entry=None, baidu_secret_entry=None,
+                                  show_message=True):
         """保存高级设置（地名修正、日志、自定义数据源）。show_message=False 时不弹成功提示（由调用方统一提示）。返回 True 表示保存成功，False 表示未保存（校验失败或异常）。"""
         try:
             custom_url = custom_url_entry.text().strip()
@@ -1275,6 +1323,12 @@ class SettingsWindow(QDialog):
                     )
                     return False
             self.config.translation_config.use_place_name_fix = fix_checkbox.isChecked()
+            if volcano_trans_checkbox is not None:
+                self.config.translation_config.use_volcano_translation = volcano_trans_checkbox.isChecked()
+            if baidu_app_id_entry is not None:
+                self.config.translation_config.baidu_app_id = baidu_app_id_entry.text().strip()
+            if baidu_secret_entry is not None:
+                self.config.translation_config.baidu_secret = baidu_secret_entry.text().strip()
             self.config.log_config.output_to_file = output_file_checkbox.isChecked()
             self.config.log_config.clear_log_on_startup = clear_log_checkbox.isChecked()
             self.config.log_config.split_by_date = split_date_checkbox.isChecked()
@@ -1525,7 +1579,7 @@ class SettingsWindow(QDialog):
             self._save_appearance_settings()
             advanced_saved = False
             if hasattr(self, 'advanced_vars'):
-                advanced_required = ('fix_checkbox', 'output_file_checkbox', 'clear_log_checkbox', 'split_date_checkbox', 'log_size_spinbox', 'custom_url_entry')
+                advanced_required = ('fix_checkbox', 'output_file_checkbox', 'clear_log_checkbox', 'split_date_checkbox', 'log_size_spinbox', 'custom_url_entry', 'volcano_trans_checkbox', 'baidu_app_id_entry', 'baidu_secret_entry')
                 if all(k in self.advanced_vars for k in advanced_required):
                     advanced_saved = self._save_advanced_settings(
                         self.advanced_vars['fix_checkbox'],
@@ -1534,6 +1588,9 @@ class SettingsWindow(QDialog):
                         self.advanced_vars['split_date_checkbox'],
                         self.advanced_vars['log_size_spinbox'],
                         self.advanced_vars['custom_url_entry'],
+                        self.advanced_vars['volcano_trans_checkbox'],
+                        self.advanced_vars['baidu_app_id_entry'],
+                        self.advanced_vars['baidu_secret_entry'],
                         show_message=False,
                     )
                 else:
