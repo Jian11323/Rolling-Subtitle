@@ -30,4 +30,4 @@
 
 ## 许可证
 
-本项目采用 [GNU GPLv3](LICENSE) 开源协议（因使用 PyQt5 等 GPL 组件，遵循 Copyleft 要求）。
+本项目采用 [GNU GPLv3](LICENSE) 开源协议
