@@ -1,64 +1,33 @@
-地震预警及情报实况栏程序
+# 地震情报实况栏
+> [!WARNING]
+> 软件目前仍处于测试阶段，无法保证软件稳定性。
 
-一个用于显示地震预警及情报实况栏的Python应用程序，支持多个WebSocket数据源。
+> [!NOTE]
+> **安全提示**：本软件会连接外部数据源以获取地震、海啸、火山、气象等实时信息，请从可信渠道下载使用。若被杀毒软件或安全软件拦截（如误报联网行为），可将本程序添加至信任名单；如有疑虑或问题，请联系我们（QQ群：947523679 / 邮箱：jian0786@foxmail.com）。
 
-功能特性
+## 简介
 
-- 📺 滚动字幕显示地震预警和速报信息
-- 🔌 支持多个WebSocket数据源
-- 🎨 可自定义界面样式和颜色
-- ⚙️ 灵活的配置管理
-- 📝 完整的日志记录
+地震情报实况栏基于Python/PyQt5开发，通过连接多个数据源，在屏幕上以滚动字幕形式实时展示地震预警、地震速报、海啸情报、火山情报及气象预警等信息。
 
-支持的数据源
+## 功能
 
-WebSocket数据源
-1. **Fan Studio** (`wss://ws.fanstudio.tech/all`)
-2. **NIED 日本防災科研所** (`wss://sismotide.top/nied`)
-3. **P2PQuake 日本气象厅地震/海啸** (`wss://api.p2pquake.net/v2/ws`)
+* 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
+* 支持多数据源（Fan Studio、NIED、P2PQuake、JMA 火山等）
+* 可自定义界面样式与颜色
+* 灵活的配置管理
+* 自定义水印
+* 完整的日志记录
 
-安装依赖
+## 数据来源
 
-```bash
-pip install websockets requests
-```
+* 日本气象厅地震速报、地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
+* 日本气象厅火山情报：[気象庁防災情報XMLフォーマット形式電文の公開（PULL型）](https://xml.kishou.go.jp/xmlpull.html)（日本气象厅官方 XML 电文）
+* 中国地震预警：[中国预警网](https://www.cea.gov.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
+* 中国地震情报：[中国地震台网中心](https://www.cenc.ac.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
+* 实时震度/地震速报：[NIED 日本防災科研所](https://www.bosai.go.jp/e/index.html)
+* 气象预警：[中央气象台](https://www.nmc.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
+* 其他地震情报：[FAN Studio API](https://api.fanstudio.tech/)
 
-使用方法
-
-运行程序
-
-```bash
-python main.py
-```
-
-配置文件
-
-配置文件位置：`C:\Users\账户名\AppData\Roaming\subtitl\settings.json`
-
-程序首次运行时会自动创建配置目录和配置文件。
-
-项目结构
-
-```
-滚动字幕/
-├── main.py                    # 主程序入口
-├── config.py                  # 配置管理
-├── gui/                       # GUI模块
-│   ├── main_window.py         # 主窗口
-│   ├── scrolling_text.py      # 滚动文本组件
-│   └── message_manager.py     # 消息管理
-├── adapters/                  # 数据源适配器
-│   ├── base_adapter.py
-│   ├── fanstudio_adapter.py
-│   ├── nied_adapter.py
-│   └── p2pquake_adapter.py 等
-├── data_sources/              # 数据源管理
-│   └── websocket_manager.py
-└── utils/                     # 工具模块
-    ├── logger.py
-    └── message_processor.py
-```
-
-许可证
+## 许可证
 
 本项目采用 [GNU GPLv3](LICENSE) 开源协议（因使用 PyQt5 等 GPL 组件，遵循 Copyleft 要求）。
