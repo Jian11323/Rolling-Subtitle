@@ -54,9 +54,11 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'jma': 0,
     'sa': 0,
     'kma-eew': 0,
-    # NIED / Early-est 预警
-    'nied': 0,
-    'early_est': 0,
+    # Wolfx 聚合预警
+    'wolfx_jma_eew': 0,
+    'wolfx_sc_eew': 0,
+    'wolfx_fj_eew': 0,
+    'wolfx_cenc_eew': 0,
     # 默认优先级（未知数据源）
     'default': 99,
 }
@@ -64,7 +66,8 @@ SOURCE_PRIORITY: Dict[str, int] = {
 # 固定 source 排序索引（用于同优先级内稳定轮播，避免顺序抖动）
 SOURCE_FIXED_ORDER: List[str] = [
     # 地震预警（priority=0）
-    'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew', 'nied', 'early_est',
+    'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
+    'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew',
     # 速报
     'weatheralarm', 'tsunami', '海啸信息',
     'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',

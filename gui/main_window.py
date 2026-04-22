@@ -1276,8 +1276,8 @@ class MainWindow(QMainWindow):
                 logger.info(f"收到预警消息: source={source_name}, place_name={parsed_data.get('place_name')}, magnitude={parsed_data.get('magnitude')}, source_type={parsed_data.get('source_type')}")
                 # 入口侧统一按发震时间窗口过滤预警：
                 # - 全局默认窗口：warning_shock_validity_seconds
-                # - Jian Project NIED 使用 warning_shock_validity_seconds_nied
-                # - Jian Project Early-est 使用 warning_shock_validity_seconds_early_est
+                # - Wolfx JMA 使用 warning_shock_validity_seconds_nied
+                # - Wolfx 四川使用 warning_shock_validity_seconds_early_est
                 if not self.message_processor._is_warning_valid(parsed_data):
                     logger.warning(
                         f"预警消息已过期（on_message_received 阶段），忽略: "

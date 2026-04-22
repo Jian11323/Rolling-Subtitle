@@ -21,13 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from adapters import (
     FanStudioAdapter,
-    NiedAdapter,
     P2PQuakeWebSocketAdapter,
     CustomAdapter,
     P2PQuakeAdapter,
     P2PQuakeTsunamiAdapter,
-    JmaVolcanoAdapter,
-    JianProjectAdapter,
+    WolfxAdapter,
 )
 from utils.logger import get_logger
 
@@ -37,7 +35,7 @@ logger = get_logger()
 P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 FANSTUDIO_ALL_URLS = ("wss://ws.fanstudio.tech/all")
-SISMOTIDE_ALL_URL = "wss://sismotide.top/all"
+WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
 
 
 class WebSocketManager:
@@ -76,9 +74,11 @@ class WebSocketManager:
         Returns:
             适配器实例
         """
-        # 已下线的 Wolfx 不连接
-        if 'wolfx' in url.lower() or 'ws-api.wolfx.jp' in url:
-            return None
+        # Wolfx 聚合预警源
+        if 'ws-api.wolfx.jp' in url and url.rstrip('/').endswith('/all_eew'):
+            adapter = WolfxAdapter('wolfx_all_eew', url)
+            adapter._manager_source_type = 'wolfx_all_eew'
+            return adapter
         # 检查是否为Fan Studio数据源
         if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
             parts = url.split('/')
@@ -86,13 +86,6 @@ class WebSocketManager:
             adapter = FanStudioAdapter(source_type, url)
             adapter._manager_source_type = source_type
             return adapter
-        # Jian Project 聚合源 (wss://sismotide.top/all)，子源由配置开关控制
-        if 'sismotide.top' in url:
-            path = (url.rstrip('/').split('/')[-1] or '').lower()
-            if path == 'all':
-                adapter = JianProjectAdapter('ali_all', url)
-                adapter._manager_source_type = 'all'
-                return adapter
         # P2PQuake WebSocket（仅解析 551、552）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
             adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
@@ -126,17 +119,14 @@ class WebSocketManager:
             
             # 优先使用source_type字段（适配器已添加）
             source_type = parsed_data.get('source_type', '')
-            # Jian Project All 子源（nied、early_est、jma_volcano、bmkg、geonet、ptwc）直接返回 source_type，
-            # 便于在 MessageBuffer 中按独立数据源参与优先级排序，而不是映射为 Fan Studio 路径名。
-            ali_all_sub_sources = (
-                'nied',
-                'early_est',
-                'jma_volcano',
-                'bmkg',
-                'geonet',
-                'ptwc',
+            # Wolfx 与 P2PQuake 子源：直接返回 source_type 参与轮播优先级排序。
+            direct_sub_sources = (
+                'wolfx_jma_eew',
+                'wolfx_sc_eew',
+                'wolfx_fj_eew',
+                'wolfx_cenc_eew',
             )
-            if source_type in ali_all_sub_sources:
+            if source_type in direct_sub_sources:
                 return source_type
             if source_type:
                 return config.get_source_name(f"wss://ws.fanstudio.tech/{source_type}")
@@ -230,19 +220,17 @@ class WebSocketManager:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = adapter.parse(data)
                 if parsed_data:
-                    # NIED / early_est / JMA 火山 / P2PQuake WSS / Jian Project All 其他子源：用 parsed_data 的 source_type 作为 actual_source
+                    # Wolfx / P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
-                    ali_all_and_ws_sources = (
-                        'nied',
-                        'early_est',
-                        'jma_volcano',
-                        'bmkg',
-                        'geonet',
-                        'ptwc',
+                    direct_sources = (
+                        'wolfx_jma_eew',
+                        'wolfx_sc_eew',
+                        'wolfx_fj_eew',
+                        'wolfx_cenc_eew',
                         'p2pquake',
                         'p2pquake_tsunami',
                     )
-                    if pt and (pt in ali_all_and_ws_sources):
+                    if pt and (pt in direct_sources):
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -471,7 +459,7 @@ class WebSocketManager:
         启动分组：
         1) fanstudio(all)
         2) p2pquake(wss)
-        3) sismotide(all)
+        3) wolfx(all_eew)
         4) 其他
         """
         normalized_url = (url or "").strip().lower()
@@ -479,8 +467,8 @@ class WebSocketManager:
             return "fanstudio"
         if normalized_url == P2PQUAKE_WSS_URL:
             return "p2pquake"
-        if normalized_url == SISMOTIDE_ALL_URL:
-            return "sismotide"
+        if normalized_url == WOLFX_ALL_EEW_URL:
+            return "wolfx"
         return "other"
     
     async def start_all_connections(self):
@@ -508,18 +496,18 @@ class WebSocketManager:
         else:
             logger.info(f"准备连接{len(enabled_urls)}个数据源: {enabled_urls}")
         
-        # 创建所有连接任务（跳过无适配器的 URL，如已下线的 Wolfx）
+        # 创建所有连接任务
         grouped_urls: Dict[str, list] = {
             "fanstudio": [],
             "p2pquake": [],
-            "sismotide": [],
+            "wolfx": [],
             "other": [],
         }
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：fanstudio -> p2pquake -> sismotide -> other
-        startup_stages = ("fanstudio", "p2pquake", "sismotide", "other")
+        # 启动阶段顺序固定：fanstudio -> p2pquake -> wolfx -> other
+        startup_stages = ("fanstudio", "p2pquake", "wolfx", "other")
         tasks = []
         urls_for_tasks = []
         for stage in startup_stages:

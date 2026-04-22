@@ -10,10 +10,8 @@ from .fanstudio_adapter import FanStudioAdapter
 from .p2pquake_adapter import P2PQuakeAdapter
 from .p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
 from .p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
-from .nied_adapter import NiedAdapter
 from .custom_adapter import CustomAdapter
-from .jma_volcano_adapter import JmaVolcanoAdapter
-from .JianProject_adapter import JianProjectAdapter
+from .wolfx_adapter import WolfxAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -21,8 +19,6 @@ __all__ = [
     'P2PQuakeAdapter',
     'P2PQuakeTsunamiAdapter',
     'P2PQuakeWebSocketAdapter',
-    'NiedAdapter',
     'CustomAdapter',
-    'JmaVolcanoAdapter',
-    'JianProjectAdapter',
+    'WolfxAdapter',
 ]

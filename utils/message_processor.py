@@ -74,9 +74,9 @@ class MessageProcessor:
                         return None
                 
                 # 检查有效性（发震时间在配置的有效期内）
-                # 对 Jian Project NIED / Early-est 使用单独的有效期窗口：
-                # - NIED: warning_shock_validity_seconds_nied（默认 5 分钟）
-                # - Early-est: warning_shock_validity_seconds_early_est（默认 10 分钟）
+                # 对 Wolfx 的 JMA / 四川预警使用单独有效期窗口：
+                # - wolfx_jma_eew: warning_shock_validity_seconds_nied（默认 5 分钟）
+                # - wolfx_sc_eew: warning_shock_validity_seconds_early_est（默认 10 分钟）
                 is_valid = self._is_warning_valid(parsed_data)
                 if not is_valid:
                     shock_time = parsed_data.get('shock_time', '')
@@ -140,13 +140,13 @@ class MessageProcessor:
             
             msg_cfg = Config().message_config
             # 根据 source_type 选择不同的有效期窗口
-            if source_type == 'nied':
+            if source_type == 'wolfx_jma_eew':
                 max_seconds = getattr(
                     msg_cfg,
                     'warning_shock_validity_seconds_nied',
                     msg_cfg.warning_shock_validity_seconds,
                 )
-            elif source_type == 'early_est':
+            elif source_type == 'wolfx_sc_eew':
                 max_seconds = getattr(
                     msg_cfg,
                     'warning_shock_validity_seconds_early_est',
@@ -233,7 +233,19 @@ class MessageProcessor:
             
             # 机构名称处理
             # 对于日本气象厅，特殊处理格式
-            if source_type == 'jma':
+            if source_type == 'wolfx_jma_eew':
+                warn_area_type = (data.get('warn_area_type') or '').strip()
+                if warn_area_type:
+                    message_parts.append(f"【緊急地震速報 {warn_area_type}】")
+                else:
+                    message_parts.append("【緊急地震速報】")
+            elif source_type == 'wolfx_sc_eew':
+                message_parts.append("【四川省地震局】")
+            elif source_type == 'wolfx_fj_eew':
+                message_parts.append("【福建省地震局】")
+            elif source_type == 'wolfx_cenc_eew':
+                message_parts.append("【中国地震台网地震预警】")
+            elif source_type == 'jma':
                 # 日本气象厅格式：【日本气象厅 紧急地震速报 infoTypeName】
                 if info_type:
                     message_parts.append(f"【日本气象厅 紧急地震速报 {info_type}】")
@@ -264,8 +276,10 @@ class MessageProcessor:
                     'jma': '日本气象厅',
                     'sa': '美国ShakeAlert',
                     'kma-eew': '韩国气象厅',
-                    'nied': '日本防災科研所预警',
-                    'early_est': 'Early-est',
+                    'wolfx_jma_eew': '緊急地震速報',
+                    'wolfx_sc_eew': '四川省地震局',
+                    'wolfx_fj_eew': '福建省地震局',
+                    'wolfx_cenc_eew': '中国地震台网地震预警',
                 }
                 default_org = source_name_map.get(source_type, '地震预警')
                 message_parts.append(f"【{default_org}预警】")
@@ -332,8 +346,10 @@ class MessageProcessor:
                         'jma': '日本气象厅',
                         'sa': '美国ShakeAlert',
                         'kma-eew': '韩国气象厅',
-                        'nied': '日本防災科研所预警',
-                        'early_est': 'Early-est',
+                        'wolfx_jma_eew': '緊急地震速報',
+                        'wolfx_sc_eew': '四川省地震局',
+                        'wolfx_fj_eew': '福建省地震局',
+                        'wolfx_cenc_eew': '中国地震台网地震预警',
                     }
                     default_org = source_name_map.get(source_type, '地震预警')
                     result = f"【{default_org}预警】数据更新"

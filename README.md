@@ -12,7 +12,7 @@
 ## 功能
 
 * 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
-* 支持多 WebSocket/HTTP 数据源（Fan Studio、NIED、P2PQuake、JMA 火山等）
+* 支持多 WebSocket/HTTP 数据源（Fan Studio、Wolfx、P2PQuake 等）
 * 可自定义界面样式与颜色
 * 灵活的配置管理，支持在设置中启用/禁用各数据源
 * 完整的日志记录
@@ -20,12 +20,11 @@
 ## 数据来源
 
 * 日本气象厅地震速报、地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
-* **火山情报**：[気象庁防災情報XMLフォーマット形式電文の公開（PULL型）](https://xml.kishou.go.jp/xmlpull.html)（日本气象厅官方 XML 电文；本程序通过 Jian Project 聚合源 `wss://sismotide.top/all` 接收并转发数据）
+* 日本地震预警（JMA）：[Wolfx WebSocket API](https://wolfx.jp/)（`wss://ws-api.wolfx.jp/all_eew`）
 * 中国地震预警：[中国预警网](https://www.cea.gov.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
 * 中国地震情报：[中国地震台网中心](https://www.cenc.ac.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
-* 实时震度/地震速报：[NIED 日本防災科研所](https://www.bosai.go.jp/e/index.html)（`wss://sismotide.top/nied`）
 * 气象预警：[中央气象台](https://www.nmc.cn/) 等（经 Fan Studio 气象预警子源）
-* 其他地震情报：[FAN Studio API](https://api.fanstudio.tech/) 与 Jian Project 聚合源 `wss://sismotide.top/all`
+* 其他地震情报：[FAN Studio API](https://api.fanstudio.tech/)
 
 ## 许可证
 

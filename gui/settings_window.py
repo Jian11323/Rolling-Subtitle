@@ -974,41 +974,32 @@ class SettingsWindow(QDialog):
         gw_layout.addWidget(self.fanstudio_parse_tsunami_cb)
         scroll_layout.addWidget(group_warning)
 
-        # Jian Project 聚合源 (wss://sismotide.top/all)
-        group_ali = QGroupBox("Jian Project")
+        # Wolfx 聚合源 (wss://ws-api.wolfx.jp/all_eew)
+        group_ali = QGroupBox("Wolfx")
         group_ali.setStyleSheet(STYLE_GROUPBOX)
         ga_layout = QVBoxLayout(group_ali)
         ga_layout.setContentsMargins(12, 14, 12, 12)
         ga_layout.setSpacing(12)
-        ali_hint = QLabel("All 通道始终连接；下方勾选则解析对应子源，不勾选则不解析。")
+        ali_hint = QLabel("始终连接；下方勾选则解析对应子源，不勾选则不解析。")
         ali_hint.setStyleSheet(STYLE_HINT)
         ali_hint.setWordWrap(True)
         ga_layout.addWidget(ali_hint)
-        self.ali_all_parse_nied_cb = QCheckBox("日本防災科研所预警")
-        self.ali_all_parse_nied_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_nied', False))
+        self.ali_all_parse_nied_cb = QCheckBox("緊急地震速報（JMA）")
+        self.ali_all_parse_nied_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_nied', True))
         self.ali_all_parse_nied_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         ga_layout.addWidget(self.ali_all_parse_nied_cb)
-        self.ali_all_parse_early_est_cb = QCheckBox("意大利Early-est 预警")
-        self.ali_all_parse_early_est_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_early_est', False))
+        self.ali_all_parse_early_est_cb = QCheckBox("四川省地震局")
+        self.ali_all_parse_early_est_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_early_est', True))
         self.ali_all_parse_early_est_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         ga_layout.addWidget(self.ali_all_parse_early_est_cb)
-        self.ali_all_parse_jma_volcano_cb = QCheckBox("日本气象厅火山情报")
+        self.ali_all_parse_jma_volcano_cb = QCheckBox("福建省地震局")
         self.ali_all_parse_jma_volcano_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_jma_volcano', True))
         self.ali_all_parse_jma_volcano_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         ga_layout.addWidget(self.ali_all_parse_jma_volcano_cb)
-        # Jian Project 聚合源其他子源
-        self.ali_all_parse_bmkg_cb = QCheckBox("印度尼西亚气象厅速报")
+        self.ali_all_parse_bmkg_cb = QCheckBox("中国地震台网地震预警")
         self.ali_all_parse_bmkg_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_bmkg', True))
         self.ali_all_parse_bmkg_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         ga_layout.addWidget(self.ali_all_parse_bmkg_cb)
-        self.ali_all_parse_geonet_cb = QCheckBox("新西兰GeoNet速报")
-        self.ali_all_parse_geonet_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_geonet', True))
-        self.ali_all_parse_geonet_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-        ga_layout.addWidget(self.ali_all_parse_geonet_cb)
-        self.ali_all_parse_ptwc_cb = QCheckBox("美国太平洋海啸预警中心海啸信息")
-        self.ali_all_parse_ptwc_cb.setChecked(getattr(self.config.message_config, 'ali_all_parse_ptwc', True))
-        self.ali_all_parse_ptwc_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-        ga_layout.addWidget(self.ali_all_parse_ptwc_cb)
         scroll_layout.addWidget(group_ali)
 
         # 非预警时显示（QGroupBox）
@@ -1992,7 +1983,7 @@ class SettingsWindow(QDialog):
                 cb = getattr(self, attr, None)
                 if cb is not None:
                     setattr(self.config.message_config, cfg_name, cb.isChecked())
-            # Jian Project All：勾选则解析对应子源
+            # Wolfx All：勾选则解析对应子源
             if hasattr(self, 'ali_all_parse_nied_cb'):
                 self.config.message_config.ali_all_parse_nied = self.ali_all_parse_nied_cb.isChecked()
             if hasattr(self, 'ali_all_parse_early_est_cb'):
@@ -2001,18 +1992,14 @@ class SettingsWindow(QDialog):
                 self.config.message_config.ali_all_parse_jma_volcano = self.ali_all_parse_jma_volcano_cb.isChecked()
             if hasattr(self, 'ali_all_parse_bmkg_cb'):
                 self.config.message_config.ali_all_parse_bmkg = self.ali_all_parse_bmkg_cb.isChecked()
-            if hasattr(self, 'ali_all_parse_geonet_cb'):
-                self.config.message_config.ali_all_parse_geonet = self.ali_all_parse_geonet_cb.isChecked()
-            if hasattr(self, 'ali_all_parse_ptwc_cb'):
-                self.config.message_config.ali_all_parse_ptwc = self.ali_all_parse_ptwc_cb.isChecked()
             
             # P2PQuake 仅使用 WSS + 启动时 HTTP 聚合拉取（内部固定 URL），不启用 HTTP 轮询
             # 更新其他数据源配置（NIED、P2PQuake WSS 等）
             for url, checkbox in self.source_vars.items():
                 if url and url != all_url:
                     self.config.enabled_sources[url] = checkbox.isChecked()
-            # Jian Project All 始终启用
-            self.config.enabled_sources["wss://sismotide.top/all"] = True
+            # Wolfx All 始终启用
+            self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
             removed_ws = self.config._enforce_public_ws_sources()
             if removed_ws:
                 logger.info(f"设置保存时已移除非公开 WebSocket 数据源: {removed_ws}")

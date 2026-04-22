@@ -17,10 +17,10 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 非 Fan Studio 的 WebSocket 数据源固定顺序（与轮播优先级一致，确保顺序不变）
-# Jian Project 聚合源 wss://sismotide.top/all 替代原 nied、jma-long 单项
+# Wolfx 聚合源 wss://ws-api.wolfx.jp/all_eew
 WS_URL_CANONICAL_ORDER: List[str] = [
     "wss://api.p2pquake.net/v2/ws",
-    "wss://sismotide.top/all",
+    "wss://ws-api.wolfx.jp/all_eew",
 ]
 P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
     "https://api.p2pquake.net/v2/history?codes=551&limit=3",
@@ -28,14 +28,13 @@ P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
 ]
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.2"
+APP_VERSION = "2.4.4"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.2
+CHANGELOG_TEXT = """版本 2.4.4
 
-1、新增BMKG、GeoNet、PTWC数据源
-2、新增独立数据源开关"""
+1、删除部分数据源，新增部分数据源"""
 
 @dataclass
 class GUIConfig:
@@ -116,9 +115,9 @@ class MessageConfig:
     max_warning_inactivity_time: int = 600
     # 预警按发震时间的有效期（秒）：超过此时长的预警入队时丢弃、展示时移除，默认 5 分钟
     warning_shock_validity_seconds: int = 300
-    # Jian Project NIED 预警的发震时间有效期（秒），默认 5 分钟
+    # Wolfx JMA 预警的发震时间有效期（秒），默认 5 分钟
     warning_shock_validity_seconds_nied: int = 300
-    # Jian Project Early-est 预警的发震时间有效期（秒），默认 10 分钟
+    # Wolfx 四川地震局预警的发震时间有效期（秒），默认 10 分钟
     warning_shock_validity_seconds_early_est: int = 600
     # 预警最少展示时长（秒）：一旦展示则在此时间内不因发震时间过期被移除，默认 5 分钟
     warning_min_display_seconds: int = 300
@@ -133,13 +132,11 @@ class MessageConfig:
     # Fan Studio All 数据源：勾选则解析对应类型，不勾选则不解析（不写单项 URL）
     fanstudio_parse_warning: bool = True  # 勾选则解析所有预警数据源
     fanstudio_parse_report: bool = True   # 勾选则解析所有速报数据源（含气象预警）
-    # Jian Project 聚合源 (sismotide.top/all)：勾选则解析对应子源，不勾选则不解析
-    ali_all_parse_nied: bool = False        # 解析 NIED 日本防災科研所预警
-    ali_all_parse_early_est: bool = False   # 解析 Early-est 预警
-    ali_all_parse_jma_volcano: bool = True  # 解析 JMA 火山情报
-    ali_all_parse_bmkg: bool = True         # 解析 BMKG 印尼速报
-    ali_all_parse_geonet: bool = True       # 解析 GeoNet 新西兰速报
-    ali_all_parse_ptwc: bool = True         # 解析 PTWC 海啸/信息
+    # Wolfx 聚合源 (ws-api.wolfx.jp/all_eew)：勾选则解析对应子源，不勾选则不解析
+    ali_all_parse_nied: bool = True         # 解析 JMA 緊急地震速報
+    ali_all_parse_early_est: bool = True    # 解析 四川省地震局预警
+    ali_all_parse_jma_volcano: bool = True  # 解析 福建省地震局预警
+    ali_all_parse_bmkg: bool = True         # 解析 中国地震台网地震预警
     warning_color: str = '#FF0000'  # 红色
     report_color: str = '#00FFFF'  # 青色
     custom_text_color: str = '#01FF00'  # 自定义文本颜色（绿色，与默认颜色一致）
@@ -417,12 +414,10 @@ class Config:
                 'use_custom_text': self.message_config.use_custom_text,
                 'fanstudio_parse_warning': self.message_config.fanstudio_parse_warning,
                 'fanstudio_parse_report': self.message_config.fanstudio_parse_report,
-                'ali_all_parse_nied': getattr(self.message_config, 'ali_all_parse_nied', False),
-                'ali_all_parse_early_est': getattr(self.message_config, 'ali_all_parse_early_est', False),
+                'ali_all_parse_nied': getattr(self.message_config, 'ali_all_parse_nied', True),
+                'ali_all_parse_early_est': getattr(self.message_config, 'ali_all_parse_early_est', True),
                 'ali_all_parse_jma_volcano': getattr(self.message_config, 'ali_all_parse_jma_volcano', True),
                 'ali_all_parse_bmkg': getattr(self.message_config, 'ali_all_parse_bmkg', True),
-                'ali_all_parse_geonet': getattr(self.message_config, 'ali_all_parse_geonet', True),
-                'ali_all_parse_ptwc': getattr(self.message_config, 'ali_all_parse_ptwc', True),
                 'warning_color': self.message_config.warning_color,
                 'report_color': self.message_config.report_color,
                 'custom_text_color': self.message_config.custom_text_color,
@@ -568,6 +563,44 @@ class Config:
                     if subkey not in existing[key]:
                         return True
         return False
+
+    def _remove_legacy_jian_project_settings(self, config_data: Dict[str, Any]) -> bool:
+        """
+        清理 settings.json 中遗留的 Jian Project 配置项。
+        返回值:
+            True: 本次有清理动作
+            False: 无需清理
+        """
+        changed = False
+        try:
+            # 1) 删除历史顶层块（若存在）
+            for top_key in ("JIAN_PROJECT_CONFIG", "JIANPROJECT_CONFIG", "ALI_ALL_CONFIG"):
+                if top_key in config_data:
+                    del config_data[top_key]
+                    changed = True
+
+            # 2) 删除 MESSAGE_CONFIG 中已废弃的 Jian 子源开关
+            msg_cfg = config_data.get("MESSAGE_CONFIG")
+            if isinstance(msg_cfg, dict):
+                deprecated_msg_keys = (
+                    "ali_all_parse_geonet",
+                    "ali_all_parse_ptwc",
+                )
+                for key in deprecated_msg_keys:
+                    if key in msg_cfg:
+                        del msg_cfg[key]
+                        changed = True
+
+            # 3) 删除 ENABLED_SOURCES 中所有 sismotide URL
+            enabled = config_data.get("ENABLED_SOURCES")
+            if isinstance(enabled, dict):
+                for k in list(enabled.keys()):
+                    if "sismotide.top" in (k or "").lower():
+                        del enabled[k]
+                        changed = True
+        except Exception as e:
+            logger.debug(f"清理遗留 Jian Project 配置失败(可忽略): {e}")
+        return changed
     
     def _write_config_dict(self, config_data: Dict[str, Any]) -> bool:
         """将配置 dict 原子写入配置文件。"""
@@ -609,6 +642,7 @@ class Config:
             # 版本不一致或缺少版本时，仅备份并继续按 section 合并加载（缺项补全，保留用户自定义）
             saved_version = config_data.get('config_version') or config_data.get('app_version') or ''
             version_changed = (saved_version != APP_VERSION)
+            legacy_jian_settings_removed = self._remove_legacy_jian_project_settings(config_data)
             if version_changed:
                 logger.info(f"配置版本({saved_version or '无'})与当前程序版本({APP_VERSION})不一致，将合并加载并补全缺失项，保留用户设置")
                 try:
@@ -726,37 +760,15 @@ class Config:
             
             # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
             raw_sources = config_data.get('ENABLED_SOURCES', {})
-            # 启动时若配置中存在 wolfx 数据源，后续将保留用户自定义设置并覆盖写回一次以移除 wolfx
-            has_wolfx_in_file = any(
-                'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k
-                for k in raw_sources
-            )
             base_domain = "fanstudio.tech"
             all_url = f"wss://ws.{base_domain}/all"
             self.enabled_sources = {
                 k: v for k, v in raw_sources.items()
                 if k == all_url or not self._is_fanstudio_individual_url(k)
             }
-            # 迁移：移除 sismotide 单项 URL（nied、jma-long），改为 ali all + 子源开关
-            nied_url = "wss://sismotide.top/nied"
-            jma_long_url = "wss://sismotide.top/jma-long"
-            ali_all_url = "wss://sismotide.top/all"
-            had_nied = self.enabled_sources.pop(nied_url, None)
-            had_jma_long = self.enabled_sources.pop(jma_long_url, None)
-            if had_nied is not None or had_jma_long is not None:
-                if had_nied:
-                    self.message_config.ali_all_parse_nied = True
-                if had_jma_long:
-                    self.message_config.ali_all_parse_jma_volcano = True
-                if ali_all_url not in self.enabled_sources:
-                    self.enabled_sources[ali_all_url] = bool(had_nied or had_jma_long)
             # 确保内存中不保留任何 Fan Studio 单项 URL
             for k in list(self.enabled_sources.keys()):
                 if self._is_fanstudio_individual_url(k):
-                    del self.enabled_sources[k]
-            # 迁移：移除已下线的 Wolfx 数据源
-            for k in list(self.enabled_sources.keys()):
-                if 'wolfx' in k.lower() or 'api.wolfx.jp' in k or 'ws-api.wolfx.jp' in k:
                     del self.enabled_sources[k]
             removed_ws = self._enforce_public_ws_sources()
             if removed_ws:
@@ -771,7 +783,7 @@ class Config:
                 # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
                 self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
-                self.enabled_sources["wss://sismotide.top/all"] = True   # Jian Project 聚合源，火山情报默认解析
+                self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
                 logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
             else:
@@ -785,10 +797,10 @@ class Config:
                     self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
                     self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
-                other_wss_urls = ["wss://sismotide.top/all", "wss://api.p2pquake.net/v2/ws"]
+                other_wss_urls = ["wss://ws-api.wolfx.jp/all_eew", "wss://api.p2pquake.net/v2/ws"]
                 for wss_url in other_wss_urls:
                     if wss_url not in self.enabled_sources:
-                        self.enabled_sources[wss_url] = (wss_url == "wss://sismotide.top/all")  # Jian Project All 默认启用
+                        self.enabled_sources[wss_url] = (wss_url == "wss://ws-api.wolfx.jp/all_eew")
                 if f"wss://ws.{base_domain}/fssn-cmt" not in self.enabled_sources:
                     self.enabled_sources[f"wss://ws.{base_domain}/fssn-cmt"] = False
                     logger.debug("添加缺失的 FSSN CMT 数据源")
@@ -811,11 +823,11 @@ class Config:
             merged['ENABLED_SOURCES'] = full['ENABLED_SOURCES']
             if version_changed:
                 merged['config_version'] = APP_VERSION
-            if version_changed or self._has_missing_keys(config_data, full) or has_wolfx_in_file:
+            if version_changed or self._has_missing_keys(config_data, full) or legacy_jian_settings_removed:
                 try:
                     if self._write_config_dict(merged):
-                        if has_wolfx_in_file:
-                            logger.info("配置中存在已下线的 Wolfx 数据源，已移除并写回，保留用户自定义设置")
+                        if legacy_jian_settings_removed:
+                            logger.info("已清理 settings.json 中遗留的 Jian Project 配置并写回")
                         else:
                             logger.info("已补全缺失配置项并写回，保留用户自定义设置")
                     else:
@@ -898,7 +910,7 @@ class Config:
         # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
         self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
         self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
-        self.enabled_sources["wss://sismotide.top/all"] = True   # Jian Project 聚合源，火山情报默认解析
+        self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
         self._enforce_public_ws_sources()
 
@@ -981,9 +993,9 @@ class Config:
                     return fanstudio_path_to_name[path]
             except Exception:
                 pass
-        # 非 Fan Studio：仅保留需完整 URL 的数据源（P2PQuake WSS、Jian Project All 等）
+        # 非 Fan Studio：仅保留需完整 URL 的数据源（P2PQuake WSS、Wolfx All 等）
         url_to_name = {
-            "wss://sismotide.top/all": "ali_all",
+            "wss://ws-api.wolfx.jp/all_eew": "wolfx_all_eew",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
         }
         return url_to_name.get(normalized_url, url)
@@ -1020,13 +1032,11 @@ class Config:
             "kma-eew": "韩国气象厅地震预警",
             "fssn": "FSSN",
             "fssn-cmt": "FSSN 矩心矩张量解",
-            "nied": "NIED 日本防災科研所预警",
             "p2pquake_ws": "日本气象厅地震/海啸 (P2PQuake WSS)",
-            "early_est": "Early-est",
-            "jma_volcano": "日本气象厅火山情报",
-            "bmkg": "印尼气象气候地球物理局（BMKG）",
-            "geonet": "新西兰 GeoNet",
-            "ptwc": "太平洋海啸预警中心（PTWC）",
+            "wolfx_jma_eew": "緊急地震速報",
+            "wolfx_sc_eew": "四川省地震局",
+            "wolfx_fj_eew": "福建省地震局",
+            "wolfx_cenc_eew": "中国地震台网地震预警",
         }
         
         return organization_name_mapping.get(source_name, source_name)
