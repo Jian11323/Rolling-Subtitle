@@ -20,7 +20,7 @@
 ## 数据来源
 
 * 日本气象厅地震速报、地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
-* 日本地震预警（JMA）：[Wolfx WebSocket API](https://wolfx.jp/)（`wss://ws-api.wolfx.jp/all_eew`）
+* 日本地震预警（JMA）：[Wolfx WebSocket API](https://wolfx.jp/)
 * 中国地震预警：[中国预警网](https://www.cea.gov.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
 * 中国地震情报：[中国地震台网中心](https://www.cenc.ac.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
 * 气象预警：[中央气象台](https://www.nmc.cn/)
