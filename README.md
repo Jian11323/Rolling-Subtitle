@@ -23,9 +23,9 @@
 * 日本地震预警（JMA）：[Wolfx WebSocket API](https://wolfx.jp/)（`wss://ws-api.wolfx.jp/all_eew`）
 * 中国地震预警：[中国预警网](https://www.cea.gov.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
 * 中国地震情报：[中国地震台网中心](https://www.cenc.ac.cn/)、[FAN Studio API](https://api.fanstudio.tech/)
-* 气象预警：[中央气象台](https://www.nmc.cn/) 等（经 Fan Studio 气象预警子源）
+* 气象预警：[中央气象台](https://www.nmc.cn/)
 * 其他地震情报：[FAN Studio API](https://api.fanstudio.tech/)
 
 ## 许可证
 
-本项目采用 [GNU GPLv3](LICENSE) 开源协议（因使用 PyQt5 等 GPL 组件，遵循 Copyleft 要求）。
+本项目采用 [GNU GPLv3](LICENSE) 开源协议
