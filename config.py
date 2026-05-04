@@ -18,9 +18,10 @@ logger = get_logger()
 
 # 非 Fan Studio 的 WebSocket 数据源固定顺序（与轮播优先级一致，确保顺序不变）
 # Wolfx 聚合源 wss://ws-api.wolfx.jp/all_eew
+P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 WS_URL_CANONICAL_ORDER: List[str] = [
     "wss://ws.fanstudio.tech/cenc-ir",
-    "wss://api.p2pquake.net/v2/ws",
+    P2PQUAKE_WSS_URL,
     "wss://ws-api.wolfx.jp/all_eew",
     "wss://ws-api.wolfx.jp/cwa_eew",
 ]
@@ -29,18 +30,28 @@ P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1",
 ]
 
+
+def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
+    """
+    P2PQuake 总开关：与设置页「P2PQuake（HTTP + WebSocket）」一致。
+    以 WSS 项为唯一真值；配置加载时会将两条 HTTP 项同步为与此相同。
+    """
+    if not isinstance(enabled_sources, dict):
+        return False
+    return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
+
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.5"
+APP_VERSION = "2.4.8"
+
+# 自动更新清单默认 URL（可在设置-关于中修改）
+AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.5
+CHANGELOG_TEXT = """版本 2.4.8
 
-1、增加新数据源
-2、调整部分数据的字段解析
-3、移除本地气象预警图标功能
-4、调整部分设置选项
-5、修复部分已知问题"""
+1、新增数据源总开关
+2、修复数据源设置页无法保存的问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -83,6 +94,12 @@ class GUIConfig:
     site_lat: float = 0.0
     site_lon: float = 0.0
     site_region_name: str = ""  # 可选：所在省市名称，供后续按地区修正使用
+    # 自动更新（仅 PyInstaller 打包 exe 生效；启动时拉取清单比对 APP_VERSION）
+    auto_update_check_on_startup: bool = True
+    auto_update_upgrade_only: bool = True  # True：仅当服务器版本高于本地时更新；False：版本不一致即更新（含降级）
+    auto_update_manifest_url: str = AUTO_UPDATE_MANIFEST_URL_DEFAULT
+    auto_update_timeout_seconds: int = 15
+    auto_update_package_kind: str = "installer"  # installer | zip（zip 为便携目录结构，与一键打包 onedir 一致）
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -113,6 +130,21 @@ class GUIConfig:
             allowed_positions = {"diagonal", "top_left", "top_right", "bottom_left", "bottom_right"}
             if getattr(self, 'watermark_position', 'diagonal') not in allowed_positions:
                 self.watermark_position = "diagonal"
+            if getattr(self, 'auto_update_package_kind', 'installer') not in ('installer', 'zip'):
+                self.auto_update_package_kind = 'installer'
+            try:
+                tout = int(getattr(self, 'auto_update_timeout_seconds', 15))
+                if tout < 5 or tout > 120:
+                    self.auto_update_timeout_seconds = 15
+            except (TypeError, ValueError):
+                self.auto_update_timeout_seconds = 15
+            mu = (getattr(self, 'auto_update_manifest_url', '') or '').strip()
+            if not mu:
+                self.auto_update_manifest_url = AUTO_UPDATE_MANIFEST_URL_DEFAULT
+            elif len(mu) > 2048:
+                self.auto_update_manifest_url = mu[:2048]
+            else:
+                self.auto_update_manifest_url = mu
             return True
         except AssertionError as e:
             logger.error(f"GUI配置验证失败: {e}")
@@ -134,6 +166,8 @@ class MessageConfig:
     warning_shock_validity_seconds_early_est: int = 600
     # 预警最少展示时长（秒）：一旦展示则在此时间内不因发震时间过期被移除，默认 5 分钟
     warning_min_display_seconds: int = 300
+    # 测试用：为 True 时跳过发震时间窗口与「展示满最少时长即移除」等过期判定（勿在生产长期开启）
+    disable_warning_expiry_for_test: bool = False
     max_report_inactivity_time: int = 300
     max_other_inactivity_time: int = 300
     # 主线程消息队列与展示缓冲区容量（缓解高并发时丢消息）
@@ -221,9 +255,100 @@ class MessageConfig:
             assert self.max_report_inactivity_time > 0, "速报无活动时长必须大于0"
             assert self.max_other_inactivity_time > 0, "其他消息无活动时长必须大于0"
             assert 1 <= self.custom_text_return_seconds <= 3600, "custom_text_return_seconds 必须在 1–3600 之间"
+            self.disable_warning_expiry_for_test = bool(
+                getattr(self, "disable_warning_expiry_for_test", False)
+            )
             return True
         except AssertionError as e:
             logger.error(f"消息配置验证失败: {e}")
+            return False
+
+
+@dataclass
+class AlertConfig:
+    """
+    站点烈度估算与告警闪烁配置（替代旧版 enable_china_intensity / felt_alert_*_ms 等散落字段）。
+
+    单位约定：
+    - 时长全部以毫秒存储；UI 中「闪烁时长」按秒展示并换算为 ``flash_duration_ms``（1～300 秒）。
+    - ``stage1_ms`` / ``stage2_ms`` 由 ``flash_duration_ms`` 在 ``validate`` 中按比例派生，兼容旧配置文件。
+    - 距离单位 km，烈度单位「度」（1-12）。
+    """
+    enabled: bool = False
+    min_intensity_to_alert: int = 4
+    min_intensity_to_flash: int = 6
+    min_magnitude: float = 3.0
+    max_distance_km: float = 800.0
+    stage1_ms: int = 1500  # 由 flash_duration_ms 在 validate 中派生，仅兼容旧配置读写
+    stage2_ms: int = 2500
+    flash_interval_ms: int = 400
+    # 阶段一+阶段二警示文案总展示时长（毫秒，校验上限 300 秒）；此期间左侧「地震预警」条按 flash_interval_ms 明灭
+    flash_duration_ms: int = 4000
+    flash_scope: str = "scrolling_only"
+    flash_target_screen: int = -1
+    flash_color: str = "#FF0000"
+    flash_max_alpha: int = 180
+    # True：阶段三显示正式预警条文时仍保持红条/四边闪烁，直至本条滚完再关；False：进入阶段三立即关闪（旧行为）
+    flash_during_stage3_warning: bool = True
+    site_lat: float = 0.0
+    site_lon: float = 0.0
+    site_region_name: str = ""
+
+    def validate(self) -> bool:
+        try:
+            if self.min_intensity_to_alert < 1:
+                self.min_intensity_to_alert = 1
+            if self.min_intensity_to_alert > 12:
+                self.min_intensity_to_alert = 12
+            if self.min_intensity_to_flash < self.min_intensity_to_alert:
+                self.min_intensity_to_flash = self.min_intensity_to_alert
+            if self.min_intensity_to_flash > 12:
+                self.min_intensity_to_flash = 12
+            if self.min_magnitude < 0:
+                self.min_magnitude = 0.0
+            if self.max_distance_km <= 0:
+                self.max_distance_km = 800.0
+            if self.flash_interval_ms < 50:
+                self.flash_interval_ms = 50
+            if self.flash_interval_ms > 2000:
+                self.flash_interval_ms = 2000
+            try:
+                fd = int(getattr(self, "flash_duration_ms", 4000))
+            except (TypeError, ValueError):
+                fd = 4000
+            if fd < 500:
+                fd = 500
+            if fd > 300000:
+                fd = 300000
+            self.flash_duration_ms = fd
+            self.stage1_ms = max(100, int(round(fd * 0.375)))
+            self.stage2_ms = max(100, fd - self.stage1_ms)
+            # 仅保留字幕条左侧「地震预警」标识闪烁，不再使用主窗口四边叠加
+            self.flash_scope = "scrolling_only"
+            try:
+                self.flash_target_screen = int(self.flash_target_screen)
+            except (TypeError, ValueError):
+                self.flash_target_screen = -1
+            if not isinstance(self.flash_color, str) or not self.flash_color.strip():
+                self.flash_color = "#FF0000"
+            if self.flash_max_alpha < 30:
+                self.flash_max_alpha = 30
+            if self.flash_max_alpha > 255:
+                self.flash_max_alpha = 255
+            self.flash_during_stage3_warning = bool(
+                getattr(self, "flash_during_stage3_warning", True)
+            )
+            try:
+                self.site_lat = max(-90.0, min(90.0, float(self.site_lat)))
+                self.site_lon = max(-180.0, min(180.0, float(self.site_lon)))
+            except (TypeError, ValueError):
+                self.site_lat = 0.0
+                self.site_lon = 0.0
+            if not isinstance(self.site_region_name, str):
+                self.site_region_name = ""
+            return True
+        except Exception as e:
+            logger.error(f"告警配置验证失败: {e}")
             return False
 
 
@@ -306,6 +431,7 @@ class Config:
         # 配置实例
         self.gui_config = GUIConfig()
         self.message_config = MessageConfig()
+        self.alert_config = AlertConfig()
         self.ws_config = WebSocketConfig()
         self.translation_config = TranslationConfig()
         self.log_config = LogConfig()
@@ -400,6 +526,11 @@ class Config:
                 'site_lat': getattr(self.gui_config, 'site_lat', 0.0),
                 'site_lon': getattr(self.gui_config, 'site_lon', 0.0),
                 'site_region_name': getattr(self.gui_config, 'site_region_name', ""),
+                'auto_update_check_on_startup': getattr(self.gui_config, 'auto_update_check_on_startup', True),
+                'auto_update_upgrade_only': getattr(self.gui_config, 'auto_update_upgrade_only', True),
+                'auto_update_manifest_url': getattr(self.gui_config, 'auto_update_manifest_url', "") or AUTO_UPDATE_MANIFEST_URL_DEFAULT,
+                'auto_update_timeout_seconds': getattr(self.gui_config, 'auto_update_timeout_seconds', 15),
+                'auto_update_package_kind': getattr(self.gui_config, 'auto_update_package_kind', "installer"),
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -424,6 +555,9 @@ class Config:
                     ),
                 ),
                 'warning_min_display_seconds': self.message_config.warning_min_display_seconds,
+                'disable_warning_expiry_for_test': getattr(
+                    self.message_config, "disable_warning_expiry_for_test", False
+                ),
                 'max_report_inactivity_time': self.message_config.max_report_inactivity_time,
                 'max_other_inactivity_time': self.message_config.max_other_inactivity_time,
                 'message_queue_maxsize': getattr(self.message_config, 'message_queue_maxsize', 300),
@@ -483,6 +617,29 @@ class Config:
                 'fanstudio_parse_weatheralarm': getattr(self.message_config, 'fanstudio_parse_weatheralarm', True),
                 'fanstudio_parse_tsunami': getattr(self.message_config, 'fanstudio_parse_tsunami', True),
             },
+            'ALERT_CONFIG': {
+                'enabled': self.alert_config.enabled,
+                'min_intensity_to_alert': self.alert_config.min_intensity_to_alert,
+                'min_intensity_to_flash': self.alert_config.min_intensity_to_flash,
+                'min_magnitude': self.alert_config.min_magnitude,
+                'max_distance_km': self.alert_config.max_distance_km,
+                'stage1_ms': self.alert_config.stage1_ms,
+                'stage2_ms': self.alert_config.stage2_ms,
+                'flash_interval_ms': self.alert_config.flash_interval_ms,
+                'flash_duration_ms': getattr(
+                    self.alert_config, "flash_duration_ms", 4000
+                ),
+                'flash_scope': self.alert_config.flash_scope,
+                'flash_target_screen': self.alert_config.flash_target_screen,
+                'flash_color': self.alert_config.flash_color,
+                'flash_max_alpha': self.alert_config.flash_max_alpha,
+                'flash_during_stage3_warning': getattr(
+                    self.alert_config, "flash_during_stage3_warning", True
+                ),
+                'site_lat': self.alert_config.site_lat,
+                'site_lon': self.alert_config.site_lon,
+                'site_region_name': self.alert_config.site_region_name,
+            },
             'WS_CONFIG': {
                 'reconnect_interval': self.ws_config.reconnect_interval,
                 'max_reconnect_attempts': self.ws_config.max_reconnect_attempts,
@@ -509,18 +666,38 @@ class Config:
         }
     
     def _is_fanstudio_individual_url(self, url: str) -> bool:
-        """是否为 Fan Studio 单项数据源 URL（非 all）。仅 all 用于连接，单项不再持久化。"""
+        """是否为应剔除持久化的 Fan Studio 单项 URL（历史遗留：除 all 外的 path 源）。
+
+        公开版中 ``WS_URL_CANONICAL_ORDER`` 内的 Fan Studio 独立源（如 cenc-ir）仍需写入
+        ``ENABLED_SOURCES``，否则用户关闭后重启会被加载逻辑重新默认开启。
+        """
         if not url or not isinstance(url, str):
             return False
         if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
             return False
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
-        return url != all_url
+        nu = url.replace('fanstudio.hk', 'fanstudio.tech').rstrip("/").lower()
+        if nu == all_url.rstrip("/").lower():
+            return False
+        canon_fs = {
+            u.replace("fanstudio.hk", "fanstudio.tech").rstrip("/").lower()
+            for u in WS_URL_CANONICAL_ORDER
+            if "fanstudio" in u.lower()
+        }
+        if nu in canon_fs:
+            return False
+        return True
 
     def _is_websocket_url(self, url: str) -> bool:
         """判断 URL 是否为 WebSocket 协议。"""
         return isinstance(url, str) and url.startswith(("ws://", "wss://"))
+
+    def _sync_p2pquake_http_with_wss(self) -> None:
+        """总开关以 WSS 为准，两条 HTTP 拉取与之一致（单一复选框同时控制 HTTP + WSS）。"""
+        master = bool(self.enabled_sources.get(P2PQUAKE_WSS_URL, False))
+        for u in P2PQUAKE_HTTP_SOURCE_KEYS:
+            self.enabled_sources[u] = master
 
     def _enforce_public_ws_sources(self) -> List[str]:
         """
@@ -542,8 +719,6 @@ class Config:
             if (not self._is_websocket_url(url)) and url not in allowed_http:
                 removed.append(url)
                 del self.enabled_sources[url]
-        # fanstudio all 在公开版中固定启用
-        self.enabled_sources[all_url] = True
         return removed
 
     def _get_persisted_enabled_sources(self) -> Dict[str, bool]:
@@ -754,6 +929,32 @@ class Config:
                 except Exception as e:
                     logger.debug(f"迁移 Fan Studio 子源解析开关失败(可忽略): {e}")
             
+            # 加载 ALERT_CONFIG（若不存在，则触发一次旧字段迁移）
+            if 'ALERT_CONFIG' in config_data:
+                alert_section = config_data.get('ALERT_CONFIG') or {}
+                alert_data = {
+                    k: v for k, v in alert_section.items()
+                    if hasattr(self.alert_config, k)
+                }
+                for key, value in alert_data.items():
+                    setattr(self.alert_config, key, value)
+                if 'flash_duration_ms' not in alert_section:
+                    try:
+                        self.alert_config.flash_duration_ms = max(
+                            500,
+                            min(
+                                300000,
+                                int(self.alert_config.stage1_ms)
+                                + int(self.alert_config.stage2_ms),
+                            ),
+                        )
+                    except Exception:
+                        pass
+            else:
+                self._migrate_legacy_alert_fields(config_data)
+            if not self.alert_config.validate():
+                success = False
+
             if 'WS_CONFIG' in config_data:
                 ws_data = {k: v for k, v in config_data['WS_CONFIG'].items() if hasattr(self.ws_config, k)}
                 # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
@@ -812,9 +1013,7 @@ class Config:
             else:
                 if all_url not in self.enabled_sources:
                     self.enabled_sources[all_url] = True
-                else:
-                    if not self.enabled_sources.get(all_url, False):
-                        self.enabled_sources[all_url] = True
+                # 若配置中已有 all_url，尊重用户关闭聚合连接的设置，不再强制为 True
                 # 仅补全非 Fan Studio 数据源缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉 1 条
                 if "https://api.p2pquake.net/v2/history?codes=551&limit=3" not in self.enabled_sources:
                     self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
@@ -835,6 +1034,9 @@ class Config:
                 if f"wss://ws.{base_domain}/fssn-cmt" not in self.enabled_sources:
                     self.enabled_sources[f"wss://ws.{base_domain}/fssn-cmt"] = False
                     logger.debug("添加缺失的 FSSN CMT 数据源")
+
+            # P2PQuake：一个总开关，两条 HTTP 拉取与 WSS 项保持一致
+            self._sync_p2pquake_http_with_wss()
 
             # 根据服务器选择更新URL
             self._update_urls_for_server_selection()
@@ -924,10 +1126,60 @@ class Config:
         finally:
             self._save_lock.release()
     
+    def _migrate_legacy_alert_fields(self, config_data: Dict[str, Any]) -> None:
+        """
+        从旧版 GUI_CONFIG / MESSAGE_CONFIG 中迁移告警相关字段到新的 ``AlertConfig``。
+
+        触发条件：``ALERT_CONFIG`` 节缺失（首次升级）。
+        旧字段保留在原 section 中以保证降级兼容；下个版本会清理。
+        """
+        try:
+            gui_section = config_data.get('GUI_CONFIG', {}) or {}
+            msg_section = config_data.get('MESSAGE_CONFIG', {}) or {}
+
+            self.alert_config.site_lat = float(gui_section.get('site_lat', 0.0) or 0.0)
+            self.alert_config.site_lon = float(gui_section.get('site_lon', 0.0) or 0.0)
+            self.alert_config.site_region_name = (
+                gui_section.get('site_region_name', '') or ''
+            )
+
+            enable_china = bool(msg_section.get('enable_china_intensity', False))
+            enable_felt = bool(msg_section.get('enable_felt_alert_flow', False))
+            enable_strong = bool(msg_section.get('enable_strong_felt_alert_flow', True))
+            self.alert_config.enabled = enable_china
+
+            if enable_china and enable_felt:
+                self.alert_config.min_intensity_to_alert = 1
+            else:
+                self.alert_config.min_intensity_to_alert = 6
+            if enable_china and enable_strong:
+                self.alert_config.min_intensity_to_flash = 6
+            else:
+                self.alert_config.min_intensity_to_flash = 12
+
+            felt_s1 = int(msg_section.get('felt_alert_stage1_ms', 1500) or 1500)
+            felt_s2 = int(msg_section.get('felt_alert_stage2_ms', 2500) or 2500)
+            strong_s1 = int(msg_section.get('strong_felt_stage1_ms', 1500) or 1500)
+            strong_s2 = int(msg_section.get('strong_felt_stage2_ms', 2500) or 2500)
+            self.alert_config.stage1_ms = max(felt_s1, strong_s1)
+            self.alert_config.stage2_ms = max(felt_s2, strong_s2)
+            self.alert_config.flash_duration_ms = max(
+                500,
+                min(300000, self.alert_config.stage1_ms + self.alert_config.stage2_ms),
+            )
+            self.alert_config.flash_interval_ms = int(
+                msg_section.get('alert_flash_interval_ms', 400) or 400
+            )
+            self.alert_config.flash_scope = "scrolling_only"
+            logger.info("已从旧版字段迁移 AlertConfig（首次升级）")
+        except Exception as e:
+            logger.warning(f"迁移旧版告警配置失败（使用默认值）: {e}")
+
     def _apply_default_config(self):
         """应用默认配置"""
         self.gui_config = GUIConfig()
         self.message_config = MessageConfig()
+        self.alert_config = AlertConfig()
         self.ws_config = WebSocketConfig()
         self.translation_config = TranslationConfig()
         self.log_config = LogConfig()
@@ -952,12 +1204,13 @@ class Config:
         logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
     
     def _build_ws_urls_ordered(self) -> List[str]:
-        """按固定顺序构建 ws_urls：仅连接 fanstudio all + canonical 独立源。"""
+        """按固定顺序构建 ws_urls：已启用的 fanstudio all + canonical 独立源。"""
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
-        self.enabled_sources[all_url] = True
         self._enforce_public_ws_sources()
-        ws_urls = [all_url]
+        ws_urls: List[str] = []
+        if self.enabled_sources.get(all_url, False):
+            ws_urls.append(all_url)
         for url in WS_URL_CANONICAL_ORDER:
             if self.enabled_sources.get(url, False):
                 ws_urls.append(url)
@@ -967,7 +1220,6 @@ class Config:
         """更新启用的数据源"""
         self.enabled_sources.update(sources)
         self._update_urls_for_server_selection()
-        self.enabled_sources[f"wss://ws.fanstudio.tech/all"] = True
         removed_ws = self._enforce_public_ws_sources()
         if removed_ws:
             logger.info(f"更新数据源时已清理非公开 WebSocket 数据源: {removed_ws}")

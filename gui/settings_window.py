@@ -17,17 +17,26 @@ from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase
 from typing import Optional, Dict, Any, List, Tuple
 import re
+import datetime
 
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config, APP_VERSION, APP_DECLARATION_TEXT
+from config import (
+    Config,
+    APP_VERSION,
+    APP_DECLARATION_TEXT,
+    P2PQUAKE_HTTP_SOURCE_KEYS,
+    p2pquake_master_enabled,
+)
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path
 from .color_manager import Color48Picker
 
 logger = get_logger()
+
+P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 
 # 设置页统一布局与样式常量
 MARGIN_TAB = 16
@@ -36,6 +45,8 @@ SPACING_BLOCK = 20
 
 # 共用 QSS（与高级版一致：16pt/16px 字号与新布局）
 STYLE_SECTION_TITLE = "font-weight: bold; font-size: 16pt; color: #333333; margin-bottom: 4px;"
+# 设置卡片内分区小标题（比 STYLE_SECTION_TITLE 略轻，用于同页多区块）
+STYLE_CARD_SUBHEAD = "font-weight: bold; font-size: 15px; color: #444444; margin-top: 6px; margin-bottom: 2px;"
 STYLE_LABEL = "font-size: 16px; color: #555555; line-height: 22pt;"
 STYLE_HINT = "font-size: 16px; color: #888888; line-height: 22pt;"
 STYLE_SLIDER = """
@@ -167,8 +178,10 @@ class SettingsWindow(QDialog):
 
         # 数据源分类定义
         self.source_vars = {}
-        self.source_status_labels = {}  # url/key -> QLabel，显示「已连接/未连接/已断开/连接中」
         self.source_parse_labels = {}   # parse_key -> QLabel，显示「已解析/未解析」
+        # 数据源状态页：按分钟记录绿/红条（True=绿，False=红）
+        self._status_minute_bars: Dict[str, List[bool]] = {}
+        self._status_last_minute_key: Dict[str, str] = {}
         self.individual_source_urls = []  # 存储所有单项数据源的URL
         self.fanstudio_source_urls = []  # 存储所有Fan Studio单项数据源的URL（不包括All源）
         self._updating_mutual_exclusion = False  # 防止回调循环的标志
@@ -215,9 +228,10 @@ class SettingsWindow(QDialog):
         self.notebook = QTabWidget()
         main_layout.addWidget(self.notebook)
         
-        # 标签页顺序：外观与显示、数据源、高级、关于
+        # 标签页顺序：外观与显示、数据源、数据源状态、高级、关于
         self._create_appearance_tab()
         self._create_data_source_tab()
+        self._create_data_source_status_tab()
         self._create_advanced_tab()
         self._create_about_tab()
         
@@ -233,19 +247,22 @@ class SettingsWindow(QDialog):
         self._custom_source_status_timer.timeout.connect(self._update_custom_source_status)
         # 数据源页连接/解析状态定时刷新
         self._data_source_tab_index = 1
+        self._data_source_status_tab_index = 2
         self._status_refresh_timer = QTimer(self)
         self._status_refresh_timer.setInterval(2000)
         self._status_refresh_timer.timeout.connect(self._on_status_refresh_tick)
-        self._advanced_tab_index = 2  # 高级页在 notebook 中的索引
+        self._advanced_tab_index = 3  # 高级页在 notebook 中的索引
         self.notebook.currentChanged.connect(self._on_settings_tab_changed)
     
     def _on_settings_tab_changed(self, index: int):
         """切换标签页时：仅在「高级」页启动状态刷新定时器，离开时停止。"""
-        if index == self._data_source_tab_index:
+        if index in (self._data_source_tab_index, self._data_source_status_tab_index):
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
-            self._update_data_source_status()
-            self._update_parse_status_labels()
+            if index == self._data_source_tab_index:
+                self._update_parse_status_labels()
+            else:
+                self._update_data_source_health_table()
         else:
             self._status_refresh_timer.stop()
 
@@ -258,42 +275,13 @@ class SettingsWindow(QDialog):
 
     def _on_status_refresh_tick(self):
         """定时刷新数据源页状态。"""
-        if not self.isVisible() or self.notebook.currentIndex() != self._data_source_tab_index:
+        if not self.isVisible():
             return
-        self._update_data_source_status()
-        self._update_parse_status_labels()
-
-    def _update_data_source_status(self):
-        """从主窗口读取连接状态并刷新标签。"""
-        try:
-            parent = self.parent()
-            if parent is None or not hasattr(parent, 'get_data_source_status'):
-                for lbl in self.source_status_labels.values():
-                    if lbl:
-                        lbl.setText("未连接")
-                        lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
-                return
-
-            status_map = parent.get_data_source_status()
-            for key, lbl in self.source_status_labels.items():
-                if not lbl:
-                    continue
-                state = status_map.get(key, "unconnected")
-                if state == "connected":
-                    lbl.setText("已连接")
-                    lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
-                elif state == "connecting":
-                    lbl.setText("重连中")
-                    lbl.setStyleSheet(STYLE_STATUS_DISCONNECTED)
-                elif state == "disconnected":
-                    lbl.setText("已断开")
-                    lbl.setStyleSheet(STYLE_STATUS_DISCONNECTED)
-                else:
-                    lbl.setText("未连接")
-                    lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
-
-        except Exception as e:
-            logger.debug(f"更新数据源连接状态失败: {e}")
+        current_index = self.notebook.currentIndex()
+        if current_index == self._data_source_tab_index:
+            self._update_parse_status_labels()
+        elif current_index == self._data_source_status_tab_index:
+            self._update_data_source_health_table()
 
     def _update_parse_status_labels(self):
         """根据配置刷新解析状态标签。"""
@@ -380,8 +368,11 @@ class SettingsWindow(QDialog):
         if self.notebook.currentIndex() == self._data_source_tab_index:
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
-            self._update_data_source_status()
             self._update_parse_status_labels()
+        elif self.notebook.currentIndex() == self._data_source_status_tab_index:
+            if not self._status_refresh_timer.isActive():
+                self._status_refresh_timer.start()
+            self._update_data_source_health_table()
 
     def hideEvent(self, event):
         """窗口隐藏或关闭时停止自定义数据源状态刷新定时器"""
@@ -893,6 +884,18 @@ class SettingsWindow(QDialog):
         warning_min_display_row.addWidget(warning_min_display_spin)
         warning_min_display_row.addStretch()
         block_alert_update_layout.addLayout(warning_min_display_row)
+        self.disable_warning_expiry_test_cb = QCheckBox(
+            "关闭预警有效期（仅供测试，勿长期开启）"
+        )
+        self.disable_warning_expiry_test_cb.setChecked(
+            bool(getattr(mc, "disable_warning_expiry_for_test", False))
+        )
+        self.disable_warning_expiry_test_cb.setToolTip(
+            "开启后：不按发震时间丢弃入队预警；缓冲区也不按发震时间或「展示满最少展示时长」移出预警。"
+            "便于用历史报文测试告警条与分阶段文案。"
+        )
+        self.disable_warning_expiry_test_cb.setStyleSheet("font-size: 16px;")
+        block_alert_update_layout.addWidget(self.disable_warning_expiry_test_cb)
         alert_hint = QLabel("保存后立即生效，无需重启。")
         alert_hint.setStyleSheet(STYLE_HINT)
         block_alert_update_layout.addWidget(alert_hint)
@@ -900,6 +903,28 @@ class SettingsWindow(QDialog):
         group_alert_layout.setContentsMargins(10, 12, 10, 10)
         group_alert_layout.addWidget(block_alert_update)
         main_layout.addWidget(group_alert)
+        main_layout.addSpacing(10)
+
+        # ---------- 自动更新 ----------
+        group_auto_update = QGroupBox("自动更新")
+        group_auto_update.setStyleSheet(STYLE_GROUPBOX)
+        block_auto_update = QWidget()
+        block_auto_update_layout = QVBoxLayout(block_auto_update)
+        block_auto_update_layout.setContentsMargins(0, 0, 0, 0)
+        block_auto_update_layout.setSpacing(6)
+        auto_update_startup_cb = QCheckBox("启动时检查更新")
+        auto_update_startup_cb.setChecked(
+            getattr(self.config.gui_config, 'auto_update_check_on_startup', True)
+        )
+        auto_update_startup_cb.setStyleSheet("font-size: 16px;")
+        block_auto_update_layout.addWidget(auto_update_startup_cb)
+        check_update_btn = QPushButton("检查更新")
+        check_update_btn.clicked.connect(self._on_auto_update_check_clicked)
+        block_auto_update_layout.addWidget(check_update_btn)
+        group_auto_update_layout = QVBoxLayout(group_auto_update)
+        group_auto_update_layout.setContentsMargins(10, 12, 10, 10)
+        group_auto_update_layout.addWidget(block_auto_update)
+        main_layout.addWidget(group_auto_update)
         main_layout.addSpacing(10)
 
         # ---------- 5. 非预警时显示 ----------
@@ -969,6 +994,7 @@ class SettingsWindow(QDialog):
             'watermark_font_auto': watermark_font_auto_cb,
             'watermark_font_size': watermark_font_size_spin,
             'watermark_position': watermark_pos_combo,
+            'auto_update_check_on_startup': auto_update_startup_cb,
             'warning_min_display_seconds': warning_min_display_spin,
             'custom_text_return_seconds': custom_text_return_minutes_spin,
         }
@@ -1014,20 +1040,16 @@ class SettingsWindow(QDialog):
         fs_all_label = QLabel("Fan Studio")
         fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
         gw_layout.addWidget(fs_all_label)
-        fs_hint = QLabel("始终使用 All 数据源。勾选对应子源则从 All 中解析，不勾选则不解析。")
+        fs_hint = QLabel(
+            "勾选「Fan Studio」后连接；下方子源决定解析范围"
+        )
         fs_hint.setStyleSheet(STYLE_HINT)
         fs_hint.setWordWrap(True)
         gw_layout.addWidget(fs_hint)
-        fs_conn_row = QHBoxLayout()
-        fs_conn_row.addWidget(QLabel("Fan Studio 连接状态："))
-        fs_conn_status = QLabel("未连接")
-        fs_conn_status.setStyleSheet(STYLE_STATUS_NEUTRAL)
-        fs_conn_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        fs_conn_status.setToolTip("连接状态：已连接 / 未连接 / 已断开 / 重连中")
-        self.source_status_labels[self.all_source_url] = fs_conn_status
-        fs_conn_row.addStretch()
-        fs_conn_row.addWidget(fs_conn_status)
-        gw_layout.addLayout(fs_conn_row)
+        self.fanstudio_all_connect_cb = QCheckBox("Fan Studio")
+        self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
+        self.fanstudio_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        gw_layout.addWidget(self.fanstudio_all_connect_cb)
         # CENC 烈度速报（cenc-ir）为 Fan Studio 独立连接，不在 /all 通道中
         self._add_source_checkbox(
             group_warning,
@@ -1085,21 +1107,17 @@ class SettingsWindow(QDialog):
         ga_layout = QVBoxLayout(group_ali)
         ga_layout.setContentsMargins(12, 14, 12, 12)
         ga_layout.setSpacing(12)
-        ali_hint = QLabel("始终连接；下方勾选则解析对应子源，不勾选则不解析。")
+        ali_hint = QLabel(
+            "勾选「Wolfx」后连接"
+        )
         ali_hint.setStyleSheet(STYLE_HINT)
         ali_hint.setWordWrap(True)
         ga_layout.addWidget(ali_hint)
         wolfx_url = "wss://ws-api.wolfx.jp/all_eew"
-        wx_conn_row = QHBoxLayout()
-        wx_conn_row.addWidget(QLabel("Wolfx 连接状态："))
-        wx_conn_status = QLabel("未连接")
-        wx_conn_status.setStyleSheet(STYLE_STATUS_NEUTRAL)
-        wx_conn_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        wx_conn_status.setToolTip("连接状态：已连接 / 未连接 / 已断开 / 重连中")
-        self.source_status_labels[wolfx_url] = wx_conn_status
-        wx_conn_row.addStretch()
-        wx_conn_row.addWidget(wx_conn_status)
-        ga_layout.addLayout(wx_conn_row)
+        self.wolfx_all_connect_cb = QCheckBox("Wolfx")
+        self.wolfx_all_connect_cb.setChecked(self.config.enabled_sources.get(wolfx_url, True))
+        self.wolfx_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        ga_layout.addWidget(self.wolfx_all_connect_cb)
 
         def _wolfx_row(parse_key: str, title: str):
             cb = QCheckBox(title)
@@ -1137,28 +1155,21 @@ class SettingsWindow(QDialog):
         gh_layout = QVBoxLayout(group_history)
         gh_layout.setContentsMargins(12, 14, 12, 12)
         gh_layout.setSpacing(12)
-        p2p_hint = QLabel("日本气象厅地震情报 / 海啸")
+        p2p_hint = QLabel(
+            "勾选「P2PQuake」将同时启用 HTTP 数据Get与 WebSocket；"
+            "取消勾选则两者均关闭。下方两项决定地震情報 / 津波予報是否参与解析。"
+        )
         p2p_hint.setStyleSheet(STYLE_HINT)
         p2p_hint.setWordWrap(True)
         gh_layout.addWidget(p2p_hint)
-        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+        p2p_wss_url = P2PQUAKE_WSS_URL
         p2p_status_col_w = 88
-        # 与 Wolfx / Fan Studio 一致：先「连接状态：」+ 右侧状态列，避免与左侧长文案挤在一行难以对齐
-        p2p_conn_row = QHBoxLayout()
-        p2p_conn_row.addWidget(QLabel("P2PQuake 连接状态："))
-        p2p_conn_row.addStretch()
-        p2p_conn_status = QLabel("未连接")
-        p2p_conn_status.setMinimumWidth(p2p_status_col_w)
-        p2p_conn_status.setFixedWidth(p2p_status_col_w)
-        p2p_conn_status.setStyleSheet(STYLE_STATUS_NEUTRAL)
-        p2p_conn_status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        p2p_conn_status.setToolTip("连接状态：已连接 / 未连接 / 已断开 / 重连中")
-        self.source_status_labels[p2p_wss_url] = p2p_conn_status
-        p2p_conn_row.addWidget(p2p_conn_status)
-        gh_layout.addLayout(p2p_conn_row)
+        self.p2pquake_connect_cb = QCheckBox("P2PQuake（HTTP + WebSocket）")
+        self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
+        self.p2pquake_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        gh_layout.addWidget(self.p2pquake_connect_cb)
         if p2p_wss_url not in self.individual_source_urls:
             self.individual_source_urls.append(p2p_wss_url)
-        # P2PQuake：HTTP 仍一次聚合拉取；551/552 解析与入队分别由下列复选框控制（与 WSS 一致读配置）
         def _p2p_parse_row(parse_key: str, title: str) -> QCheckBox:
             cb = QCheckBox(title)
             cb.setChecked(getattr(self.config.message_config, parse_key, True))
@@ -1242,18 +1253,8 @@ class SettingsWindow(QDialog):
         
         # 不再需要互斥逻辑，因为all数据源已隐藏，所有单项数据源都从all数据源解析
         
-        # 添加到父布局，并附带连接状态标签
         if isinstance(parent.layout(), QVBoxLayout):
-            row_layout = QHBoxLayout()
-            row_layout.addWidget(checkbox)
-            row_layout.addStretch()
-            status_label = QLabel("未连接")
-            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
-            status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            status_label.setToolTip("连接状态：已连接 / 未连接 / 已断开 / 重连中")
-            self.source_status_labels[url] = status_label
-            row_layout.addWidget(status_label)
-            parent.layout().addLayout(row_layout)
+            parent.layout().addWidget(checkbox)
 
     def _toggle_select_all(self):
         """切换全选/恢复默认选中状态"""
@@ -1271,6 +1272,12 @@ class SettingsWindow(QDialog):
     
     def _select_all_sources(self):
         """全选所有数据源"""
+        if hasattr(self, "fanstudio_all_connect_cb"):
+            self.fanstudio_all_connect_cb.setChecked(True)
+        if hasattr(self, "wolfx_all_connect_cb"):
+            self.wolfx_all_connect_cb.setChecked(True)
+        if hasattr(self, "p2pquake_connect_cb"):
+            self.p2pquake_connect_cb.setChecked(True)
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:  # 跳过空URL和all数据源
                 checkbox.setChecked(True)
@@ -1310,10 +1317,17 @@ class SettingsWindow(QDialog):
     
     def _restore_default_selection(self):
         """恢复默认选中状态"""
-        # 先全部取消选中
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:
-                checkbox.setChecked(False)
+                checkbox.setChecked(bool(self.config.enabled_sources.get(url, False)))
+        if hasattr(self, "fanstudio_all_connect_cb"):
+            self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
+        if hasattr(self, "wolfx_all_connect_cb"):
+            self.wolfx_all_connect_cb.setChecked(
+                self.config.enabled_sources.get("wss://ws-api.wolfx.jp/all_eew", True)
+            )
+        if hasattr(self, "p2pquake_connect_cb"):
+            self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
         # Fan Studio 细粒度子源：恢复为默认勾选
         for attr, cfg_name in [
             ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
@@ -1415,140 +1429,239 @@ class SettingsWindow(QDialog):
         sep1.setStyleSheet("color: #E0E0E0;")
         main_layout.addWidget(sep1)
 
-        # ---------- 2. 中国预估烈度与有感预警 ----------
-        sec_int_title = QLabel("预估烈度与全屏闪烁（未经测试，谨慎使用！）")
-        sec_int_title.setStyleSheet(STYLE_SECTION_TITLE)
-        main_layout.addWidget(sec_int_title)
+        # ---------- 2. 预估烈度与告警闪烁（卡片布局，与「外观与显示」QGroupBox 风格一致） ----------
+        ac = self.config.alert_config
+        group_alert = QGroupBox("预估烈度与告警闪烁")
+        group_alert.setStyleSheet(STYLE_GROUPBOX)
+        alert_outer = QVBoxLayout(group_alert)
+        alert_outer.setContentsMargins(10, 12, 10, 10)
+        alert_outer.setSpacing(4)
 
-        china_intensity_checkbox = QCheckBox("启用预估烈度算法（根据所在地估算有感/强有感）")
-        china_intensity_checkbox.setChecked(getattr(self.config.message_config, 'enable_china_intensity', False))
-        china_intensity_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(china_intensity_checkbox)
-
-        felt_alert_checkbox = QCheckBox("有感地震触发红色全屏闪烁提示")
-        felt_alert_checkbox.setChecked(getattr(self.config.message_config, 'enable_felt_alert_flow', False))
-        felt_alert_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(felt_alert_checkbox)
-
-        strong_felt_alert_checkbox = QCheckBox("强有感地震触发红色全屏闪烁提示")
-        strong_felt_alert_checkbox.setChecked(getattr(self.config.message_config, 'enable_strong_felt_alert_flow', True))
-        strong_felt_alert_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(strong_felt_alert_checkbox)
-
-        intensity_hint = QLabel(
-            "说明：收到地震预警时，按所在地预估烈度（0–12 度）判断：0–5 为有感，6–12 为强有感，"
-            "并按下方设置触发红色全屏闪烁+白字提示。"
+        alert_enable_cb = QCheckBox("烈度估算与闪烁提示")
+        alert_enable_cb.setChecked(bool(getattr(ac, 'enabled', False)))
+        alert_enable_cb.setStyleSheet("font-size: 16px;")
+        alert_enable_cb.setToolTip(
+            "收到地震预警时，按所在地估算的预估烈度（0–12 度）触发分阶段告警；"
+            "较低阈值仅显示警示文本，较高阈值时字幕条左侧「地震预警」标识会按设定闪烁。"
         )
-        intensity_hint.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
-        intensity_hint.setWordWrap(True)
-        main_layout.addWidget(intensity_hint)
+        alert_outer.addWidget(alert_enable_cb)
 
-        # 所在地经纬度与名称（纵向分行布局）
-        site_block = QWidget()
-        site_block_layout = QVBoxLayout(site_block)
-        site_block_layout.setContentsMargins(0, 0, 0, 0)
-        site_block_layout.setSpacing(6)
+        def _subhead(text: str) -> QLabel:
+            h = QLabel(text)
+            h.setStyleSheet(STYLE_CARD_SUBHEAD)
+            return h
 
-        row_lat = QHBoxLayout()
-        row_lat.setSpacing(8)
-        site_lat_label = QLabel("所在地纬度 (°)：")
+        _al_w = 108  # 单列纵向：标签列略宽以免截断
+
+        def _v_field_grid() -> QGridLayout:
+            g = QGridLayout()
+            g.setContentsMargins(0, 0, 0, 0)
+            g.setHorizontalSpacing(8)
+            g.setVerticalSpacing(5)
+            g.setColumnStretch(2, 1)
+            return g
+
+        def _v_add_row(g: QGridLayout, row: int, lbl: QLabel, w: QWidget) -> None:
+            lbl.setMinimumWidth(_al_w)
+            g.addWidget(lbl, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            g.addWidget(w, row, 1, Qt.AlignLeft)
+
+        # —— 触发条件（单列纵向，避免超出窗口宽度） ——
+        alert_outer.addWidget(_subhead("触发条件"))
+        grid_trigger = _v_field_grid()
+
+        alert_th_label = QLabel("最低触发阈值")
+        alert_th_label.setStyleSheet(STYLE_LABEL)
+        alert_th_label.setToolTip("达到该烈度时仅显示警示文本（不闪烁左侧标识）。")
+        min_alert_spin = QSpinBox()
+        min_alert_spin.setRange(1, 12)
+        min_alert_spin.setValue(int(getattr(ac, 'min_intensity_to_alert', 4)))
+        min_alert_spin.setSuffix(" 度")
+        min_alert_spin.setFixedWidth(88)
+        min_alert_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_trigger, 0, alert_th_label, min_alert_spin)
+
+        flash_th_label = QLabel("左侧闪烁阈值")
+        flash_th_label.setStyleSheet(STYLE_LABEL)
+        flash_th_label.setToolTip("达到该烈度时，左侧「地震预警」条按设定频率闪烁。")
+        min_flash_spin = QSpinBox()
+        min_flash_spin.setRange(1, 12)
+        min_flash_spin.setValue(int(getattr(ac, 'min_intensity_to_flash', 6)))
+        min_flash_spin.setSuffix(" 度")
+        min_flash_spin.setFixedWidth(88)
+        min_flash_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_trigger, 1, flash_th_label, min_flash_spin)
+
+        min_mag_label = QLabel("最低震级")
+        min_mag_label.setStyleSheet(STYLE_LABEL)
+        min_mag_spin = QDoubleSpinBox()
+        min_mag_spin.setRange(0.0, 10.0)
+        min_mag_spin.setDecimals(1)
+        min_mag_spin.setSingleStep(0.1)
+        min_mag_spin.setValue(float(getattr(ac, 'min_magnitude', 3.0)))
+        min_mag_spin.setSuffix(" M")
+        min_mag_spin.setFixedWidth(100)
+        min_mag_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_trigger, 2, min_mag_label, min_mag_spin)
+
+        max_dist_label = QLabel("最大震中距")
+        max_dist_label.setStyleSheet(STYLE_LABEL)
+        max_dist_spin = QDoubleSpinBox()
+        max_dist_spin.setRange(0.0, 5000.0)
+        max_dist_spin.setDecimals(0)
+        max_dist_spin.setSingleStep(50.0)
+        max_dist_spin.setValue(float(getattr(ac, 'max_distance_km', 800.0)))
+        max_dist_spin.setSuffix(" km")
+        max_dist_spin.setFixedWidth(110)
+        max_dist_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_trigger, 3, max_dist_label, max_dist_spin)
+
+        alert_outer.addLayout(grid_trigger)
+
+        def _ensure_threshold_order():
+            try:
+                if min_flash_spin.value() < min_alert_spin.value():
+                    min_flash_spin.setValue(min_alert_spin.value())
+            except Exception:
+                pass
+
+        min_alert_spin.valueChanged.connect(lambda _v: _ensure_threshold_order())
+        min_flash_spin.valueChanged.connect(lambda _v: _ensure_threshold_order())
+
+        # —— 站点位置 ——
+        alert_outer.addWidget(_subhead("用户位置"))
+        grid_site = _v_field_grid()
+        site_lat_label = QLabel("纬度")
         site_lat_label.setStyleSheet(STYLE_LABEL)
-        row_lat.addWidget(site_lat_label)
         site_lat_spin = QDoubleSpinBox()
         site_lat_spin.setRange(-90.0, 90.0)
         site_lat_spin.setDecimals(3)
         site_lat_spin.setSingleStep(0.1)
-        site_lat_spin.setValue(getattr(self.config.gui_config, 'site_lat', 0.0))
+        site_lat_spin.setValue(float(getattr(ac, 'site_lat', 0.0)))
+        site_lat_spin.setSuffix(" °")
         site_lat_spin.setStyleSheet(STYLE_SPINBOX)
         site_lat_spin.setFixedWidth(120)
-        row_lat.addWidget(site_lat_spin)
-        row_lat.addStretch()
-        site_block_layout.addLayout(row_lat)
+        site_lat_label.setToolTip("经纬度均接近 0 时不参与烈度估算（避免误触发）。")
+        site_lat_spin.setToolTip(site_lat_label.toolTip())
+        _v_add_row(grid_site, 0, site_lat_label, site_lat_spin)
 
-        row_lon = QHBoxLayout()
-        row_lon.setSpacing(8)
-        site_lon_label = QLabel("经度 (°)：")
+        site_lon_label = QLabel("经度")
         site_lon_label.setStyleSheet(STYLE_LABEL)
-        row_lon.addWidget(site_lon_label)
         site_lon_spin = QDoubleSpinBox()
         site_lon_spin.setRange(-180.0, 180.0)
         site_lon_spin.setDecimals(3)
         site_lon_spin.setSingleStep(0.1)
-        site_lon_spin.setValue(getattr(self.config.gui_config, 'site_lon', 0.0))
+        site_lon_spin.setValue(float(getattr(ac, 'site_lon', 0.0)))
+        site_lon_spin.setSuffix(" °")
         site_lon_spin.setStyleSheet(STYLE_SPINBOX)
         site_lon_spin.setFixedWidth(120)
-        row_lon.addWidget(site_lon_spin)
-        row_lon.addStretch()
-        site_block_layout.addLayout(row_lon)
+        site_lon_label.setToolTip(site_lat_label.toolTip())
+        site_lon_spin.setToolTip(site_lat_label.toolTip())
+        _v_add_row(grid_site, 1, site_lon_label, site_lon_spin)
 
-        row_name = QHBoxLayout()
-        row_name.setSpacing(8)
-        site_name_label = QLabel("地点名称（可选）：")
+        site_name_label = QLabel("用户地点")
         site_name_label.setStyleSheet(STYLE_LABEL)
-        row_name.addWidget(site_name_label)
+        site_name_label.setToolTip("用户自定义地点")
         site_name_entry = QLineEdit()
-        site_name_entry.setPlaceholderText("例如：成都市、广州市，可为空")
-        site_name_entry.setText(getattr(self.config.gui_config, 'site_region_name', '') or '')
+        site_name_entry.setPlaceholderText("银川市")
+        site_name_entry.setText(getattr(ac, 'site_region_name', '') or '')
         site_name_entry.setStyleSheet(STYLE_LINEEDIT)
-        site_name_entry.setMaximumWidth(260)
-        row_name.addWidget(site_name_entry)
-        row_name.addStretch()
-        site_block_layout.addLayout(row_name)
+        site_name_label.setMinimumWidth(_al_w)
+        grid_site.addWidget(site_name_label, 2, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid_site.addWidget(site_name_entry, 2, 1, 1, 2)
 
-        main_layout.addWidget(site_block)
+        alert_outer.addLayout(grid_site)
 
-        # 阶段时长与闪烁间隔（每行一项）
-        duration_block = QWidget()
-        duration_block_layout = QVBoxLayout(duration_block)
-        duration_block_layout.setContentsMargins(0, 0, 0, 0)
-        duration_block_layout.setSpacing(6)
+        # —— 闪烁与颜色 ——
+        alert_outer.addWidget(_subhead("闪烁与颜色"))
+        grid_flash = _v_field_grid()
 
-        def _add_duration_row(label_text: str, spin_box: QSpinBox) -> None:
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet(STYLE_LABEL)
-            lbl.setMinimumWidth(170)
-            row.addWidget(lbl)
-            spin_box.setFixedWidth(80)
-            spin_box.setStyleSheet(STYLE_SPINBOX)
-            row.addWidget(spin_box)
-            row.addStretch()
-            duration_block_layout.addLayout(row)
+        dur_label = QLabel("闪烁时长")
+        dur_label.setStyleSheet(STYLE_LABEL)
+        dur_label.setToolTip(
+            "进入正式预警条文前，提示的总时长（1～300 秒）；"
+            "左侧「地震预警」条在该时长内按「闪烁间隔」明灭（达到闪烁阈值时）。"
+        )
+        flash_duration_spin = QSpinBox()
+        flash_duration_spin.setRange(1, 300)
+        flash_duration_spin.setValue(
+            min(300, max(1, int(getattr(ac, "flash_duration_ms", 4000) / 1000)))
+        )
+        flash_duration_spin.setSuffix(" 秒")
+        flash_duration_spin.setFixedWidth(100)
+        flash_duration_spin.setStyleSheet(STYLE_SPINBOX)
+        flash_duration_spin.setToolTip(dur_label.toolTip())
+        _v_add_row(grid_flash, 0, dur_label, flash_duration_spin)
 
-        felt_stage1_spin = QSpinBox()
-        felt_stage1_spin.setRange(1, 10)
-        felt_stage1_spin.setValue(max(1, int(getattr(self.config.message_config, 'felt_alert_stage1_ms', 1500) / 1000)))
-
-        felt_stage2_spin = QSpinBox()
-        felt_stage2_spin.setRange(1, 10)
-        felt_stage2_spin.setValue(max(1, int(getattr(self.config.message_config, 'felt_alert_stage2_ms', 2500) / 1000)))
-
-        strong_stage1_spin = QSpinBox()
-        strong_stage1_spin.setRange(1, 10)
-        strong_stage1_spin.setValue(max(1, int(getattr(self.config.message_config, 'strong_felt_stage1_ms', 1500) / 1000)))
-
-        strong_stage2_spin = QSpinBox()
-        strong_stage2_spin.setRange(1, 10)
-        strong_stage2_spin.setValue(max(1, int(getattr(self.config.message_config, 'strong_felt_stage2_ms', 2500) / 1000)))
-
+        int_label = QLabel("闪烁间隔")
+        int_label.setStyleSheet(STYLE_LABEL)
         flash_interval_spin = QSpinBox()
         flash_interval_spin.setRange(50, 2000)
         flash_interval_spin.setSingleStep(50)
-        flash_interval_spin.setValue(max(50, int(getattr(self.config.message_config, 'alert_flash_interval_ms', 400))))
+        flash_interval_spin.setValue(int(getattr(ac, 'flash_interval_ms', 400)))
+        flash_interval_spin.setSuffix(" 毫秒")
+        flash_interval_spin.setFixedWidth(120)
+        flash_interval_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_flash, 1, int_label, flash_interval_spin)
 
-        _add_duration_row("有感阶段一时长 (秒)：", felt_stage1_spin)
-        _add_duration_row("有感阶段二时长 (秒)：", felt_stage2_spin)
-        _add_duration_row("强有感阶段一时长 (秒)：", strong_stage1_spin)
-        _add_duration_row("强有感阶段二时长 (秒)：", strong_stage2_spin)
-        _add_duration_row("红色背景闪烁间隔 (毫秒)：", flash_interval_spin)
+        color_label = QLabel("告警色")
+        color_label.setStyleSheet(STYLE_LABEL)
+        color_label.setToolTip("点击选择左侧标识闪烁颜色。")
+        flash_color_btn = QPushButton(getattr(ac, 'flash_color', '#FF0000'))
+        flash_color_btn.setFixedWidth(140)
+        flash_color_btn.setCursor(Qt.PointingHandCursor)
+        flash_color_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {getattr(ac, 'flash_color', '#FF0000')}; "
+            f"color: white; padding: 6px 10px; border-radius: 4px; font-size: 14px; border: 1px solid #CCCCCC; }}"
+        )
 
-        main_layout.addWidget(duration_block)
+        def _on_pick_color():
+            cur = QColor(flash_color_btn.text() or '#FF0000')
+            picked = QColorDialog.getColor(cur, self, "选择闪烁颜色")
+            if picked.isValid():
+                hex_color = picked.name(QColor.HexRgb).upper()
+                flash_color_btn.setText(hex_color)
+                flash_color_btn.setStyleSheet(
+                    f"QPushButton {{ background-color: {hex_color}; "
+                    f"color: white; padding: 6px 10px; border-radius: 4px; font-size: 14px; border: 1px solid #CCCCCC; }}"
+                )
+        flash_color_btn.clicked.connect(_on_pick_color)
+        _v_add_row(grid_flash, 2, color_label, flash_color_btn)
 
-        intensity_hint2 = QLabel("提示：经纬度为空时不会计算烈度。")
-        intensity_hint2.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
-        intensity_hint2.setWordWrap(True)
-        main_layout.addWidget(intensity_hint2)
+        alert_outer.addLayout(grid_flash)
+
+        flash_stage3_cb = QCheckBox("阶段三正式条文时左侧条继续闪烁")
+        flash_stage3_cb.setChecked(
+            bool(getattr(ac, "flash_during_stage3_warning", True))
+        )
+        flash_stage3_cb.setStyleSheet("font-size: 16px;")
+        flash_stage3_cb.setToolTip(
+            "显示正式预警条文（阶段三）时，左侧「地震预警」条仍闪烁；本条滚完一遍后自动关闭。"
+        )
+        alert_outer.addWidget(flash_stage3_cb)
+
+        # —— 模拟 ——
+        alert_outer.addWidget(_subhead("模拟"))
+        grid_sim = _v_field_grid()
+        sim_lbl = QLabel("模拟烈度")
+        sim_lbl.setStyleSheet(STYLE_LABEL)
+        sim_int_spin = QSpinBox()
+        sim_int_spin.setRange(1, 12)
+        sim_int_spin.setValue(6)
+        sim_int_spin.setSuffix(" 度")
+        sim_int_spin.setFixedWidth(88)
+        sim_int_spin.setStyleSheet(STYLE_SPINBOX)
+        _v_add_row(grid_sim, 0, sim_lbl, sim_int_spin)
+        sim_btn = QPushButton("立即模拟告警")
+        sim_btn.setStyleSheet(STYLE_SELECT_ALL_BTN)
+        sim_btn.setCursor(Qt.PointingHandCursor)
+        sim_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        sim_btn.clicked.connect(lambda: self._simulate_alert(int(sim_int_spin.value())))
+        grid_sim.addWidget(sim_btn, 1, 0, 1, 3)
+        alert_outer.addLayout(grid_sim)
+
+        main_layout.addWidget(group_alert)
+        main_layout.addSpacing(10)
 
         # 分隔线
         sep1b = QFrame()
@@ -1718,21 +1831,93 @@ class SettingsWindow(QDialog):
             'volcano_trans_checkbox': volcano_trans_checkbox,
             'baidu_app_id_entry': baidu_app_id_entry,
             'baidu_secret_entry': baidu_secret_entry,
-            'china_intensity_checkbox': china_intensity_checkbox,
-            'felt_alert_checkbox': felt_alert_checkbox,
-            'strong_felt_alert_checkbox': strong_felt_alert_checkbox,
+            'alert_enable_cb': alert_enable_cb,
+            'min_alert_spin': min_alert_spin,
+            'min_flash_spin': min_flash_spin,
+            'min_mag_spin': min_mag_spin,
+            'max_dist_spin': max_dist_spin,
             'site_lat_spin': site_lat_spin,
             'site_lon_spin': site_lon_spin,
             'site_name_entry': site_name_entry,
-            'felt_stage1_spin': felt_stage1_spin,
-            'felt_stage2_spin': felt_stage2_spin,
-            'strong_stage1_spin': strong_stage1_spin,
-            'strong_stage2_spin': strong_stage2_spin,
+            'flash_duration_spin': flash_duration_spin,
             'flash_interval_spin': flash_interval_spin,
+            'flash_color_btn': flash_color_btn,
+            'flash_stage3_cb': flash_stage3_cb,
         }
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "高级")
-    
+
+    def _save_alert_settings(self) -> None:
+        """从 advanced_vars 把告警面板控件值收回 ``Config.alert_config``。"""
+        adv = getattr(self, 'advanced_vars', {}) or {}
+        ac = self.config.alert_config
+
+        cb = adv.get('alert_enable_cb')
+        if cb is not None:
+            ac.enabled = bool(cb.isChecked())
+
+        spin = adv.get('min_alert_spin')
+        if spin is not None:
+            ac.min_intensity_to_alert = int(spin.value())
+        spin = adv.get('min_flash_spin')
+        if spin is not None:
+            ac.min_intensity_to_flash = int(spin.value())
+        spin = adv.get('min_mag_spin')
+        if spin is not None:
+            ac.min_magnitude = float(spin.value())
+        spin = adv.get('max_dist_spin')
+        if spin is not None:
+            ac.max_distance_km = float(spin.value())
+
+        spin = adv.get('site_lat_spin')
+        if spin is not None:
+            ac.site_lat = float(spin.value())
+        spin = adv.get('site_lon_spin')
+        if spin is not None:
+            ac.site_lon = float(spin.value())
+        entry = adv.get('site_name_entry')
+        if entry is not None:
+            ac.site_region_name = (entry.text() or "").strip()
+
+        spin = adv.get('flash_duration_spin')
+        if spin is not None:
+            ac.flash_duration_ms = min(300000, max(500, int(spin.value()) * 1000))
+        spin = adv.get('flash_interval_spin')
+        if spin is not None:
+            ac.flash_interval_ms = max(50, min(2000, int(spin.value())))
+
+        btn = adv.get('flash_color_btn')
+        if btn is not None:
+            text = (btn.text() or "").strip()
+            if text:
+                ac.flash_color = text
+        cb3 = adv.get('flash_stage3_cb')
+        if cb3 is not None:
+            ac.flash_during_stage3_warning = bool(cb3.isChecked())
+
+        ac.validate()
+
+    def _simulate_alert(self, intensity_level: int) -> None:
+        """通过主窗口接口发起一次模拟告警。"""
+        try:
+            mw = self.parent()
+            if mw is None or not hasattr(mw, 'trigger_alert_simulation'):
+                QMessageBox.information(
+                    self,
+                    "提示",
+                    "未找到主窗口接口，无法模拟告警。",
+                )
+                return
+            try:
+                self._save_alert_settings()
+            except Exception:
+                pass
+            ac = self.config.alert_config
+            place = (ac.site_region_name or "测试地点").strip() or "测试地点"
+            mw.trigger_alert_simulation(int(intensity_level), place_name=place, magnitude=5.0)
+        except Exception as e:
+            logger.error(f"模拟告警失败: {e}")
+
     def _save_advanced_settings(self, fix_checkbox, output_file_checkbox, clear_log_checkbox,
                                   split_date_checkbox, log_size_spinbox, custom_url_entry,
                                   volcano_trans_checkbox=None, baidu_app_id_entry=None, baidu_secret_entry=None,
@@ -1762,64 +1947,10 @@ class SettingsWindow(QDialog):
             self.config.log_config.max_log_size = log_size_spinbox.value()
             self.config.custom_data_source_url = custom_url
 
-            # 中国烈度与有感预警设置（从 advanced_vars 中读取，以便统一管理）
             try:
-                adv = getattr(self, 'advanced_vars', {}) or {}
-                china_intensity_cb = adv.get('china_intensity_checkbox')
-                felt_alert_cb = adv.get('felt_alert_checkbox')
-                strong_alert_cb = adv.get('strong_felt_alert_checkbox')
-                site_lat_spin = adv.get('site_lat_spin')
-                site_lon_spin = adv.get('site_lon_spin')
-                site_name_entry = adv.get('site_name_entry')
-                felt_stage1_spin = adv.get('felt_stage1_spin')
-                felt_stage2_spin = adv.get('felt_stage2_spin')
-                strong_stage1_spin = adv.get('strong_stage1_spin')
-                strong_stage2_spin = adv.get('strong_stage2_spin')
-                flash_interval_spin = adv.get('flash_interval_spin')
-
-                mc = self.config.message_config
-                gc = self.config.gui_config
-
-                if china_intensity_cb is not None:
-                    mc.enable_china_intensity = china_intensity_cb.isChecked()
-                if felt_alert_cb is not None:
-                    mc.enable_felt_alert_flow = felt_alert_cb.isChecked()
-                if strong_alert_cb is not None:
-                    mc.enable_strong_felt_alert_flow = strong_alert_cb.isChecked()
-
-                if site_lat_spin is not None:
-                    gc.site_lat = float(site_lat_spin.value())
-                if site_lon_spin is not None:
-                    gc.site_lon = float(site_lon_spin.value())
-                if site_name_entry is not None:
-                    gc.site_region_name = (site_name_entry.text() or "").strip()
-
-                def _sec_to_ms(spin, default_ms):
-                    if spin is None:
-                        return default_ms
-                    try:
-                        sec = max(1, int(spin.value()))
-                    except Exception:
-                        sec = max(1, int(default_ms / 1000))
-                    return max(100, sec * 1000)
-
-                mc.felt_alert_stage1_ms = _sec_to_ms(felt_stage1_spin, getattr(mc, 'felt_alert_stage1_ms', 1500))
-                mc.felt_alert_stage2_ms = _sec_to_ms(felt_stage2_spin, getattr(mc, 'felt_alert_stage2_ms', 2500))
-                mc.strong_felt_stage1_ms = _sec_to_ms(
-                    strong_stage1_spin, getattr(mc, 'strong_felt_stage1_ms', 1500)
-                )
-                mc.strong_felt_stage2_ms = _sec_to_ms(
-                    strong_stage2_spin, getattr(mc, 'strong_felt_stage2_ms', 2500)
-                )
-
-                if flash_interval_spin is not None:
-                    try:
-                        interval = int(flash_interval_spin.value())
-                    except Exception:
-                        interval = 400
-                    mc.alert_flash_interval_ms = max(50, min(2000, interval))
+                self._save_alert_settings()
             except Exception as e_int:
-                logger.debug(f"保存中国烈度与有感预警设置失败（忽略，不影响其他配置）: {e_int}")
+                logger.debug(f"保存告警设置失败（忽略，不影响其他配置）: {e_int}")
             if not self.config.log_config.validate():
                 QMessageBox.warning(self, "警告", "日志配置验证失败，请检查设置")
                 return False
@@ -1862,6 +1993,7 @@ class SettingsWindow(QDialog):
         version_label = QLabel(f"版本 v{APP_VERSION} Beta测试版")
         version_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FF6600; padding-bottom: 6px;")
         layout.addWidget(version_label)
+
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.HLine)
         sep1.setFrameShadow(QFrame.Sunken)
@@ -1974,6 +2106,197 @@ class SettingsWindow(QDialog):
 
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "关于")
+
+    def _create_data_source_status_tab(self):
+        """创建数据源状态标签页（紧凑：数据源 + 状态 + 分钟条）"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("QScrollArea { border: none; background: #F7F8FA; }")
+        container = QWidget()
+        container.setStyleSheet("background: #F7F8FA;")
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
+        layout.setSpacing(12)
+
+        title = QLabel("服务器状态")
+        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #1F1F1F;")
+        layout.addWidget(title)
+
+        hint = QLabel("每分钟记录一次状态，最多显示最近60分钟")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size: 13px; color: #6D7580;")
+        layout.addWidget(hint)
+
+        self.data_source_status_cards_container = QWidget()
+        self.data_source_status_cards_layout = QVBoxLayout(self.data_source_status_cards_container)
+        self.data_source_status_cards_layout.setContentsMargins(0, 6, 0, 0)
+        self.data_source_status_cards_layout.setSpacing(10)
+        layout.addWidget(self.data_source_status_cards_container)
+        layout.addStretch()
+
+        scroll_area.setWidget(container)
+        self.notebook.addTab(scroll_area, "数据源状态")
+
+    def _format_ts(self, value: Any) -> str:
+        try:
+            ts = float(value or 0)
+            if ts <= 0:
+                return "-"
+            return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return "-"
+
+    def _status_chip_text(self, connection_state: str, heartbeat_state: str) -> str:
+        if connection_state == "connected" and heartbeat_state != "timeout":
+            return "正常"
+        if connection_state == "connecting":
+            return "重连中"
+        if heartbeat_state == "timeout":
+            return "心跳超时"
+        if connection_state == "disconnected":
+            return "断开"
+        return "未连接"
+
+    def _status_chip_color(self, connection_state: str, heartbeat_state: str) -> str:
+        if connection_state == "connected" and heartbeat_state != "timeout":
+            return "#2ECC71"
+        if connection_state == "connecting":
+            return "#F39C12"
+        if heartbeat_state == "timeout":
+            return "#E74C3C"
+        if connection_state == "disconnected":
+            return "#E74C3C"
+        return "#95A5A6"
+
+    def _build_health_strip_widget(self, minute_bars: List[bool]) -> QWidget:
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+        total = 60
+        # 未产生历史记录的分钟显示为灰色；仅真实异常分钟显示红色
+        padded: List[Any] = ([None] * max(0, total - len(minute_bars))) + minute_bars[-total:]
+        for ok in padded:
+            bar = QFrame(strip)
+            bar.setFixedSize(5, 14)
+            if ok is True:
+                bar.setStyleSheet("background: #2ECC71; border-radius: 2px;")
+            elif ok is False:
+                bar.setStyleSheet("background: #E74C3C; border-radius: 2px;")
+            else:
+                bar.setStyleSheet("background: #DDE2E6; border-radius: 2px;")
+            row.addWidget(bar)
+        row.addStretch()
+        return strip
+
+    def _compact_source_label(self, url: str, source_name: str) -> str:
+        low = (url or "").lower()
+        if "api.p2pquake.net" in low:
+            return "P2PQuake"
+        if "ws-api.wolfx.jp/all_eew" in low:
+            return "Wolfx all"
+        if "ws-api.wolfx.jp/cwa_eew" in low:
+            return "Wolfx cwa"
+        if "ws.fanstudio.tech/all" in low:
+            return "Fan Studio"
+        if "ws.fanstudio.tech/cenc-ir" in low:
+            return "Fan Studio Cenc-IR"
+        return source_name or url
+
+    def _compute_health_percent(self, connection_state: str, heartbeat_state: str, timeout_count: int, heartbeat_age: Any, timeout_threshold: float) -> float:
+        if connection_state == "disconnected":
+            return 0.0
+        if connection_state == "connecting":
+            return 50.0
+        if connection_state != "connected":
+            return 30.0
+        base = 100.0
+        if heartbeat_state == "timeout":
+            base -= 35.0
+        if timeout_count > 0:
+            base -= min(25.0, timeout_count * 2.0)
+        try:
+            if heartbeat_age is not None and timeout_threshold > 0:
+                age = float(heartbeat_age)
+                ratio = max(0.0, min(1.0, age / timeout_threshold))
+                # 心跳越新分越高
+                base -= ratio * 8.0
+        except Exception:
+            pass
+        return max(0.0, min(100.0, base))
+
+    def _clear_status_cards(self):
+        if not hasattr(self, "data_source_status_cards_layout"):
+            return
+        while self.data_source_status_cards_layout.count():
+            item = self.data_source_status_cards_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _update_data_source_health_table(self):
+        """刷新「数据源状态」页卡片列表。"""
+        try:
+            if not hasattr(self, "data_source_status_cards_layout") or self.data_source_status_cards_layout is None:
+                return
+            parent = self.parent()
+            status_map: Dict[str, str] = {}
+            health_map: Dict[str, Dict[str, Any]] = {}
+            if parent is not None and hasattr(parent, "get_data_source_status"):
+                status_map = parent.get_data_source_status() or {}
+            if parent is not None and hasattr(parent, "get_data_source_health_snapshot"):
+                health_map = parent.get_data_source_health_snapshot() or {}
+
+            urls = sorted(set(list(status_map.keys()) + list(health_map.keys())))
+            self._clear_status_cards()
+            if not urls:
+                empty_label = QLabel("暂无可展示的数据源状态")
+                empty_label.setStyleSheet("font-size: 15px; color: #8A8A8A; padding: 8px 0;")
+                self.data_source_status_cards_layout.addWidget(empty_label)
+                return
+
+            for url in urls:
+                health = health_map.get(url, {})
+                source_name = self.config.get_source_name(url) or url
+                compact_name = self._compact_source_label(url, source_name)
+                connection_state = health.get("connection_state") or status_map.get(url, "unconnected")
+                heartbeat_state = health.get("heartbeat_state", "unknown")
+
+                status_text = self._status_chip_text(connection_state, heartbeat_state)
+                status_color = self._status_chip_color(connection_state, heartbeat_state)
+                is_ok = connection_state == "connected" and heartbeat_state != "timeout"
+                minute_key = datetime.datetime.now().strftime("%Y%m%d%H%M")
+                if self._status_last_minute_key.get(url) != minute_key:
+                    history = self._status_minute_bars.setdefault(url, [])
+                    history.append(bool(is_ok))
+                    if len(history) > 60:
+                        del history[:-60]
+                    self._status_last_minute_key[url] = minute_key
+                history = self._status_minute_bars.get(url, [])
+
+                card = QFrame()
+                card.setStyleSheet("QFrame { background: white; border: 1px solid #ECECEC; border-radius: 8px; }")
+                card_layout = QVBoxLayout(card)
+                card_layout.setContentsMargins(10, 8, 10, 8)
+                card_layout.setSpacing(6)
+
+                top_row = QHBoxLayout()
+                left_title = QLabel(compact_name)
+                left_title.setStyleSheet("font-size: 14px; color: #2F2F2F; font-weight: bold;")
+                top_row.addWidget(left_title)
+                top_row.addStretch()
+                right_status = QLabel(f"状态：{status_text}")
+                right_status.setStyleSheet(f"font-size: 13px; color: {status_color};")
+                top_row.addWidget(right_status)
+                card_layout.addLayout(top_row)
+                card_layout.addWidget(self._build_health_strip_widget(history))
+
+                self.data_source_status_cards_layout.addWidget(card)
+
+            self.data_source_status_cards_layout.addStretch()
+        except Exception as e:
+            logger.debug(f"更新数据源健康状态失败: {e}")
     
     def _create_bottom_buttons(self, main_layout):
         """创建底部按钮区域"""
@@ -2118,6 +2441,15 @@ class SettingsWindow(QDialog):
         except Exception as e:
             logger.error(f"保存设置失败: {e}")
             QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+
+    def _on_auto_update_check_clicked(self):
+        try:
+            from utils.app_update_check import run_interactive_update_check
+            if run_interactive_update_check(self, self.config):
+                os._exit(0)
+        except Exception as e:
+            logger.error(f"检查更新失败: {e}")
+            QMessageBox.critical(self, "错误", str(e))
     
     def _save_data_source_settings(self, silent_restart=False):
         """保存数据源设置。silent_restart=True 时不弹「已保存」提示，直接重启。"""
@@ -2127,8 +2459,8 @@ class SettingsWindow(QDialog):
             
             all_url = self.all_source_url
             
-            # 始终启用 all 数据源（已移除 Fan Studio 单项，仅 all）
-            self.config.enabled_sources[all_url] = True
+            if hasattr(self, "fanstudio_all_connect_cb"):
+                self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
             
             # Fan Studio All：保留旧总开关配置字段（若无对应控件则保持原值），主要用于兼容旧逻辑
             # 当前公开版 UI 不再暴露这两个复选框。
@@ -2183,15 +2515,16 @@ class SettingsWindow(QDialog):
             for url, checkbox in self.source_vars.items():
                 if url and url != all_url:
                     self.config.enabled_sources[url] = checkbox.isChecked()
-            # P2PQuake WSS：无主行复选框，是否启用由「地震情報」「津波予報」至少勾选一项决定
-            p2pquake_wss_url = "wss://api.p2pquake.net/v2/ws"
-            if hasattr(self, "p2pquake_parse_551_cb") and hasattr(self, "p2pquake_parse_552_cb"):
-                self.config.enabled_sources[p2pquake_wss_url] = (
-                    self.p2pquake_parse_551_cb.isChecked()
-                    or self.p2pquake_parse_552_cb.isChecked()
+            p2pquake_wss_url = P2PQUAKE_WSS_URL
+            if hasattr(self, "p2pquake_connect_cb"):
+                p2p_master = self.p2pquake_connect_cb.isChecked()
+                self.config.enabled_sources[p2pquake_wss_url] = p2p_master
+                for http_u in P2PQUAKE_HTTP_SOURCE_KEYS:
+                    self.config.enabled_sources[http_u] = p2p_master
+            if hasattr(self, "wolfx_all_connect_cb"):
+                self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = (
+                    self.wolfx_all_connect_cb.isChecked()
                 )
-            # Wolfx All 始终启用
-            self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
             removed_ws = self.config._enforce_public_ws_sources()
             if removed_ws:
                 logger.info(f"设置保存时已移除非公开 WebSocket 数据源: {removed_ws}")
@@ -2488,7 +2821,7 @@ class SettingsWindow(QDialog):
     def _save_appearance_settings(self):
         """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
         try:
-            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position', 'warning_min_display_seconds', 'custom_text_return_seconds')
+            display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position', 'auto_update_check_on_startup', 'warning_min_display_seconds', 'custom_text_return_seconds')
             render_required = ('cpu_radio', 'opengl_radio')
             if not all(k in self.display_vars for k in display_required) or not all(k in self.render_vars for k in render_required):
                 logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
@@ -2528,6 +2861,7 @@ class SettingsWindow(QDialog):
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
             self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked() if 'always_on_top' in self.display_vars else False
+            self.config.gui_config.auto_update_check_on_startup = self.display_vars['auto_update_check_on_startup'].isChecked()
             self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or "").strip()
             wm_ff_widget = self.display_vars.get('watermark_font_family')
             if wm_ff_widget is not None:
@@ -2556,6 +2890,11 @@ class SettingsWindow(QDialog):
             self.config.message_config.show_one_alert_per_received = self.show_one_alert_per_received_checkbox.isChecked()
             self.config.message_config.force_single_line = self.force_single_line_checkbox.isChecked()
             self.config.message_config.custom_text_return_after_warning = self.custom_text_return_after_warning_checkbox.isChecked()
+            cb_exp = getattr(self, "disable_warning_expiry_test_cb", None)
+            if cb_exp is not None:
+                self.config.message_config.disable_warning_expiry_for_test = (
+                    cb_exp.isChecked()
+                )
             wm_min_spin = self.display_vars.get('warning_min_display_seconds')
             if wm_min_spin is not None:
                 self.config.message_config.warning_min_display_seconds = max(60, wm_min_spin.value() * 60)

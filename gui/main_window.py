@@ -7,16 +7,18 @@
 
 import sys
 import os
+import math
 import asyncio
 import threading
 import time
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QApplication, QMessageBox,
     QDialog, QLabel, QScrollArea, QPushButton, QFrame
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
-from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent
-from typing import Dict, Any, Optional, Union
+from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent, QColor, QPalette
+from typing import Dict, Any, Optional, Union, List, Tuple
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,8 +31,13 @@ from utils import timezone_utils
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
+from .alert import AlertController, build_warning_hint_segments
+from utils.intensity import IntensityResult, compute_for_parsed
 
 logger = get_logger()
+
+# 正文可写「预估本地烈度」的 provider：须与公式计算一致（见 utils/intensity/sceew_local 等）；合成占位不写正文
+_FORMULA_INTENSITY_PROVIDER_NAMES = frozenset({"sceew_local", "china_empirical"})
 
 
 class MainWindow(QMainWindow):
@@ -67,15 +74,17 @@ class MainWindow(QMainWindow):
         self._custom_text_return_at: Optional[float] = None
         self._post_warning_showing_report: bool = False
 
-        # 有感/强有感红屏提示流程状态
-        self._alert_sequence_running: bool = False
-        self._last_alert_event_id: Optional[str] = None
+        # 告警序列控制器（懒初始化：在 _setup_ui 创建 scrolling_text 后注入）
+        self.alert_controller: Optional[AlertController] = None
         
         # 设置窗口引用
         self.settings_window = None
+        self.history_window = None
         
         # 右键菜单缓存（避免每次右键点击时重新创建）
         self.context_menu = None
+        # 事件历史：按 source_name 仅保留最新一条
+        self._event_history: Dict[str, Dict[str, Any]] = {}
         
         # 窗口大小变更防抖：拖拽结束后再写入配置
         self._resize_save_timer = QTimer(self)
@@ -181,6 +190,16 @@ class MainWindow(QMainWindow):
                 scroll_widget = self.scrolling_text
                 layout.addWidget(self.scrolling_text)
             self.scrolling_text.scroll_completed.connect(self._on_scroll_completed)
+
+            try:
+                self.alert_controller = AlertController(
+                    scrolling_text=self.scrolling_text,
+                    config=self.config,
+                    parent=self,
+                )
+            except Exception as e:
+                logger.error(f"创建 AlertController 失败: {e}")
+                self.alert_controller = None
             
             # 设置样式
             self.setStyleSheet(f"background-color: {self.config.gui_config.bg_color};")
@@ -316,6 +335,9 @@ class MainWindow(QMainWindow):
         """)
         
         # 设置菜单项
+        history_action = self.context_menu.addAction("事件历史")
+        history_action.triggered.connect(self._open_history_window)
+
         settings_action = self.context_menu.addAction("设置")
         settings_action.triggered.connect(self._open_settings)
 
@@ -454,16 +476,35 @@ class MainWindow(QMainWindow):
             last_seen = getattr(self.config.gui_config, 'last_seen_changelog_version', '') or ''
             if last_seen == APP_VERSION:
                 return
-            dlg = QDialog(None)
+            dlg = QDialog(self)
             dlg.setWindowTitle("更新说明")
-            dlg.setWindowModality(Qt.ApplicationModal)
+            # 使用窗口级模态，避免无父级 ApplicationModal 造成主窗口标题栏按钮灰化不可点
+            dlg.setWindowModality(Qt.WindowModal)
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
             dlg.setMinimumWidth(300)
+            # 主窗口常为纯黑背景；本对话框在 Win 深色主题下易继承深色 Window/Base 调色板，标题区会呈黑底。
+            _cl_bg = QColor("#f5f5f5")
+            _pal = dlg.palette()
+            _pal.setColor(QPalette.Window, _cl_bg)
+            _pal.setColor(QPalette.Base, _cl_bg)
+            _pal.setColor(QPalette.WindowText, QColor("#333333"))
+            _pal.setColor(QPalette.Text, QColor("#333333"))
+            dlg.setPalette(_pal)
+            dlg.setAutoFillBackground(True)
+            dlg.setStyleSheet(
+                "QDialog { background-color: #f5f5f5; }"
+                "QDialog QLabel { background-color: #f5f5f5; }"
+                "QDialog QFrame { background-color: #f5f5f5; }"
+                "QScrollArea { background-color: #f5f5f5; border: none; }"
+            )
             layout = QVBoxLayout(dlg)
             layout.setSpacing(8)
             layout.setContentsMargins(18, 12, 18, 8)
             title = QLabel(f"更新说明  v{APP_VERSION}")
-            title.setStyleSheet("font-size: 16px; font-weight: bold; color: #333333; padding-bottom: 4px;")
+            title.setStyleSheet(
+                "font-size: 16px; font-weight: bold; color: #333333; padding-bottom: 4px; "
+                "background-color: #f5f5f5;"
+            )
             layout.addWidget(title)
             line = QFrame()
             line.setFrameShape(QFrame.HLine)
@@ -476,7 +517,7 @@ class MainWindow(QMainWindow):
             declaration.setTextInteractionFlags(Qt.TextSelectableByMouse)
             declaration.setStyleSheet(
                 "color: #B22222; font-weight: bold; font-size: 15px; "
-                "line-height: 1.4; padding: 4px 0 0 0; margin: 0; background: transparent;"
+                "line-height: 1.4; padding: 4px 0 0 0; margin: 0; background-color: #f5f5f5;"
             )
             layout.addWidget(declaration)
             sep_line = QFrame()
@@ -487,11 +528,10 @@ class MainWindow(QMainWindow):
             scroll = QScrollArea()
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             scroll.setFrameShape(QFrame.NoFrame)
-            scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
             content = QLabel(CHANGELOG_TEXT)
             content.setWordWrap(True)
             content.setStyleSheet(
-                "font-size: 13px; color: #333333; line-height: 1.5; padding: 4px 0; background: transparent;"
+                "font-size: 13px; color: #333333; line-height: 1.5; padding: 4px 0; background-color: #f5f5f5;"
             )
             content.setTextInteractionFlags(Qt.TextSelectableByMouse)
             scroll.setWidget(content)
@@ -510,8 +550,6 @@ class MainWindow(QMainWindow):
             btn_layout.addWidget(ok_btn)
             btn_layout.addStretch()
             layout.addLayout(btn_layout)
-            dlg.setStyleSheet("QDialog { background-color: #f5f5f5; }")
-
             # 按 CHANGELOG 正文与屏幕可用区域动态决定宽度与滚动区高度（避免短文大块空白、长文撑爆屏幕）
             geo = QApplication.desktop().availableGeometry(dlg)
             dialog_w = min(620, max(320, geo.width() - 48))
@@ -561,13 +599,296 @@ class MainWindow(QMainWindow):
                 logger.error(f"打开设置窗口失败: {e}")
         # 不再额外延迟，直接在下一事件循环打开（菜单点击已结束）
         QTimer.singleShot(0, _do_open_settings)
-    
+
+    def _open_history_window(self):
+        """打开事件历史窗口（复用实例，减少重复创建开销）"""
+        def _do_open_history():
+            try:
+                from .history_window import HistoryWindow
+                if self.history_window is None:
+                    self.history_window = HistoryWindow(self)
+                self.history_window.refresh_history()
+                self.history_window.show()
+                self.history_window.raise_()
+                self.history_window.activateWindow()
+            except Exception as e:
+                logger.error(f"打开事件历史窗口失败: {e}")
+        QTimer.singleShot(0, _do_open_history)
+
+    def _record_event_history(
+        self,
+        source_name: str,
+        message_type: str,
+        message_text: str,
+        parsed_data: Dict[str, Any],
+    ):
+        """记录事件历史（每个 source_name 仅保留最新一条）"""
+        try:
+            source_display = self._get_history_source_display(source_name, parsed_data)
+            type_display = self._get_history_type_display(message_type)
+            content_display = self._build_history_content(parsed_data, message_text)
+            raw_time = (
+                parsed_data.get("shock_time")
+                or parsed_data.get("time")
+                or parsed_data.get("created_at")
+                or ""
+            )
+            normalized_event_time = self._normalize_history_event_time(raw_time)
+            self._event_history[source_name] = {
+                "source_name": source_display,
+                "message_type": type_display,
+                "message_text": content_display,
+                "event_time": normalized_event_time,
+                "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "event_id": parsed_data.get("event_id", ""),
+            }
+        except Exception as e:
+            logger.debug(f"写入事件历史失败: {e}")
+
+    def _normalize_history_event_time(self, raw_time: Any) -> str:
+        """统一历史事件时间格式为 YYYY-MM-DD HH:MM:SS。"""
+        if raw_time is None:
+            return "-"
+        text = str(raw_time).strip()
+        if not text:
+            return "-"
+
+        # 先做常见格式归一化
+        text = text.replace("/", "-")
+
+        # 兼容仅到分钟的格式：YYYY-MM-DD HH:MM
+        if len(text) == 16:
+            text = f"{text}:00"
+
+        candidate_formats = (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M",
+        )
+
+        for fmt in candidate_formats:
+            try:
+                dt = datetime.strptime(text, fmt)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+
+        # 兜底：提取日期时间片段并再次尝试
+        import re
+        m = re.search(r"(\d{4}-\d{1,2}-\d{1,2})\s+(\d{1,2}:\d{1,2}(?::\d{1,2})?)", text)
+        if m:
+            normalized = f"{m.group(1)} {m.group(2)}"
+            if len(m.group(2)) == 5:
+                normalized += ":00"
+            try:
+                dt = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+
+        # 无法识别时返回原文本，避免丢信息
+        return text
+
+    def _get_history_type_display(self, message_type: str) -> str:
+        """历史窗口类型展示：仅「预警 / 速报」"""
+        if str(message_type).lower() == "warning":
+            return "预警"
+        return "速报"
+
+    def _get_history_source_display(self, source_name: str, parsed_data: Dict[str, Any]) -> str:
+        """历史窗口数据源名称优先展示中文机构名。"""
+        org = str(parsed_data.get("organization", "") or "").strip()
+        source_type = str(parsed_data.get("source_type", "") or "").strip().lower()
+
+        # 先按 source_type 做强约束归一化（避免 organization 混入“第X报/正式测定”等附加文本）
+        if source_type == "tsunami":
+            return "自然资源部海啸预警中心"
+        if source_type == "cenc":
+            return "中国地震台网"
+        if source_type == "cenc-ir":
+            return "中国地震台网烈度速报"
+
+        # 再按 organization 文本做归一化
+        if org:
+            org_low = org.lower()
+            if "海啸预警" in org:
+                return "自然资源部海啸预警中心"
+            if "烈度速报" in org:
+                return "中国地震台网烈度速报"
+            if ("地震台网" in org) or ("自动测定" in org_low) or ("正式测定" in org_low):
+                return "中国地震台网"
+            # 去除常见附加描述后再展示，尽量保持“仅机构名”
+            org = org.replace("自动测定/正式测定", "").replace("自动测定", "").replace("正式测定", "").strip(" -_/")
+            if org:
+                return org
+
+        source_map = {
+            "ningxia": "宁夏地震局",
+            "emsc": "欧洲地中海地震中心",
+            "beijing": "北京市地震局",
+            "shanxi": "山西省地震局",
+            "guangxi": "广西壮族自治区地震局",
+            "yunnan": "云南省地震局",
+            "cenc": "中国地震台网",
+            "cenc-ir": "中国地震台网烈度速报",
+            "hko": "香港天文台",
+            "usgs": "美国地质调查局",
+            "gfz": "德国地学研究中心",
+            "bcsf": "法国中央地震研究所",
+            "usp": "巴西圣保罗大学",
+            "kma": "韩国气象厅",
+            "cwa": "台湾省气象署",
+            "weatheralarm": "中国气象局",
+            "海啸信息": "自然资源部海啸预警中心",
+            "p2pquake": "日本气象厅",
+            "p2pquake_tsunami": "日本气象厅",
+        }
+        if source_name in source_map:
+            return source_map[source_name]
+        return source_name
+
+    def _build_history_content(self, parsed_data: Dict[str, Any], fallback_text: str) -> str:
+        """历史窗口内容展示：地点、震级、震源深度。"""
+        place = str(parsed_data.get("place_name", "") or "").strip()
+        magnitude = parsed_data.get("magnitude")
+        depth = parsed_data.get("depth")
+        parts = []
+        if place:
+            parts.append(f"地点：{place}")
+        if magnitude not in (None, ""):
+            parts.append(f"震级：{magnitude}")
+        if depth not in (None, ""):
+            parts.append(f"震源深度：{depth}公里")
+        if parts:
+            return "，".join(parts)
+        return fallback_text
+
+    def get_event_history_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """获取事件历史快照（供历史窗口展示）"""
+        return {k: dict(v) for k, v in self._event_history.items()}
+
+    def clear_event_history(self):
+        """清空事件历史缓存"""
+        self._event_history.clear()
+
+    def _synthetic_intensity_for_expiry_test(self, parsed_data: Dict[str, Any]) -> IntensityResult:
+        """
+        「关闭预警有效期」测试时：若无法估算站点烈度（常见为未设站点经纬），
+        仍提供一条合成结果以触发告警序列（含左侧「地震预警」条闪烁）。
+        数值取 max(闪烁阈值+1, 8) 仅为满足告警门槛，并非物理上的「本地烈度」，
+        与报文中的「预估最大烈度」无关；正文不追加该数值。
+        """
+        ac = self.config.alert_config
+        try:
+            mag = parsed_data.get("magnitude")
+            mag_f = float(mag) if mag is not None and mag != "" else 5.0
+        except (TypeError, ValueError):
+            mag_f = 5.0
+        flash_th = int(getattr(ac, "min_intensity_to_flash", 6) or 6)
+        level = max(flash_th + 1, 8)
+        try:
+            elat = float(parsed_data.get("latitude") or parsed_data.get("epiLat") or 0.0)
+        except (TypeError, ValueError):
+            elat = 0.0
+        try:
+            elon = float(parsed_data.get("longitude") or parsed_data.get("epiLon") or 0.0)
+        except (TypeError, ValueError):
+            elon = 0.0
+        return IntensityResult(
+            intensity=float(level),
+            intensity_level=int(level),
+            distance_km=80.0,
+            magnitude=mag_f,
+            provider_name="expiry_test_synthetic",
+            epi_lat=elat,
+            epi_lon=elon,
+        )
+
+    def _synthetic_intensity_when_no_site_estimate(
+        self, parsed_data: Dict[str, Any]
+    ) -> Optional[IntensityResult]:
+        """
+        已开启告警但未设站点经纬、无法估算烈度时：仍触发告警序列（白字阶段一/二），
+        供所有预警数据源使用；日台提示语由报文震度判断，不依赖本合成整数烈度。
+        """
+        ac = self.config.alert_config
+        if ac is None or not getattr(ac, "enabled", False):
+            return None
+        try:
+            mag_f = float(parsed_data.get("magnitude") or 0)
+        except (TypeError, ValueError):
+            mag_f = 0.0
+        min_m = float(getattr(ac, "min_magnitude", 3.0) or 3.0)
+        mag_f = max(mag_f, min_m)
+        flash_th = int(getattr(ac, "min_intensity_to_flash", 6) or 6)
+        alert_th = int(getattr(ac, "min_intensity_to_alert", 4) or 4)
+        level = min(12, max(flash_th, alert_th))
+        try:
+            elat = float(parsed_data.get("latitude") or parsed_data.get("epiLat") or 0.0)
+        except (TypeError, ValueError):
+            elat = 0.0
+        try:
+            elon = float(parsed_data.get("longitude") or parsed_data.get("epiLon") or 0.0)
+        except (TypeError, ValueError):
+            elon = 0.0
+        max_d = float(getattr(ac, "max_distance_km", 800.0) or 800.0)
+        dist_km = 50.0 if max_d <= 0 else min(50.0, max_d * 0.5)
+        return IntensityResult(
+            intensity=float(level),
+            intensity_level=int(level),
+            distance_km=dist_km,
+            magnitude=mag_f,
+            provider_name="no_site_fallback",
+            epi_lat=elat,
+            epi_lon=elon,
+        )
+
+    def _warning_display_segments(
+        self, message: MessageItem
+    ) -> Optional[List[Tuple[str, str]]]:
+        """预警轮播/切屏时复用与告警序列阶段一/二一致的白字安全提示分段。"""
+        try:
+            if str(getattr(message, "message_type", "") or "") != "warning":
+                return None
+            if not getattr(self.config.alert_config, "enabled", False):
+                return None
+            pd = getattr(message, "parsed_data", None) or {}
+            ir = pd.get("intensity_result")
+            if ir is None:
+                ir = compute_for_parsed(pd, self.config.alert_config)
+            return build_warning_hint_segments(
+                self.config, pd, ir, message.text or ""
+            )
+        except Exception as e:
+            logger.debug(f"_warning_display_segments 失败: {e}")
+            return None
+
+    def _append_trusted_site_intensity_clause(
+        self, text: str, ir: Optional[IntensityResult]
+    ) -> str:
+        """仅在 intensity_result 来自公式 provider 时追加「预估本地烈度」；合成/模拟等不写正文。"""
+        if ir is None:
+            return text or ""
+        try:
+            val = float(getattr(ir, "intensity", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return text or ""
+        if not math.isfinite(val):
+            return text or ""
+        pn = str(getattr(ir, "provider_name", "") or "")
+        if pn not in _FORMULA_INTENSITY_PROVIDER_NAMES:
+            return (text or "").rstrip()
+        base = (text or "").rstrip()
+        clause = f"；预估本地烈度{val:.1f}"
+        ref_clause = f"；预估本地烈度{val:.1f}"
+        if clause in base or ref_clause in base:
+            return base
+        return base + clause
+
     def _on_scroll_completed(self):
         """滚动完成回调"""
         try:
-            # 有感/强有感红屏流程由定时器驱动，不在此处切换消息
-            if getattr(self, "_alert_sequence_running", False):
-                return
             # 优先检查是否有预警消息
             if self.warning_buffer.size() > 0:
                 # 清理过期的预警消息
@@ -638,15 +959,23 @@ class MainWindow(QMainWindow):
                     
                     # 预警消息在当前滚动完成后进入播放
                     prev_msg = self._current_displaying_message
-                    success = self.scrolling_text.update_text(
-                        next_msg.text,
-                        next_msg.color,
-                        next_msg.image_path,
+                    warn_seg = (
+                        self._warning_display_segments(next_msg)
+                        if next_msg.message_type == "warning"
+                        else None
+                    )
+                    ut_kw: Dict[str, Any] = dict(
+                        image_path=next_msg.image_path,
                         force=False,
                         message_type=next_msg.message_type,
                         parsed_data=next_msg.parsed_data,
-                        fallback_image_path=getattr(next_msg, 'fallback_image_path', None),
-                        image_after_text=getattr(next_msg, 'image_after_text', False)
+                        fallback_image_path=getattr(next_msg, "fallback_image_path", None),
+                        image_after_text=getattr(next_msg, "image_after_text", False),
+                    )
+                    if warn_seg:
+                        ut_kw["text_color_segments"] = warn_seg
+                    success = self.scrolling_text.update_text(
+                        next_msg.text, next_msg.color, **ut_kw
                     )
                     if success:
                         self.current_display_type = 'warning'
@@ -880,18 +1209,38 @@ class MainWindow(QMainWindow):
                     else:
                         self.warning_buffer._current_displaying_msg_id = id(message)
                         logger.debug(f"预警消息未在缓冲区中找到，已更新当前显示消息ID: 数据源={message.source}")
-                
+
+                # 告警序列（阶段一/二/三）由 AlertController 驱动字幕；勿在此处 update_text 覆盖，否则会盖住分段提示且左侧闪烁看似「不工作」
+                if self.alert_controller is not None and self.alert_controller.alert_sequence_active():
+                    self.current_display_type = 'warning'
+                    self._current_displaying_message = message
+                    if message.message_type == 'warning' and message.first_displayed_at is None:
+                        message.first_displayed_at = time.time()
+                    self._pending_update_message = None
+                    logger.debug(
+                        "【当前显示-预警】告警序列进行中，已同步缓冲区状态，跳过重复 update_text"
+                    )
+                    return
+
                 # force_interrupt：立即打断当前滚动；否则等待当前滚动结束
                 prev_msg = self._current_displaying_message
-                success = self.scrolling_text.update_text(
-                    message.text,
-                    message.color,
-                    message.image_path,
+                warn_seg = (
+                    self._warning_display_segments(message)
+                    if message.message_type == "warning"
+                    else None
+                )
+                ut_kw2: Dict[str, Any] = dict(
+                    image_path=message.image_path,
                     force=force_interrupt,
                     message_type=message.message_type,
                     parsed_data=message.parsed_data,
-                    fallback_image_path=getattr(message, 'fallback_image_path', None),
-                    image_after_text=getattr(message, 'image_after_text', False)
+                    fallback_image_path=getattr(message, "fallback_image_path", None),
+                    image_after_text=getattr(message, "image_after_text", False),
+                )
+                if warn_seg:
+                    ut_kw2["text_color_segments"] = warn_seg
+                success = self.scrolling_text.update_text(
+                    message.text, message.color, **ut_kw2
                 )
                 if success:
                     self.current_display_type = 'warning'
@@ -1100,141 +1449,118 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"展示取消报通知失败: {e}")
 
-    def _begin_background_flashing(self):
-        """开启滚动区域红色背景闪烁。"""
-        try:
-            if not self.scrolling_text:
-                return
-            mc = self.config.message_config
-            interval = getattr(mc, 'alert_flash_interval_ms', 400)
-            self.scrolling_text.set_alert_flashing(True, color="#FF0000", interval_ms=interval)
-        except Exception as e:
-            logger.debug(f"开启红屏闪烁失败: {e}")
-
-    def _end_background_flashing(self):
-        """关闭滚动区域红色背景闪烁。"""
-        try:
-            if not self.scrolling_text:
-                return
-            self.scrolling_text.set_alert_flashing(False)
-        except Exception as e:
-            logger.debug(f"关闭红屏闪烁失败: {e}")
-
-    def _start_perceived_alert_sequence(
+    def trigger_alert_simulation(
         self,
-        level: str,
         intensity_level: int,
-        parsed_data: Dict[str, Any],
-        formatted_text: str,
+        place_name: str = "测试地点",
+        magnitude: float = 5.0,
     ) -> None:
         """
-        有感/强有感红屏多阶段流程：
-        1) 发生有感/强有感地震
-        2) 现在发生有感/强有感地震 + 警示语
-        3) 预警实际内容
+        模拟触发告警（供设置面板调试用）。
+
+        构造一份最小化的 ``parsed_data`` + ``IntensityResult``，直接走 controller 的
+        阈值/序列流程；不会污染消息缓冲区。
         """
         try:
-            event_id = parsed_data.get('event_id') or ''
-            if event_id and event_id == self._last_alert_event_id:
-                # 同一事件只触发一次完整流程
+            if self.alert_controller is None:
+                logger.warning("AlertController 未初始化，无法模拟告警")
                 return
-
-            self._last_alert_event_id = event_id or self._last_alert_event_id
-            self._alert_sequence_running = True
-
-            # 开启背景红屏闪烁（仅阶段 1 和 2）
-            self._begin_background_flashing()
-
-            mc = self.config.message_config
-            if level == 'strong_felt':
-                stage1_ms = getattr(mc, 'strong_felt_stage1_ms', 1500)
-                stage2_ms = getattr(mc, 'strong_felt_stage2_ms', 2500)
-                title_word = "强有感"
-            else:
-                stage1_ms = getattr(mc, 'felt_alert_stage1_ms', 1500)
-                stage2_ms = getattr(mc, 'felt_alert_stage2_ms', 2500)
-                title_word = "有感"
-
-            stage1_ms = max(200, int(stage1_ms or 1500))
-            stage2_ms = max(200, int(stage2_ms or 2500))
-
-            place = parsed_data.get('place_name') or parsed_data.get('placeName') or ""
-            mag = parsed_data.get('magnitude')
-            try:
-                mag_val = float(mag) if mag is not None else None
-            except Exception:
-                mag_val = None
-
-            base_prefix = ""
-            if place and mag_val is not None:
-                base_prefix = f"{place}附近发生{mag_val:.1f}级地震，"
-            elif place:
-                base_prefix = f"{place}附近发生地震，"
-
-            stage1_text = f"发生{title_word}地震"
-            stage2_text = f"现在发生{title_word}地震，请保持冷静，注意保护头部并远离掉落物。"
-            if base_prefix:
-                stage1_text = base_prefix + stage1_text
-                stage2_text = base_prefix + stage2_text
-
-            # 为避免旧定时器干扰，通过捕获本次 event_id 进行校验
-            current_event_id = self._last_alert_event_id
-
-            def _run_stage1():
-                if not self._alert_sequence_running or current_event_id != self._last_alert_event_id:
-                    return
-                if not self.scrolling_text:
-                    return
-                self.scrolling_text.update_text(
-                    stage1_text,
-                    "#FFFFFF",
-                    None,
-                    force=True,
-                    message_type='warning',
-                    parsed_data=None,
-                )
-
-            def _run_stage2():
-                if not self._alert_sequence_running or current_event_id != self._last_alert_event_id:
-                    return
-                if not self.scrolling_text:
-                    return
-                self.scrolling_text.update_text(
-                    stage2_text,
-                    "#FFFFFF",
-                    None,
-                    force=True,
-                    message_type='warning',
-                    parsed_data=None,
-                )
-
-            def _run_stage3():
-                if not self._alert_sequence_running or current_event_id != self._last_alert_event_id:
-                    return
-                if not self.scrolling_text:
-                    return
-                # 阶段三回到正常预警内容，并关闭红屏闪烁
-                self._end_background_flashing()
-                self.scrolling_text.update_text(
-                    formatted_text,
-                    self.config.message_config.warning_color,
-                    None,
-                    force=True,
-                    message_type='warning',
-                    parsed_data=None,
-                )
-                self._alert_sequence_running = False
-
-            QTimer.singleShot(0, _run_stage1)
-            QTimer.singleShot(stage1_ms, _run_stage2)
-            QTimer.singleShot(stage1_ms + stage2_ms, _run_stage3)
+            from utils.intensity import IntensityResult
+            ac = self.config.alert_config
+            site_lat = float(getattr(ac, "site_lat", 0.0) or 0.0)
+            site_lon = float(getattr(ac, "site_lon", 0.0) or 0.0)
+            parsed = {
+                "type": "warning",
+                "source_type": "cea",
+                "place_name": place_name,
+                "magnitude": magnitude,
+                "latitude": site_lat,
+                "longitude": site_lon,
+                "depth": 10.0,
+                "event_id": f"sim-{int(time.time() * 1000)}",
+            }
+            ir = IntensityResult(
+                intensity=float(intensity_level),
+                intensity_level=int(intensity_level),
+                distance_km=1.0,
+                magnitude=float(magnitude),
+                provider_name="simulator",
+                epi_lat=site_lat,
+                epi_lon=site_lon,
+            )
+            text = f"【模拟】{place_name}附近发生{magnitude:.1f}级地震（烈度 {intensity_level} 度）"
+            color = self.config.message_config.warning_color
+            self.alert_controller.trigger(parsed, ir, text, color)
         except Exception as e:
-            logger.error(f"启动有感/强有感红屏流程失败: {e}")
-            self._alert_sequence_running = False
-            self._end_background_flashing()
+            logger.error(f"模拟告警触发失败: {e}")
+
+    def _should_process_data_source_message(self, source_name: str, parsed_data: Dict[str, Any]) -> bool:
+        """
+        关闭某路数据源后，仍可能从 Fan Studio /all 等聚合通道收到同源 update。
+        在此按 enabled_sources / 解析开关丢弃，避免继续格式化并入队滚动。
+        """
+        es = self.config.enabled_sources
+        mc = self.config.message_config
+        st = (parsed_data.get("source_type") or "").strip()
+        sn = source_name or ""
+
+        base_domain = "fanstudio.tech"
+        fanstudio_all_url = f"wss://ws.{base_domain}/all"
+        if not es.get(fanstudio_all_url, True):
+            if parsed_data.get("fanstudio") and st != "cenc-ir" and source_name != "cenc-ir":
+                logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
+                return False
+
+        wolfx_all_url = "wss://ws-api.wolfx.jp/all_eew"
+        wolfx_cwa_url = "wss://ws-api.wolfx.jp/cwa_eew"
+        if st == "wolfx_cwa_eew" or source_name == "wolfx_cwa_eew":
+            if not es.get(wolfx_cwa_url, False):
+                logger.debug("已忽略消息：Wolfx 台湾中央气象署专线已关闭")
+                return False
+        elif st.startswith("wolfx_") or sn.startswith("wolfx_"):
+            if not es.get(wolfx_all_url, True):
+                logger.debug("已忽略消息：Wolfx 聚合预警（all_eew）已关闭")
+                return False
+
+        cenc_ir_url = "wss://ws.fanstudio.tech/cenc-ir"
+        if source_name == "cenc-ir" or st == "cenc-ir":
+            if not es.get(cenc_ir_url, True):
+                logger.debug("已忽略消息：烈度速报（cenc-ir）数据源已在设置中关闭")
+                return False
+
+        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+        p2p_on = es.get(p2p_wss_url, False)
+        is_p2p_eq = (
+            source_name in ("p2pquake", "p2pquake_ws")
+            or st == "p2pquake"
+            or ("api.p2pquake.net" in sn and "551" in sn)
+            or ("api.p2pquake.net" in sn and "/v2/history" in sn)
+        )
+        is_p2p_tsu = (
+            source_name == "p2pquake_tsunami"
+            or st == "p2pquake_tsunami"
+            or ("api.p2pquake.net" in sn and "tsunami" in sn.lower())
+        )
+        if is_p2p_eq or is_p2p_tsu:
+            # 与设置页一致：总开关关闭则既不连 WSS 也不投递 HTTP 拉取结果
+            if not p2p_on:
+                logger.debug("已忽略消息：P2PQuake 总开关已关闭")
+                return False
+            if is_p2p_eq and not getattr(mc, "p2pquake_parse_551", True):
+                logger.debug("已忽略消息：P2PQuake 地震情報解析已关闭")
+                return False
+            if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
+                logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
+                return False
+
+        return True
+
     def on_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
         """接收到消息时的回调"""
         try:
+            if not self._should_process_data_source_message(source_name, parsed_data):
+                return
+
             message_type = parsed_data.get('type', 'report')
             
             # JMA数据特殊处理：检查cancel字段，如果为true，从预警缓冲区移除对应事件
@@ -1288,6 +1614,11 @@ class MainWindow(QMainWindow):
                                     else:
                                         logger.info("JMA取消报：已有内容正在滚动，新预警将在当前滚动结束后显示")
                     
+                    try:
+                        if self.alert_controller is not None:
+                            self.alert_controller.cancel(event_id)
+                    except Exception:
+                        pass
                     # cancel消息不进入队列，直接返回
                     return
             
@@ -1311,21 +1642,54 @@ class MainWindow(QMainWindow):
                 # 只有在消息未过期但格式化失败时才记录警告
                 logger.warning(f"[{source_name}] 消息格式化失败: {message_type}, parsed_data keys: {list(parsed_data.keys())}")
                 return
+
+            warning_ir: Optional[IntensityResult] = None
+            if message_type == "warning":
+                warning_ir = parsed_data.get("intensity_result")
+                if warning_ir is None:
+                    warning_ir = compute_for_parsed(
+                        parsed_data, self.config.alert_config
+                    )
+                if warning_ir is None and getattr(
+                    self.config.alert_config, "enabled", False
+                ):
+                    if getattr(
+                        self.config.message_config,
+                        "disable_warning_expiry_for_test",
+                        False,
+                    ):
+                        warning_ir = self._synthetic_intensity_for_expiry_test(
+                            parsed_data
+                        )
+                        logger.info(
+                            "关闭预警有效期测试：站点烈度未算出，已用合成烈度触发告警序列"
+                            "（正文不追加本地烈度，避免与报文「预估最大烈度」混淆）"
+                        )
+                    else:
+                        warning_ir = self._synthetic_intensity_when_no_site_estimate(
+                            parsed_data
+                        )
+                if warning_ir is not None:
+                    parsed_data["intensity_result"] = warning_ir
+                message = self._append_trusted_site_intensity_clause(
+                    message, warning_ir
+                )
+
+            self._record_event_history(source_name, message_type, message, parsed_data)
             
-            # 对于预警消息，记录格式化成功的信息，并根据中国经验烈度触发红屏流程
+            # 对于预警消息，记录格式化成功的信息；按 AlertConfig 阈值触发告警序列
             if message_type == 'warning':
                 logger.info(f"预警消息格式化成功: {message}")
                 try:
-                    level = parsed_data.get('site_perceived_level', 'none')
-                    intensity_level = int(parsed_data.get('site_intensity_level', 0) or 0)
-                    mc = self.config.message_config
-                    if getattr(mc, 'enable_china_intensity', False):
-                        if level == 'strong_felt' and getattr(mc, 'enable_strong_felt_alert_flow', True):
-                            self._start_perceived_alert_sequence('strong_felt', intensity_level, parsed_data, message)
-                        elif level == 'felt' and getattr(mc, 'enable_felt_alert_flow', False):
-                            self._start_perceived_alert_sequence('felt', intensity_level, parsed_data, message)
+                    if self.alert_controller is not None and warning_ir is not None:
+                        self.alert_controller.trigger(
+                            parsed_data,
+                            warning_ir,
+                            message,
+                            self.config.message_config.warning_color,
+                        )
                 except Exception as e_int:
-                    logger.debug(f"触发有感/强有感红屏流程失败（忽略，仅影响提示效果）: {e_int}")
+                    logger.debug(f"触发告警序列失败（忽略，仅影响提示效果）: {e_int}")
             
             # 对于气象预警/海啸速报，传递 parsed_data 以提取动态颜色
             color = self.message_processor.get_message_color(
@@ -1404,6 +1768,10 @@ class MainWindow(QMainWindow):
                 )
                 and image_path
             )
+            pd_store = None
+            if message_type in ("weather", "warning") and isinstance(parsed_data, dict):
+                # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas、intensity_result 等以复现白字提示与烈度逻辑
+                pd_store = dict(parsed_data)
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -1415,7 +1783,7 @@ class MainWindow(QMainWindow):
                 image_after_text=image_after_text,
                 event_id=event_id,
                 shock_time=shock_time if message_type == 'warning' else None,  # 只保存预警消息的发震时间
-                parsed_data=parsed_data if message_type == 'weather' else None  # 只保存气象预警的parsed_data（用于热修改时重新计算颜色和异步获取图片路径）
+                parsed_data=pd_store,
             )
             
             # 对于气象预警，记录图片路径信息并预加载 NMC URL 到缓存，轮播到该条时可立即显示图标
@@ -1765,6 +2133,12 @@ class MainWindow(QMainWindow):
             True表示有效，False表示已过期
         """
         try:
+            if getattr(
+                self.config.message_config,
+                "disable_warning_expiry_for_test",
+                False,
+            ):
+                return True
             min_display = self.config.message_config.warning_min_display_seconds
             # 保证最少展示时长：自首次显示起未满 min_display 秒则仍有效
             if message.first_displayed_at is not None:
@@ -1829,6 +2203,11 @@ class MainWindow(QMainWindow):
             self._resize_save_timer.stop()
             self._move_save_timer.stop()
             self._persist_window_geometry_to_config()
+            try:
+                if self.alert_controller is not None:
+                    self.alert_controller.dispose()
+            except Exception as e_alert:
+                logger.debug(f"关闭时释放 AlertController 失败（可忽略）: {e_alert}")
             
             # 停止HTTP轮询管理器
             if 'http_polling' in self.data_sources:
@@ -1876,6 +2255,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"获取数据源连接状态失败: {e}")
         return result
+
+    def get_data_source_health_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """获取数据源健康状态快照（供设置页/状态页展示）"""
+        try:
+            if self.ws_manager and hasattr(self.ws_manager, "get_health_status"):
+                return self.ws_manager.get_health_status()
+        except Exception as e:
+            logger.debug(f"获取数据源健康状态失败: {e}")
+        return {}
 
     def send_wolfx_manual_query(self, command: str) -> bool:
         """

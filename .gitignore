@@ -8,6 +8,7 @@ __pycache__/
 dist/
 单文件版/
 非压缩版/
+installer版/
 venv/
 .venv/
 env/
@@ -19,6 +20,9 @@ build*.bat
 一键打包.bat
 一键打包-单文件.bat
 *.spec
+installer.iss
+deploy/rolling-update/
+cmt-weather/
 
 # 图片、气象预警、数据源文档、地名修正（不上传）
 图片/

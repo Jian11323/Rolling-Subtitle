@@ -8,6 +8,7 @@ WebSocket连接管理器
 import asyncio
 import json
 import re
+import time
 import websockets
 from typing import Dict, Callable, Optional, Any
 from collections import defaultdict
@@ -38,6 +39,11 @@ FANSTUDIO_ALL_URLS = ("wss://ws.fanstudio.tech/all")
 CENC_IR_WSS_URL = "wss://ws.fanstudio.tech/cenc-ir"
 WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
 WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"
+HEARTBEAT_TIMEOUT_SECONDS = {
+    "fanstudio": 45,
+    "wolfx": 90,
+    "p2pquake": 120,
+}
 # all_eew 聚合端：建连后查询各子源（不含 CWA；CWA 有独立 wss …/cwa_eew 端点）
 WOLFX_ALL_EEW_QUERY_COMMANDS = (
     "query_sceew",
@@ -67,6 +73,7 @@ class WebSocketManager:
         self.enabled_sources: Dict[str, bool] = {}  # 数据源启用状态
         self._send_queues: Dict[str, Queue] = {}  # 每个URL的消息发送队列
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # 连接任务字典
+        self._health_status: Dict[str, Dict[str, Any]] = {}
         
         # 加载配置
         config = Config()
@@ -76,6 +83,95 @@ class WebSocketManager:
         self.ping_timeout = config.ws_config.ping_timeout
         self.close_timeout = config.ws_config.close_timeout
         self.open_timeout = config.ws_config.connection_timeout
+
+    def _get_source_kind(self, url: str) -> str:
+        """按 URL 识别数据源类型（用于心跳策略）"""
+        normalized = (url or "").strip().lower().rstrip("/")
+        if "fanstudio.tech" in normalized or "fanstudio.hk" in normalized:
+            return "fanstudio"
+        if normalized in (WOLFX_ALL_EEW_URL, WOLFX_CWA_EEW_URL):
+            return "wolfx"
+        if normalized == P2PQUAKE_WSS_URL:
+            return "p2pquake"
+        return "other"
+
+    def _ensure_health_entry(self, url: str, source_name: str = "") -> Dict[str, Any]:
+        entry = self._health_status.get(url)
+        if entry is None:
+            kind = self._get_source_kind(url)
+            timeout_seconds = HEARTBEAT_TIMEOUT_SECONDS.get(kind, 0)
+            entry = {
+                "source_name": source_name,
+                "source_kind": kind,
+                "timeout_seconds": timeout_seconds,
+                "last_message_ts": 0.0,
+                "last_heartbeat_ts": 0.0,
+                "last_ping_ts": 0.0,
+                "last_pong_ts": 0.0,
+                "last_auto_ping_ts": 0.0,
+                "timeout_count": 0,
+                "auto_ping_count": 0,
+                "heartbeat_state": "unknown",
+            }
+            self._health_status[url] = entry
+        elif source_name and not entry.get("source_name"):
+            entry["source_name"] = source_name
+        return entry
+
+    def _mark_message_received(self, url: str, source_name: str):
+        entry = self._ensure_health_entry(url, source_name)
+        entry["last_message_ts"] = time.time()
+
+    def _mark_heartbeat_received(self, url: str, source_name: str):
+        now = time.time()
+        entry = self._ensure_health_entry(url, source_name)
+        entry["last_heartbeat_ts"] = now
+        entry["last_message_ts"] = now
+        entry["heartbeat_state"] = "ok"
+
+    def _mark_ping_received(self, url: str, source_name: str):
+        entry = self._ensure_health_entry(url, source_name)
+        entry["last_ping_ts"] = time.time()
+
+    def _mark_pong_received(self, url: str, source_name: str):
+        now = time.time()
+        entry = self._ensure_health_entry(url, source_name)
+        entry["last_pong_ts"] = now
+        entry["last_message_ts"] = now
+        entry["heartbeat_state"] = "ok"
+
+    async def _check_heartbeat_timeout(self, websocket: Any, url: str, source_name: str):
+        """心跳超时检测与自动 ping（Fan/Wolfx）"""
+        entry = self._ensure_health_entry(url, source_name)
+        timeout_seconds = int(entry.get("timeout_seconds", 0) or 0)
+        if timeout_seconds <= 0:
+            return
+
+        now = time.time()
+        last_heartbeat = float(entry.get("last_heartbeat_ts", 0.0) or 0.0)
+        if last_heartbeat <= 0:
+            return
+        if (now - last_heartbeat) <= timeout_seconds:
+            return
+
+        entry["heartbeat_state"] = "timeout"
+        entry["timeout_count"] = int(entry.get("timeout_count", 0) or 0) + 1
+        source_kind = entry.get("source_kind", "other")
+        if source_kind not in ("fanstudio", "wolfx"):
+            return
+        # 防止超时后每个循环都发送 ping：最短间隔取阈值一半，至少 10 秒
+        min_retry_gap = max(10, timeout_seconds // 2)
+        last_auto_ping = float(entry.get("last_auto_ping_ts", 0.0) or 0.0)
+        if last_auto_ping > 0 and (now - last_auto_ping) < min_retry_gap:
+            return
+        try:
+            await websocket.send("ping")
+            entry["last_ping_ts"] = now
+            entry["last_auto_ping_ts"] = now
+            entry["auto_ping_count"] = int(entry.get("auto_ping_count", 0) or 0) + 1
+            logger.info(f"[{source_name}] 心跳超时，已自动发送 ping")
+        except Exception as e:
+            logger.warning(f"[{source_name}] 心跳超时后发送 ping 失败: {e}")
     
     def get_adapter(self, url: str) -> Optional[Any]:
         """
@@ -205,6 +301,22 @@ class WebSocketManager:
             url: WebSocket URL
         """
         try:
+            self._mark_message_received(url, source_name)
+            if isinstance(message, str):
+                message_text = message.strip().lower()
+                if message_text == "heartbeat":
+                    self._mark_heartbeat_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到文本心跳消息")
+                    return
+                if message_text == "ping":
+                    self._mark_ping_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到文本 ping")
+                    return
+                if message_text == "pong":
+                    self._mark_pong_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到文本 pong")
+                    return
+
             # 解析JSON
             try:
                 data = json.loads(message)
@@ -217,11 +329,31 @@ class WebSocketManager:
                     logger.warning(f"[{source_name}] JSON解析失败，跳过消息")
                     return
             
-            # 跳过心跳消息
-            if isinstance(data, dict) and data.get('type') == 'heartbeat':
-                logger.debug(f"[{source_name}] 收到心跳消息")
-                return
+            # 跳过心跳消息（记录状态，不下发业务）
+            if isinstance(data, dict):
+                msg_type = str(data.get('type', '')).strip().lower()
+                if msg_type == 'heartbeat':
+                    self._mark_heartbeat_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到心跳消息")
+                    return
+                if msg_type == 'ping':
+                    self._mark_ping_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到 ping 消息")
+                    return
+                if msg_type == 'pong':
+                    self._mark_pong_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到 pong 消息")
+                    return
+                if int(data.get("code") or 0) == 555:
+                    self._mark_heartbeat_received(url, source_name)
+                    logger.debug(f"[{source_name}] 收到 P2PQuake 心跳(code=555)")
+                    return
             
+            cfg = Config()
+            if not cfg.enabled_sources.get(url, True):
+                logger.debug(f"[{source_name}] 该 WebSocket 已在配置中关闭，跳过业务消息: {url}")
+                return
+
             # 获取数据源类型
             data_source_type = getattr(adapter, '_manager_source_type', 'unknown')
             
@@ -325,6 +457,9 @@ class WebSocketManager:
                     self.reconnect_attempts[url] = 0
                     self.connections[url] = websocket
                     self.connection_states[url] = "connected"
+                    health = self._ensure_health_entry(url, source_name)
+                    health["heartbeat_state"] = "connected"
+                    health["last_message_ts"] = time.time()
 
                     # Wolfx 建连后按端点发送查询指令（query_cwaeew 仅用于 cwa_eew）
                     norm_url = url.rstrip("/").lower()
@@ -358,7 +493,8 @@ class WebSocketManager:
                             logger.debug(f"[{source_name}] 收到消息，长度: {len(message) if isinstance(message, str) else len(str(message))}")
                             await self._process_message(message, adapter, source_name, url)
                         except asyncio.TimeoutError:
-                            # 超时，继续循环检查发送队列
+                            # 超时：继续循环并执行心跳检查
+                            await self._check_heartbeat_timeout(websocket, url, source_name)
                             continue
                             
             except websockets.ConnectionClosed as e:
@@ -411,6 +547,8 @@ class WebSocketManager:
             del self.connections[url]
             logger.debug(f"[{source_name}] 已从connections字典移除，当前连接数: {len(self.connections)}")
         self.connection_states[url] = "disconnected"
+        entry = self._ensure_health_entry(url, source_name)
+        entry["heartbeat_state"] = "disconnected"
 
     def get_connection_status(self) -> Dict[str, str]:
         """
@@ -425,6 +563,43 @@ class WebSocketManager:
         for url in self.enabled_sources.keys():
             status.setdefault(url, "unconnected")
         return status
+
+    def get_health_status(self) -> Dict[str, Dict[str, Any]]:
+        """获取数据源健康状态快照（供设置页状态面板展示）"""
+        now = time.time()
+        result: Dict[str, Dict[str, Any]] = {}
+        for url, entry in self._health_status.items():
+            copied = dict(entry)
+            timeout_seconds = int(copied.get("timeout_seconds", 0) or 0)
+            last_heartbeat = float(copied.get("last_heartbeat_ts", 0.0) or 0.0)
+            if timeout_seconds > 0 and last_heartbeat > 0 and (now - last_heartbeat) > timeout_seconds:
+                copied["heartbeat_state"] = "timeout"
+            copied["connection_state"] = self.connection_states.get(
+                url,
+                "connected" if url in self.connections else "unconnected",
+            )
+            copied["heartbeat_age_seconds"] = (now - last_heartbeat) if last_heartbeat > 0 else None
+            result[url] = copied
+        for url in self.enabled_sources.keys():
+            result.setdefault(
+                url,
+                {
+                    "source_name": "",
+                    "source_kind": self._get_source_kind(url),
+                    "timeout_seconds": HEARTBEAT_TIMEOUT_SECONDS.get(self._get_source_kind(url), 0),
+                    "last_message_ts": 0.0,
+                    "last_heartbeat_ts": 0.0,
+                    "last_ping_ts": 0.0,
+                    "last_pong_ts": 0.0,
+                    "last_auto_ping_ts": 0.0,
+                    "timeout_count": 0,
+                    "auto_ping_count": 0,
+                    "heartbeat_state": "unknown",
+                    "connection_state": self.connection_states.get(url, "unconnected"),
+                    "heartbeat_age_seconds": None,
+                },
+            )
+        return result
     
     async def _should_reconnect(self, url: str, source_name: str) -> bool:
         """

@@ -61,5 +61,7 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyInstalledExeName}"
 Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyInstalledExeName}"; Tasks: desktopicon
 
+; 注意：Flags 含 skipifsilent 时，用户以 /VERYSILENT 静默安装不会执行本项「安装后运行」。
+; 自动更新流程由程序生成的 bat 在安装结束后显式 start 主程序（见 utils/app_update_check.py）。
 [Run]
 Filename: "{app}\{#MyInstalledExeName}"; Description: "运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent

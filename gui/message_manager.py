@@ -108,7 +108,7 @@ class MessageItem:
     fallback_image_path: Optional[str] = None  # 保留字段；气象预警图标已改为仅 NMC 在线，不再使用本地回退
     event_id: str = ""  # 事件唯一ID，用于识别同一条地震事件的更新
     shock_time: Optional[str] = None  # 发震时间（用于预警消息有效期检查）
-    parsed_data: Optional[Dict] = None  # 解析后的数据字典（用于气象预警颜色计算和热修改）
+    parsed_data: Optional[Dict] = None  # 气象：颜色/图片热更新；预警：轮播时白字提示与烈度需保留解析字段
     first_displayed_at: Optional[float] = None  # 首次在窗口显示的时间（用于预警至少展示5分钟）
     image_after_text: bool = False  # True 时图片在文字后绘制（如 CMT 沙滩球在消息末尾）
 

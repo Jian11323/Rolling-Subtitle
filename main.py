@@ -42,7 +42,7 @@ _write_startup_log("启动时间: " + datetime.now().isoformat())
 try:
     import websockets
     import requests
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QMessageBox
 except ImportError as e:
     _write_startup_log("ImportError: " + str(e))
     print(f"错误: 缺少必要的依赖包: {e}")
@@ -115,7 +115,20 @@ def main():
 
         # 创建QApplication
         app = QApplication(sys.argv)
-        
+
+        # 打包版单实例：避免连开两个 exe 时各自弹出「发现新版本」等重复流程
+        try:
+            from utils.single_instance import try_acquire_single_instance
+            if not try_acquire_single_instance(app):
+                QMessageBox.warning(
+                    None,
+                    "提示",
+                    "程序已在运行。\n若正在更新，请等待当前窗口完成下载与安装。",
+                )
+                sys.exit(0)
+        except Exception as e:
+            logger.warning(f"单实例检测异常（已忽略）: {e}")
+
         # 设置应用程序图标（用于任务栏和窗口标题栏）
         # 使用try-except包装，避免文件系统操作阻塞
         try:
@@ -167,6 +180,14 @@ def main():
         # 延迟执行翻译文件加载，避免阻塞启动
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, load_translator_async)
+
+        # 打包版：启动时检查更新（用户确认后退出进程，由独立 bat 静默安装/解压并启动新版本）
+        try:
+            from utils.app_update_check import run_startup_auto_update
+            if run_startup_auto_update(app, config):
+                os._exit(0)
+        except Exception as e:
+            logger.warning(f"启动时检查更新异常（已忽略）: {e}")
         
         # 创建主窗口（传入 config）
         window = MainWindow(config=config)

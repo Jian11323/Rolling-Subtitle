@@ -148,6 +148,7 @@ class P2PQuakeAdapter(BaseAdapter):
             # 构建结果
             result = {
                 'type': 'report',  # 日本气象厅地震情报属于速报类型
+                'source_type': 'p2pquake',
                 'magnitude': magnitude,
                 'latitude': latitude,
                 'longitude': longitude,

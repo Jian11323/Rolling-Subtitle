@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QOpenGLWidget, QWidget, QApplication
 from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer, QThread
 from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, QSurfaceFormat, QOpenGLContext, QFontDatabase
 from collections import OrderedDict
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Dict, Tuple, Any, List
 from pathlib import Path
 import math
 import threading
@@ -77,6 +77,8 @@ class _ScrollingTextMixin:
         self.x_position = 0.0
         self.current_text = ""
         self.current_color = QColor('#01FF00')
+        # 阶段一/二：预警正文与提示语分段异色绘制 [(文本, QColor, advance宽度)]
+        self._text_segment_paint: Optional[List[Tuple[str, QColor, int]]] = None
         self.current_message_type = None
         self.current_parsed_data = None
         self.current_image_path = None
@@ -115,13 +117,22 @@ class _ScrollingTextMixin:
         self._is_scrolling = False
         self._scrolling_lock = threading.Lock()
 
-        # 有感/强有感红屏背景闪烁状态
+        # 有感/强有感红屏背景闪烁状态（整栏背景交替）
         self._alert_flash_enabled = False
         self._alert_flash_on = False
         self._alert_flash_color = QColor('#FF0000')
-        self._alert_flash_timer = QTimer()
+        self._alert_flash_timer = QTimer(self)
         self._alert_flash_timer.setTimerType(Qt.PreciseTimer)
         self._alert_flash_timer.timeout.connect(self._on_alert_flash_timeout)
+
+        # 左侧固定「地震预警」红底白字条闪烁（与整栏红闪互斥）
+        self._lead_badge_enabled = False
+        self._lead_badge_on = False
+        self._lead_badge_flash_color = QColor("#FF0000")
+        self._lead_badge_dim_color = QColor("#8B0000")
+        self._lead_badge_timer = QTimer(self)
+        self._lead_badge_timer.setTimerType(Qt.PreciseTimer)
+        self._lead_badge_timer.timeout.connect(self._on_lead_badge_timeout)
 
         self.timer = QTimer()
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -203,45 +214,106 @@ class _ScrollingTextMixin:
             p.end()
         return pixmap
 
+    def _get_lead_badge_width(self) -> int:
+        """左侧「地震预警」红条宽度；未启用时返回 0。"""
+        if not getattr(self, "_lead_badge_enabled", False):
+            return 0
+        try:
+            bf = QFont(self.font)
+            bf.setBold(True)
+            fm = QFontMetrics(bf)
+            return max(fm.horizontalAdvance("地震预警") + 28, 88)
+        except Exception:
+            return 120
+
     def _paint_content(self, painter: QPainter):
         """统一的绘制逻辑（供 paintGL / paintEvent 调用）。使用浮点坐标与原生 drawText，避免取整卡顿与位图插值模糊/闪烁。"""
         try:
             painter.setRenderHint(QPainter.Antialiasing)
             base_bg = QColor(self.config.gui_config.bg_color)
-            # 红屏模式下，仅背景颜色闪烁，文字颜色保持不变
-            if getattr(self, "_alert_flash_enabled", False):
-                bg_color = self._alert_flash_color if self._alert_flash_on else base_bg
+            lead_w = self._get_lead_badge_width()
+
+            if lead_w > 0:
+                painter.fillRect(self.rect(), base_bg)
+                bright = QColor(self._lead_badge_flash_color)
+                if not bright.isValid():
+                    bright = QColor("#FF0000")
+                dim = QColor(self._lead_badge_dim_color)
+                if not dim.isValid():
+                    dim = QColor("#7A0000")
+                strip = bright if self._lead_badge_on else dim
+                painter.fillRect(0, 0, lead_w, self.height(), strip)
+                bf = QFont(self.font)
+                bf.setBold(True)
+                painter.setFont(bf)
+                painter.setPen(QColor("#FFFFFF"))
+                painter.setRenderHint(QPainter.TextAntialiasing)
+                painter.drawText(
+                    QRectF(0, 0, lead_w, self.height()),
+                    Qt.AlignCenter | Qt.TextSingleLine,
+                    "地震预警",
+                )
+                self._draw_background_watermark(painter, base_bg)
             else:
-                bg_color = base_bg
-            painter.fillRect(self.rect(), bg_color)
-            # 背景水印（支持字体/字号/位置，在填充背景后、主内容前绘制）
-            self._draw_background_watermark(painter, bg_color)
+                if getattr(self, "_alert_flash_enabled", False):
+                    bg_color = self._alert_flash_color if self._alert_flash_on else base_bg
+                else:
+                    bg_color = base_bg
+                painter.fillRect(self.rect(), bg_color)
+                self._draw_background_watermark(painter, bg_color)
+
             if not self.current_text:
                 return
+
             center_y = self.height() / 2.0
-            base_x = self.x_position
+            base_x = self.x_position + lead_w
             text_x = base_x
             image_x = base_x
             if self.current_image:
                 if getattr(self, '_image_after_text', False):
-                    # CMT 沙滩球等：先文字，后图片
                     text_x = base_x
                     image_x = base_x + self._cached_text_width + 10
                 else:
-                    # 气象/海啸等：先图片，后文字
                     image_x = base_x
                     text_x = base_x + self._cached_image_width
+
+            if lead_w > 0:
+                painter.save()
+                cr = QRectF(
+                    float(lead_w),
+                    0.0,
+                    max(1.0, float(self.width() - lead_w)),
+                    float(self.height()),
+                )
+                painter.setClipRect(cr)
+
             painter.setFont(self._render_font)
-            painter.setPen(self.current_color)
             painter.setRenderHint(QPainter.TextAntialiasing)
-            if text_x < self.width() and text_x + self._cached_text_width > 0:
-                text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
-                painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
+            seg_paint = getattr(self, "_text_segment_paint", None)
+            if seg_paint:
+                x_draw = text_x
+                for piece, qcol, _adv in seg_paint:
+                    painter.setPen(qcol)
+                    if x_draw + _adv > 0 and x_draw < self.width():
+                        painter.drawText(
+                            QRectF(x_draw, 0, float(_adv + 2), float(self.height())),
+                            Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine,
+                            piece,
+                        )
+                    x_draw += float(_adv)
+            else:
+                painter.setPen(self.current_color)
+                if text_x < self.width() and text_x + self._cached_text_width > 0:
+                    text_rect = QRectF(text_x, 0, self._cached_text_width, self.height())
+                    painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter | Qt.TextSingleLine, self.current_text)
             if self.current_image:
                 pm = self.current_image
                 w, h = pm.width(), pm.height()
                 image_y = center_y - h / 2.0
                 painter.drawPixmap(QRectF(image_x, image_y, w, h), pm, QRectF(0, 0, w, h))
+
+            if lead_w > 0:
+                painter.restore()
         except Exception as e:
             logger.error(f"绘制失败: {e}")
             import traceback
@@ -463,7 +535,8 @@ class _ScrollingTextMixin:
                 total_width += self._cached_image_width
             if self.current_text:
                 total_width += self._cached_text_width
-        if total_width > 0 and self.x_position + total_width < 0:
+        lead_w = self._get_lead_badge_width()
+        if total_width > 0 and self.x_position + lead_w + total_width < 0:
             with self._scrolling_lock:
                 self._is_scrolling = False
             self.scroll_completed.emit()
@@ -563,6 +636,68 @@ class _ScrollingTextMixin:
         except Exception as e:
             logger.debug(f"更新红屏闪烁状态失败: {e}")
 
+    def _on_lead_badge_timeout(self):
+        """左侧「地震预警」红条明暗交替闪烁。"""
+        try:
+            if not self._lead_badge_enabled:
+                return
+            self._lead_badge_on = not self._lead_badge_on
+            self.update()
+            try:
+                self.repaint()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"更新地震预警条闪烁状态失败: {e}")
+
+    def set_lead_earthquake_badge_flashing(
+        self,
+        enabled: bool,
+        interval_ms: int = 400,
+        flash_color: str = "#FF0000",
+    ) -> None:
+        """
+        启用/关闭左侧固定「地震预警」红底白字闪烁条（与整栏 set_alert_flashing 互斥）。
+
+        启用时主滚动内容从红条右侧开始，不遮挡红条。
+        """
+        try:
+            self._lead_badge_enabled = bool(enabled)
+            if not self._lead_badge_enabled:
+                self._lead_badge_on = False
+                if self._lead_badge_timer.isActive():
+                    self._lead_badge_timer.stop()
+                self.update()
+                return
+
+            c = QColor(flash_color or "#FF0000")
+            if not c.isValid():
+                c = QColor("#FF0000")
+            self._lead_badge_flash_color = c
+            # 暗相与亮红拉开差距，否则两态都像「整红条」看不出在闪
+            dim = QColor("#120000")
+            dim.setAlpha(255)
+            self._lead_badge_dim_color = dim
+
+            if self._alert_flash_enabled:
+                self._alert_flash_enabled = False
+                self._alert_flash_on = False
+                if self._alert_flash_timer.isActive():
+                    self._alert_flash_timer.stop()
+
+            interval = max(50, min(2000, int(interval_ms or 400)))
+            self._lead_badge_timer.setInterval(interval)
+            self._lead_badge_on = True
+            self._lead_badge_timer.stop()
+            self._lead_badge_timer.start()
+            self.update()
+            try:
+                self.repaint()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"设置地震预警条闪烁失败: {e}")
+
     def set_alert_flashing(self, enabled: bool, color: str = '#FF0000', interval_ms: int = 400):
         """
         启用/关闭红色背景闪烁（仅背景闪烁，文字颜色不变）。
@@ -573,6 +708,8 @@ class _ScrollingTextMixin:
             interval_ms: 闪烁间隔（毫秒）
         """
         try:
+            if enabled and getattr(self, "_lead_badge_enabled", False):
+                self.set_lead_earthquake_badge_flashing(False)
             self._alert_flash_enabled = bool(enabled)
             if not self._alert_flash_enabled:
                 self._alert_flash_on = False
@@ -678,7 +815,8 @@ class _ScrollingTextMixin:
 
     def reset_position(self):
         """重置文本位置到右侧（供 ScrollingText / ScrollingTextCPU 共用）"""
-        self.x_position = float(self.width() if self.width() > 1 else self.config.gui_config.window_width)
+        w = float(self.width() if self.width() > 1 else self.config.gui_config.window_width)
+        self.x_position = w - float(self._get_lead_badge_width())
 
     def _is_image_url(self, image_path: str) -> bool:
         """判断是否为远程图片 URL"""
@@ -880,7 +1018,7 @@ class _ScrollingTextMixin:
             logger.error(f"更新图片显示失败: {e}")
             self.set_loading(False)
     
-    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None, fallback_image_path: Optional[str] = None, image_after_text: bool = False):
+    def update_text(self, text: str, color: str, image_path: Optional[str] = None, force: bool = False, message_type: Optional[str] = None, parsed_data: Optional[Dict[str, Any]] = None, fallback_image_path: Optional[str] = None, image_after_text: bool = False, text_color_segments: Optional[List[Tuple[str, str]]] = None):
         """
         更新文本和颜色，可选显示图片（异步加载）
 
@@ -893,6 +1031,7 @@ class _ScrollingTextMixin:
             parsed_data: 解析后的数据字典（可选），用于气象预警颜色计算和热修改
             fallback_image_path: 保留参数以兼容调用方；气象预警已改为仅在线图标，不再使用本地回退
             image_after_text: True 时图片在文字后绘制（如 CMT 沙滩球在消息末尾）
+            text_color_segments: 非空时按 (片段, #RRGGBB) 分段着色；``text`` 须与各片段拼接一致（用于告警阶段一/二）
         """
         # 如果正在滚动且不是强制更新，则忽略
         with self._scrolling_lock:
@@ -901,23 +1040,53 @@ class _ScrollingTextMixin:
                 return False
         
         self.set_loading(True)
-        
-        # 强制单行显示：仅当配置开启时将换行符替换为空格，否则保留原文
-        text = (text or "").strip()
-        if getattr(self.config.message_config, 'force_single_line', True):
-            text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-        self.current_text = text
-        # 如果提供了message_type，优先从配置中获取颜色（确保使用最新配置）
-        # 否则使用传入的color参数
-        if message_type and message_type in ('report', 'warning', 'custom_text'):
-            # 从配置中获取颜色（确保使用最新配置）
-            config_color = self._get_color_for_message_type(message_type, parsed_data)
-            self.current_color = config_color
-            logger.info(f"update_text: 使用配置中的颜色 - 消息类型: {message_type}, 颜色: {config_color.name().upper()}")
+
+        self._text_segment_paint = None
+        force_sl = getattr(self.config.message_config, 'force_single_line', True)
+
+        if text_color_segments:
+            norm: List[Tuple[str, str]] = []
+            for p, c in text_color_segments:
+                s = (p or "")
+                if force_sl:
+                    s = s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+                norm.append((s, c or "#FFFFFF"))
+            text = "".join(p for p, _ in norm).strip()
+            self.current_text = text
+            self.current_message_type = None
+            self.current_color = self._get_validated_color("#FFFFFF", None)
+            self._render_font = self._resolve_render_font_for_text(text)
+            metrics = QFontMetrics(self._render_font)
+            self._text_segment_paint = []
+            total_adv = 0
+            for piece, col in norm:
+                if not piece:
+                    continue
+                qc = self._get_validated_color(col, None)
+                adv = metrics.horizontalAdvance(piece)
+                self._text_segment_paint.append((piece, qc, adv))
+                total_adv += adv
+            self._cached_text_width = total_adv
+            logger.info(
+                f"update_text: 分段着色 {len(self._text_segment_paint)} 段, 总宽 {self._cached_text_width}"
+            )
         else:
-            # 验证并设置颜色（确保颜色有效且不与背景颜色相同）
-            self.current_color = self._get_validated_color(color, message_type)
-        self.current_message_type = message_type  # 存储消息类型
+            # 强制单行显示：仅当配置开启时将换行符替换为空格，否则保留原文
+            text = (text or "").strip()
+            if force_sl:
+                text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+            self.current_text = text
+            # 如果提供了message_type，优先从配置中获取颜色（确保使用最新配置）
+            # 否则使用传入的color参数
+            if message_type and message_type in ('report', 'warning', 'custom_text'):
+                # 从配置中获取颜色（确保使用最新配置）
+                config_color = self._get_color_for_message_type(message_type, parsed_data)
+                self.current_color = config_color
+                logger.info(f"update_text: 使用配置中的颜色 - 消息类型: {message_type}, 颜色: {config_color.name().upper()}")
+            else:
+                # 验证并设置颜色（确保颜色有效且不与背景颜色相同）
+                self.current_color = self._get_validated_color(color, message_type)
+            self.current_message_type = message_type  # 存储消息类型
         self.current_parsed_data = parsed_data  # 存储解析数据（用于热修改时重新计算气象预警颜色）
         self.current_image_path = image_path
         self._image_after_text = image_after_text
@@ -925,9 +1094,10 @@ class _ScrollingTextMixin:
         # 调试日志
         logger.info(f"更新文本: {text}, 颜色: {color}, 图片路径: {image_path if image_path else '无'}, 窗口尺寸: {self.width()}x{self.height()}, 初始X位置: {self.width() if self.width() > 1 else self.config.gui_config.window_width}")
         
-        # 更新位置 - 从窗口右侧开始
+        # 更新位置 - 从窗口右侧开始（左侧「地震预警」条占用 lead_w 时，内容仍从视口右缘入场）
         initial_x = float(self.width() if self.width() > 1 else self.config.gui_config.window_width)
-        self.x_position = initial_x
+        lead_w = self._get_lead_badge_width()
+        self.x_position = initial_x - float(lead_w)
         self._last_scroll_time = time.time()
         logger.info(f"文本初始位置设置为: {self.x_position}")
         
@@ -944,11 +1114,12 @@ class _ScrollingTextMixin:
         self._current_load_task_id += 1
         current_task_id = self._current_load_task_id
         
-        # 统一使用 QFontMetrics 计算文本宽度，不再使用 PIL 预渲染（避免亚像素平移时位图插值导致模糊/闪烁）
-        self._render_font = self._resolve_render_font_for_text(text)
-        metrics = QFontMetrics(self._render_font)
-        self._cached_text_width = metrics.horizontalAdvance(text)
-        logger.debug(f"文本宽度（QFontMetrics）: {self._cached_text_width}")
+        # 统一使用 QFontMetrics 计算文本宽度；分段着色时在分支内已算好宽度
+        if not self._text_segment_paint:
+            self._render_font = self._resolve_render_font_for_text(text)
+            metrics = QFontMetrics(self._render_font)
+            self._cached_text_width = metrics.horizontalAdvance(text)
+            logger.debug(f"文本宽度（QFontMetrics）: {self._cached_text_width}")
         
         # 如果没有图片，取消加载状态
         if not image_path:

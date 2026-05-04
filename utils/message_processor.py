@@ -122,6 +122,9 @@ class MessageProcessor:
             True表示有效，False表示已过期
         """
         try:
+            msg_cfg = self.config.message_config
+            if getattr(msg_cfg, "disable_warning_expiry_for_test", False):
+                return True
             shock_time_str = data.get('shock_time', '')
             source_type = data.get('source_type', '') or ''
             event_id = data.get('event_id', '')
@@ -137,7 +140,6 @@ class MessageProcessor:
             # 计算时间差（秒），与显示时区当前时间比较
             time_diff = (timezone_utils.now_in_display_tz() - shock_time).total_seconds()
             
-            msg_cfg = Config().message_config
             # 根据 source_type 选择不同的有效期窗口
             if source_type == 'wolfx_jma_eew':
                 max_seconds = getattr(

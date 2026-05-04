@@ -6,6 +6,9 @@ websockets>=11.0
 # HTTP请求库
 requests>=2.28.0
 
+# 版本号比较（自动更新）
+packaging>=23.0
+
 # 图片处理库（用于文本预渲染和气象预警图片处理）
 Pillow>=9.0.0
 

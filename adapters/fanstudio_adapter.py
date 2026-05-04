@@ -23,7 +23,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
 from utils import timezone_utils
-from utils.intensity_china import estimate_intensity_china, classify_perceived
+from utils.intensity import compute_for_parsed
 
 logger = get_logger()
 
@@ -303,6 +303,18 @@ class FanStudioAdapter(BaseAdapter):
                     if config is None:
                         from config import Config
                         config = Config()
+                    # 烈度速报独立 WSS 已关闭时，/all 仍可能推送同源 update，此处与 main_window 入口过滤一致
+                    if source == 'cenc-ir' and not config.enabled_sources.get(
+                        "wss://ws.fanstudio.tech/cenc-ir", True
+                    ):
+                        logger.debug("[FanStudio] update cenc-ir：独立数据源已关闭，跳过")
+                        return None
+                    # All 通道转发的 P2PQuake 地震情報：与 MESSAGE_CONFIG 开关一致
+                    if source == 'p2pquake' and not getattr(
+                        config.message_config, 'p2pquake_parse_551', True
+                    ):
+                        logger.debug("[FanStudio] update p2pquake：地震情報解析已关闭，跳过")
+                        return None
                     # 先按总类开关过滤（预警/速报）
                     parse_warning = getattr(config.message_config, 'fanstudio_parse_warning', True)
                     parse_report = getattr(config.message_config, 'fanstudio_parse_report', True)
@@ -799,37 +811,18 @@ class FanStudioAdapter(BaseAdapter):
             'raw_data': data,
         }
 
-        # 基于中国经验烈度估算用户所在地的有感/强有感等级
+        # 基于 IntensityProviderRegistry 估算站点烈度（仅当 AlertConfig.enabled 且站点经纬度有效）
         try:
             from config import Config
             cfg = Config()
-            msg_cfg = cfg.message_config
-            gui_cfg = cfg.gui_config
-            if getattr(msg_cfg, 'enable_china_intensity', False):
-                site_lat = getattr(gui_cfg, 'site_lat', 0.0)
-                site_lon = getattr(gui_cfg, 'site_lon', 0.0)
-                # 仅在经纬度配置合理时计算烈度
-                if abs(site_lat) > 0.01 or abs(site_lon) > 0.01:
-                    # 仅对中国及周边相关预警源进行估算
-                    china_related_sources = {'cea', 'cea-pr', 'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing',
-                                             'yunnan', 'cwa-eew'}
-                    if source_type in china_related_sources:
-                        region_name = getattr(gui_cfg, 'site_region_name', '') or None
-                        site_intensity = estimate_intensity_china(
-                            magnitude=magnitude,
-                            depth_km=depth,
-                            epi_lat=latitude,
-                            epi_lon=longitude,
-                            site_lat=site_lat,
-                            site_lon=site_lon,
-                            region_name=region_name,
-                        )
-                        level, int_level = classify_perceived(site_intensity)
-                        result['site_intensity'] = site_intensity
-                        result['site_intensity_level'] = int_level
-                        result['site_perceived_level'] = level
+            ir = compute_for_parsed(result, cfg.alert_config)
+            if ir is not None:
+                result['intensity_result'] = ir
+                result['site_intensity'] = ir.intensity
+                result['site_intensity_level'] = ir.intensity_level
+                result['site_distance_km'] = ir.distance_km
         except Exception as e:
-            logger.debug(f"中国烈度估算失败（忽略，仅影响有感/强有感提示）: {e}")
+            logger.debug(f"站点烈度估算失败（忽略，仅影响告警提示）: {e}")
         
         # JMA特殊字段
         if source_type == 'jma':

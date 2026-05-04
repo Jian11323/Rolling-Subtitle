@@ -229,9 +229,26 @@ class HTTPPollingManager:
         """启动所有HTTP轮询连接"""
         # 从配置中获取启用的HTTP数据源
         http_urls = []
+        mc = self.config.message_config
+        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
+        p2p_ws_enabled = self.config.enabled_sources.get(p2p_wss_url, False)
         for url in self.config.enabled_sources.keys():
             if url.startswith('http://') or url.startswith('https://'):
                 if self.config.enabled_sources.get(url, False):
+                    low = url.lower()
+                    # P2PQuake HTTP 与 WSS 总开关一致：关闭 P2PQuake 时不进行任何 HTTP 拉取
+                    if "api.p2pquake.net" in low:
+                        if not p2p_ws_enabled:
+                            logger.debug(f"跳过HTTP数据源（P2PQuake 已关闭）: {url}")
+                            continue
+                        if "history" in low and "551" in low:
+                            if not getattr(mc, "p2pquake_parse_551", True):
+                                logger.debug(f"跳过HTTP数据源（地震情報解析已关闭）: {url}")
+                                continue
+                        if "tsunami" in low:
+                            if not getattr(mc, "p2pquake_parse_552", True):
+                                logger.debug(f"跳过HTTP数据源（津波予報解析已关闭）: {url}")
+                                continue
                     http_urls.append(url)
                     logger.debug(f"发现启用的HTTP数据源: {url}")
                 else:
