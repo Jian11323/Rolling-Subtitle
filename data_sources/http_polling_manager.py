@@ -15,8 +15,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config, APP_VERSION
-from adapters import P2PQuakeAdapter, P2PQuakeTsunamiAdapter, CustomAdapter
+from config import Config, APP_VERSION, FANSTUDIO_HTTP_SOURCE_KEYS
+from adapters import FanStudioHttpAdapter, P2PQuakeAdapter, P2PQuakeTsunamiAdapter, CustomAdapter
 from utils.logger import get_logger
 
 logger = get_logger()
@@ -108,7 +108,7 @@ class HTTPPollingConnection:
             for attempt in range(1, 4):
                 try:
                     response = self._session.get(
-                        self.url, timeout=10, proxies={'http': None, 'https': None}
+                        self.url, timeout=30, proxies={'http': None, 'https': None}
                     )
                     response.raise_for_status()
                     break
@@ -151,15 +151,18 @@ class HTTPPollingConnection:
             self._last_data_hash = data_hash
             
             # 使用适配器解析数据
-            # 只处理最新的一条数据（列表中的第一条）
             logger.debug(f"[{self.source_name}] 开始解析数据，数据类型: {type(data)}, 数据长度: {len(data) if isinstance(data, (list, dict)) else 'N/A'}")
             parsed_result = self.adapter.parse(data)
             
             if parsed_result:
-                logger.info(f"[{self.source_name}] 解析成功，解析结果: type={parsed_result.get('type')}, organization={parsed_result.get('organization')}, place_name={parsed_result.get('place_name')}")
-                # 只处理最新的一条数据
-                message_callback(self.source_name, parsed_result)
-                logger.info(f"[{self.source_name}] 轮询成功，处理了最新1条数据")
+                if isinstance(parsed_result, list):
+                    for idx, item in enumerate(parsed_result, start=1):
+                        message_callback(self.source_name, item)
+                    logger.info(f"[{self.source_name}] 解析成功，处理了{len(parsed_result)}条数据")
+                else:
+                    logger.info(f"[{self.source_name}] 解析成功，解析结果: type={parsed_result.get('type')}, organization={parsed_result.get('organization')}, place_name={parsed_result.get('place_name')}")
+                    message_callback(self.source_name, parsed_result)
+                    logger.info(f"[{self.source_name}] 轮询成功，处理了最新1条数据")
             else:
                 logger.warning(f"[{self.source_name}] 轮询成功，但适配器解析返回None，可能数据格式不正确或解析失败")
                 # 输出更详细的数据信息用于调试
@@ -217,6 +220,12 @@ class HTTPPollingManager:
         # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
+        # Fan Studio Typhoon / AQI HTTP 数据源
+        if url in FANSTUDIO_HTTP_SOURCE_KEYS:
+            if 'typhoon.php' in url:
+                return FanStudioHttpAdapter('fanstudio_typhoon', url)
+            if 'aqi.php' in url:
+                return FanStudioHttpAdapter('fanstudio_aqi', url)
         # P2PQuake 地震情报
         if 'api.p2pquake.net' in url:
             return P2PQuakeAdapter('p2pquake', url)
@@ -276,9 +285,11 @@ class HTTPPollingManager:
                 # 对于未配置适配器的 HTTP 数据源，直接跳过，不再输出错误日志
                 continue
             
-            # 轮询间隔：自定义数据源 1 秒，其余 2 秒
+            # 轮询间隔：自定义数据源 1 秒，Fan Studio HTTP 5 秒，其余 2 秒
             if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
                 poll_interval = 1
+            elif url in FANSTUDIO_HTTP_SOURCE_KEYS:
+                poll_interval = 5
             else:
                 poll_interval = 2
             connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)

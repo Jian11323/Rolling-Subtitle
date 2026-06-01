@@ -146,6 +146,10 @@ class MessageProcessor:
                     logger.error(f"格式化预警消息时发生异常: {e}, 数据: {parsed_data}", exc_info=True)
                     return None
             elif message_type == 'report':
+                if parsed_data.get('source_type') == 'fanstudio_typhoon':
+                    return self._format_fanstudio_typhoon_message(parsed_data)
+                if parsed_data.get('source_type') == 'fanstudio_aqi':
+                    return self._format_fanstudio_aqi_message(parsed_data)
                 if parsed_data.get('source_type') == 'fssn-cmt':
                     return self._format_fssn_cmt_message(parsed_data)
                 if parsed_data.get('source_type') == 'cenc-ir':
@@ -780,6 +784,54 @@ class MessageProcessor:
         if not out.endswith(('。', '！', '？')):
             out += "。"
         return out
+
+    def _format_fanstudio_typhoon_message(self, data: Dict[str, Any]) -> str:
+        """格式化 Fan Studio 台风数据"""
+        organization = (data.get('organization') or '台风实时与历史数据').strip()
+        time_point = (data.get('Time') or data.get('shock_time') or '').strip()
+        name = (data.get('Name') or data.get('place_name') or '').strip()
+        enname = (data.get('Enname') or data.get('enname') or '').strip()
+        ckposition = (data.get('Ckposition') or data.get('ckposition') or '').strip()
+        power = (data.get('Power') or data.get('power') or '').strip()
+        speed = (data.get('Speed') or data.get('speed') or '').strip()
+        strong = (data.get('Strong') or data.get('strong') or '').strip()
+        pressure = (data.get('Pressure') or data.get('pressure') or '').strip()
+        movespeed = (data.get('Movespeed') or data.get('movespeed') or '').strip()
+        movedirection = (data.get('Movedirection') or data.get('movedirection') or '').strip()
+        jl = (data.get('Jl') or data.get('jl') or '').strip()
+
+        header = f"【{organization}】"
+        message_body = (
+            f"{time_point}，台风“{name}”（{enname}）的中心位于{ckposition}，"
+            f"中心附近最大风力{power}级（{speed}米/秒），强度为{strong}，中心气压{pressure} hPa，"
+            f"将以{movespeed}公里/小时的速度向{movedirection}移动，{jl}。"
+        )
+        message = f"{header}{message_body}"
+        return message
+
+    def _format_fanstudio_aqi_message(self, data: Dict[str, Any]) -> str:
+        """格式化 Fan Studio AQI 数据"""
+        time_point = (data.get('shock_time') or '').strip()
+        area = (data.get('place_name') or '').strip()
+        aqi = (data.get('AQI') or '').strip()
+        quality = (data.get('Quality') or '').strip()
+        co_level = (data.get('COLevel') or '').strip()
+        no2_level = (data.get('NO2Level') or '').strip()
+        o3_level = (data.get('O3Level') or '').strip()
+        so2_level = (data.get('SO2Level') or '').strip()
+        pm10_level = (data.get('PM10Level') or '').strip()
+        pm25_level = (data.get('PM2_5Level') or '').strip()
+        primary = (data.get('PrimaryPollutant') or '').strip()
+        unhealthful = (data.get('Unheathful') or '').strip()
+        measure = (data.get('Measure') or '').strip()
+
+        header = "【城市空气质量指数】"
+        message = header + f"{time_point}，{area}空气质量指数{aqi}，等级{quality}，一氧化碳指数{co_level}，二氧化氮指数{no2_level}，臭氧指数{o3_level}，二氧化硫指数{so2_level}，PM10指数{pm10_level}，PM2.5指数{pm25_level}，首要污染物：{primary}。{unhealthful}，{measure}。"
+        # 保证单行显示与末尾标点
+        message = message.replace('\n', ' ').strip()
+        if not message.endswith(('。', '！', '？')):
+            message += '。'
+        return message
 
     def _format_report_message(self, data: Dict[str, Any]) -> str:
         """

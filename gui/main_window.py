@@ -1898,8 +1898,24 @@ class MainWindow(QMainWindow):
                         # 检查是否正在滚动
                         is_scrolling = self.scrolling_text and self.scrolling_text.is_scrolling()
                         
-                        # 按数据源批量替换消息（每个数据源只保留一条最新消息），静默更新
-                        update_results = self.report_buffer.batch_replace_by_source(all_messages)
+                        # 按数据源批量替换消息
+                        # fanstudio_aqi 需要保留同一数据源的多条独立城市 AQI 报文
+                        multi_message_sources = {'fanstudio_aqi'}
+                        single_source_messages = [msg for msg in all_messages if msg.source not in multi_message_sources]
+                        multi_source_messages = [msg for msg in all_messages if msg.source in multi_message_sources]
+                        single_results = self.report_buffer.batch_replace_by_source(single_source_messages) if single_source_messages else []
+                        multi_results = self.report_buffer.batch_replace_or_add(multi_source_messages) if multi_source_messages else []
+                        
+                        update_results = []
+                        single_idx = 0
+                        multi_idx = 0
+                        for msg in all_messages:
+                            if msg.source in multi_message_sources:
+                                update_results.append(multi_results[multi_idx])
+                                multi_idx += 1
+                            else:
+                                update_results.append(single_results[single_idx])
+                                single_idx += 1
                         
                         # 检查是否有消息更新，并处理当前正在显示的数据源
                         for i, msg in enumerate(all_messages):
@@ -1922,15 +1938,27 @@ class MainWindow(QMainWindow):
                                                                   self._current_displaying_message.source == msg.source)
                                 
                                 if is_currently_displaying_source:
-                                    # 如果当前正在显示该数据源的消息
-                                    # 从缓冲区中获取更新后的消息（因为已经替换了）
-                                    updated_msg = self.report_buffer.find_by_source(msg.source)
-                                    if updated_msg:
-                                        # 标记为待更新，等待当前数据源轮播完成后替换
-                                        self._pending_update_message = updated_msg
-                                        logger.debug(f"[{msg.source}] 等待轮播完成后更新")
+                                    # 对于多条同一数据源（如 fanstudio_aqi），只在当前展示的事件匹配时才更新
+                                    if msg.source in multi_message_sources and self._current_displaying_message.event_id and msg.event_id:
+                                        if self._current_displaying_message.event_id == msg.event_id:
+                                            updated_msg = self.report_buffer.find_by_event_id(msg.event_id, msg.source)
+                                            if updated_msg:
+                                                self._pending_update_message = updated_msg
+                                                logger.debug(f"[{msg.source}] 等待轮播完成后更新当前事件 {msg.event_id}")
+                                            else:
+                                                logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source} / {msg.event_id}")
+                                        else:
+                                            logger.debug(f"[{msg.source}] 当前正在展示不同事件（{self._current_displaying_message.event_id}），不打断当前轮播")
                                     else:
-                                        logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source}")
+                                        # 如果当前正在显示该数据源的消息
+                                        # 从缓冲区中获取更新后的消息（因为已经替换了）
+                                        updated_msg = self.report_buffer.find_by_source(msg.source)
+                                        if updated_msg:
+                                            # 标记为待更新，等待当前数据源轮播完成后替换
+                                            self._pending_update_message = updated_msg
+                                            logger.debug(f"[{msg.source}] 等待轮播完成后更新")
+                                        else:
+                                            logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source}")
                                 else:
                                     # 如果不在显示该数据源的消息，已静默更新缓冲区，不打断当前轮播
                                     logger.debug(f"数据源【{msg.source}】不在显示，已静默更新缓冲区，不打断当前轮播")

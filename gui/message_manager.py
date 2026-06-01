@@ -21,8 +21,10 @@ logger = get_logger()
 # 速报播放顺序：气象预警、海啸信息、cenc-ir、cenc、ningxia、guangxi、shanxi、beijing、yunnan、cwa、p2pquake、p2pquake_tsunami、jma_volcano、hko、usgs、emsc、bcsf、gfz、usp、kma、fssn
 SOURCE_PRIORITY: Dict[str, int] = {
     'weatheralarm': 1,
-    'tsunami': 2,
-    '海啸信息': 2,
+    'fanstudio_aqi': 2,
+    'fanstudio_typhoon': 3,
+    'tsunami': 4,
+    '海啸信息': 4,
     
     # 速报数据源 - 按指定顺序设置优先级
     'cenc-ir': 3,
@@ -72,7 +74,7 @@ SOURCE_FIXED_ORDER: List[str] = [
     'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
     'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
     # 速报
-    'weatheralarm', 'tsunami', '海啸信息',
+    'weatheralarm', 'fanstudio_aqi', 'fanstudio_typhoon', 'tsunami', '海啸信息',
     'cenc-ir', 'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
     'p2pquake', 'p2pquake_tsunami', 'jma_volcano',
     'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma',
@@ -182,8 +184,19 @@ class MessageQueue:
             self.queue.put(item, block=block, timeout=timeout)
             return True
         except queue.Full:
-            logger.warning("消息队列已满，丢弃最旧消息")
             try:
+                # 优先保留更高优先级消息，低优先级消息先被丢弃
+                oldest_item = None
+                with self.queue.mutex:
+                    if len(self.queue.queue) > 0:
+                        oldest_item = self.queue.queue[0]
+                if isinstance(oldest_item, MessageItem) and isinstance(item, MessageItem):
+                    oldest_priority = get_source_priority(oldest_item.source)
+                    incoming_priority = get_source_priority(item.source)
+                    if incoming_priority >= oldest_priority:
+                        logger.warning("消息队列已满，丢弃新消息")
+                        return False
+                logger.warning("消息队列已满，丢弃最旧低优先级消息")
                 self.queue.get_nowait()  # 移除最旧消息
                 self.queue.put(item, block=False)  # 添加新消息
                 return True
@@ -234,7 +247,7 @@ class MessageQueue:
 class MessageBuffer:
     """消息缓冲区，用于循环显示消息，支持按优先级排序和轮播"""
     
-    def __init__(self, max_size: int = 10, use_priority: bool = True):
+    def __init__(self, max_size: int = 40, use_priority: bool = True):
         """
         初始化消息缓冲区
         
@@ -266,14 +279,7 @@ class MessageBuffer:
         with self._lock:
             # 限制缓冲区大小
             if len(self.buffer) >= self.max_size:
-                removed_msg = self.buffer.pop(0)
-                # 清理被移除消息的添加顺序记录
-                msg_id = id(removed_msg)
-                if msg_id in self._message_add_order:
-                    del self._message_add_order[msg_id]
-                # 调整当前索引
-                if self.current_index > 0:
-                    self.current_index -= 1
+                self._remove_lowest_priority_message()
             
             # 记录消息的添加顺序
             msg_id = id(message)
@@ -301,6 +307,10 @@ class MessageBuffer:
             # 查找是否有同一条事件的消息
             for i, existing_msg in enumerate(self.buffer):
                 if message.is_same_event(existing_msg):
+                    # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
+                    if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
+                        logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
+                        return False
                     # 找到同一条事件，替换
                     old_msg_id = id(existing_msg)
                     new_msg_id = id(message)
@@ -322,14 +332,7 @@ class MessageBuffer:
             
             # 没有找到同一条事件，添加新消息
             if len(self.buffer) >= self.max_size:
-                removed_msg = self.buffer.pop(0)
-                # 清理被移除消息的添加顺序记录
-                msg_id = id(removed_msg)
-                if msg_id in self._message_add_order:
-                    del self._message_add_order[msg_id]
-                # 调整当前索引
-                if self.current_index > 0:
-                    self.current_index -= 1
+                self._remove_lowest_priority_message()
             
             # 记录消息的添加顺序
             msg_id = id(message)
@@ -384,6 +387,12 @@ class MessageBuffer:
                 # 查找是否有同一条事件的消息（在缓冲区中）
                 for i, existing_msg in enumerate(self.buffer):
                     if message.is_same_event(existing_msg):
+                        # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
+                        if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
+                            logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
+                            unique_results.append(False)
+                            replaced = True
+                            break
                         # 找到同一条事件，替换
                         old_msg_id = id(existing_msg)
                         new_msg_id = id(message)
@@ -405,14 +414,7 @@ class MessageBuffer:
                 if not replaced:
                     # 没有找到同一条事件，添加新消息
                     if len(self.buffer) >= self.max_size:
-                        removed_msg = self.buffer.pop(0)
-                        # 清理被移除消息的添加顺序记录
-                        msg_id = id(removed_msg)
-                        if msg_id in self._message_add_order:
-                            del self._message_add_order[msg_id]
-                        # 调整当前索引
-                        if self.current_index > 0:
-                            self.current_index -= 1
+                        self._remove_lowest_priority_message()
                     
                     # 记录消息的添加顺序
                     msg_id = id(message)
@@ -464,6 +466,10 @@ class MessageBuffer:
             # 查找是否有相同数据源的消息
             for i, existing_msg in enumerate(self.buffer):
                 if message.source == existing_msg.source:
+                    # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
+                    if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
+                        logger.debug(f"忽略重复更新消息: {message.source}")
+                        return False
                     # 找到相同数据源，替换
                     old_msg_id = id(existing_msg)
                     new_msg_id = id(message)
@@ -486,14 +492,7 @@ class MessageBuffer:
             
             # 没有找到相同数据源，添加新消息
             if len(self.buffer) >= self.max_size:
-                removed_msg = self.buffer.pop(0)
-                # 清理被移除消息的添加顺序记录
-                msg_id = id(removed_msg)
-                if msg_id in self._message_add_order:
-                    del self._message_add_order[msg_id]
-                # 调整当前索引
-                if self.current_index > 0:
-                    self.current_index -= 1
+                self._remove_lowest_priority_message()
             
             # 记录消息的添加顺序
             msg_id = id(message)
@@ -558,6 +557,12 @@ class MessageBuffer:
                 # 查找是否有相同数据源的消息（在缓冲区中）
                 for i, existing_msg in enumerate(self.buffer):
                     if message.source == existing_msg.source:
+                        # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
+                        if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
+                            logger.debug(f"忽略重复更新消息: {message.source}")
+                            unique_results.append(False)
+                            replaced = True
+                            break
                         # 找到相同数据源，替换
                         old_msg_id = id(existing_msg)
                         new_msg_id = id(message)
@@ -588,14 +593,7 @@ class MessageBuffer:
                 if not replaced:
                     # 没有找到相同数据源，添加新消息
                     if len(self.buffer) >= self.max_size:
-                        removed_msg = self.buffer.pop(0)
-                        # 清理被移除消息的添加顺序记录
-                        msg_id = id(removed_msg)
-                        if msg_id in self._message_add_order:
-                            del self._message_add_order[msg_id]
-                        # 调整当前索引
-                        if self.current_index > 0:
-                            self.current_index -= 1
+                        self._remove_lowest_priority_message()
                     
                     # 记录消息的添加顺序
                     msg_id = id(message)
@@ -674,7 +672,33 @@ class MessageBuffer:
         """buffer 中原地替换 MessageItem 后，将当前展示指针从旧对象 id 指向新对象 id。"""
         if self._current_displaying_msg_id == old_msg_id:
             self._current_displaying_msg_id = new_msg_id
-    
+
+    def _remove_lowest_priority_message(self) -> Optional[MessageItem]:
+        """从缓冲区中移除最低优先级、最旧的消息。"""
+        if not self.buffer:
+            return None
+
+        def removal_key(msg: MessageItem) -> tuple:
+            priority = get_source_priority(msg.source)
+            add_order = self._message_add_order.get(id(msg), float('inf'))
+            # 先按优先级降序，低优先级先被移除；同优先级内先移除最旧消息
+            return (-priority, add_order)
+
+        remove_index = min(range(len(self.buffer)), key=lambda i: removal_key(self.buffer[i]))
+        removed_msg = self.buffer.pop(remove_index)
+        msg_id = id(removed_msg)
+        if msg_id in self._message_add_order:
+            del self._message_add_order[msg_id]
+
+        if self.current_index > remove_index:
+            self.current_index -= 1
+        elif self.current_index == remove_index:
+            self._current_displaying_msg_id = None
+            if self.current_index >= len(self.buffer):
+                self.current_index = 0
+
+        return removed_msg
+
     def _sort_by_priority(self):
         """按优先级与固定 source 顺序排序缓冲区"""
         # 保存当前正在显示的消息ID

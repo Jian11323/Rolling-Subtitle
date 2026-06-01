@@ -30,6 +30,11 @@ P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1",
 ]
 
+FANSTUDIO_HTTP_SOURCE_KEYS: List[str] = [
+    "https://api.fanstudio.tech/we/typhoon.php",
+    "https://api.fanstudio.tech/we/aqi.php",
+]
+
 
 def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     """
@@ -41,17 +46,16 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.9"
+APP_VERSION = "2.4.11"
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.9
+CHANGELOG_TEXT = """版本 2.4.11
 
-1、重写部分设置选项
-2、"""
+1、修复部分数据源无法关闭问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -170,7 +174,7 @@ class MessageConfig:
     max_other_inactivity_time: int = 300
     # 主线程消息队列与展示缓冲区容量（缓解高并发时丢消息）
     message_queue_maxsize: int = 300
-    message_buffer_max_size: int = 50
+    message_buffer_max_size: int = 100
     no_activity_message: str = '系统运行中，等待最新地震信息...'
     custom_text: str = '系统运行中，等待最新地震信息...'
     use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
@@ -614,6 +618,10 @@ class Config:
             return False
         if 'fanstudio.tech' not in url and 'fanstudio.hk' not in url:
             return False
+        # Fan Studio HTTP 源（如 typhoon.php、aqi.php）不应被视为“历史遗留的单项 URL”，
+        # 它们需要持久化开关状态，否则用户关闭后重启会被恢复为默认启用。
+        if url.startswith('http://') or url.startswith('https://'):
+            return False
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         nu = url.replace('fanstudio.hk', 'fanstudio.tech').rstrip("/").lower()
@@ -641,14 +649,14 @@ class Config:
     def _enforce_public_ws_sources(self) -> List[str]:
         """
         公开版连接策略：仅保留 3 个公开 WebSocket 数据源，
-        并仅保留 P2PQuake 的两个 HTTP 拉取配置项。
+        并仅保留 P2PQuake 与 Fan Studio 的 HTTP 拉取配置项。
         Returns:
             被移除的 URL 列表
         """
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         allowed_ws = {all_url, *WS_URL_CANONICAL_ORDER}
-        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS)
+        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS)
         removed: List[str] = []
         for url in list(self.enabled_sources.keys()):
             if self._is_websocket_url(url) and url not in allowed_ws:
@@ -665,7 +673,7 @@ class Config:
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         allowed_ws = {all_url, *WS_URL_CANONICAL_ORDER}
-        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS)
+        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS)
         return {
             k: v
             for k, v in self.enabled_sources.items()
@@ -934,6 +942,8 @@ class Config:
                 # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
                 self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+                self.enabled_sources["https://api.fanstudio.tech/we/typhoon.php"] = True
+                self.enabled_sources["https://api.fanstudio.tech/we/aqi.php"] = True
                 self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
                 logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
@@ -946,6 +956,10 @@ class Config:
                     self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
                 if "https://api.p2pquake.net/v2/jma/tsunami?limit=1" not in self.enabled_sources:
                     self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+                if "https://api.fanstudio.tech/we/typhoon.php" not in self.enabled_sources:
+                    self.enabled_sources["https://api.fanstudio.tech/we/typhoon.php"] = True
+                if "https://api.fanstudio.tech/we/aqi.php" not in self.enabled_sources:
+                    self.enabled_sources["https://api.fanstudio.tech/we/aqi.php"] = True
                 other_wss_urls = [
                     "wss://ws.fanstudio.tech/cenc-ir",
                     "wss://ws-api.wolfx.jp/all_eew",
@@ -1091,6 +1105,8 @@ class Config:
         # P2PQuake 仅 WSS + 启动时 HTTP 拉 1 条，不启用 HTTP 轮询
         self.enabled_sources["https://api.p2pquake.net/v2/history?codes=551&limit=3"] = False
         self.enabled_sources["https://api.p2pquake.net/v2/jma/tsunami?limit=1"] = False
+        self.enabled_sources["https://api.fanstudio.tech/we/typhoon.php"] = True
+        self.enabled_sources["https://api.fanstudio.tech/we/aqi.php"] = True
         self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
         self.enabled_sources["wss://ws-api.wolfx.jp/cwa_eew"] = False
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
@@ -1155,7 +1171,13 @@ class Config:
         """获取数据源名称。Fan Studio 子源用 path 代号映射（不写完整 wss URL），其余用完整 URL 映射。"""
         if self.custom_data_source_url and url == self.custom_data_source_url:
             return "custom"
-        normalized_url = url.replace('fanstudio.hk', 'fanstudio.tech')
+        normalized_url = url.replace('fanstudio.hk', 'fanstudio.tech').rstrip('/')
+        http_url_to_name = {
+            "https://api.fanstudio.tech/we/typhoon.php": "fanstudio_typhoon",
+            "https://api.fanstudio.tech/we/aqi.php": "fanstudio_aqi",
+        }
+        if normalized_url in http_url_to_name:
+            return http_url_to_name[normalized_url]
         # Fan Studio wss：从 URL 抽 path，用代号查表，避免在代码中写单项 API 链接
         if ('fanstudio.tech' in normalized_url or 'fanstudio.hk' in url) and normalized_url.startswith(('wss://', 'ws://')):
             try:
@@ -1208,6 +1230,8 @@ class Config:
             "p2pquake": "日本气象厅地震情报",
             "p2pquake_tsunami": "日本气象厅海啸预报",
             "hko": "香港天文台",
+            "fanstudio_typhoon": "台风实时与历史数据",
+            "fanstudio_aqi": "城市空气质量指数",
             "usgs": "美国地质调查局",
             "sa": "美国ShakeAlert地震预警",
             "emsc": "欧洲地中海地震中心",

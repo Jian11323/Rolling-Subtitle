@@ -178,7 +178,8 @@ class SettingsWindow(QDialog):
 
         # 数据源分类定义
         self.source_vars = {}
-        self.source_parse_labels = {}   # parse_key -> QLabel，显示「已解析/未解析」
+        self.source_parse_labels = {}   # parse_key -> QLabel，显示「已解析/未解析」或「已连接/未连接」
+        self.source_status_texts: Dict[str, tuple] = {}  # key -> (connected_text, disconnected_text, tooltip)
         # 数据源状态页：按分钟记录绿/红条（True=绿，False=红）
         self._status_minute_bars: Dict[str, List[bool]] = {}
         self._status_last_minute_key: Dict[str, str] = {}
@@ -284,22 +285,25 @@ class SettingsWindow(QDialog):
             self._update_data_source_health_table()
 
     def _update_parse_status_labels(self):
-        """根据配置刷新解析状态标签。"""
+        """根据配置刷新解析/连接状态标签。"""
         try:
             mc = self.config.message_config
             for key, lbl in self.source_parse_labels.items():
                 if not lbl:
                     continue
-                cb = getattr(self, f"{key}_cb", None)
+                cb = self.source_vars.get(key) or getattr(self, f"{key}_cb", None)
                 if cb is not None and hasattr(cb, "isChecked"):
                     enabled = bool(cb.isChecked())
                 else:
                     enabled = bool(getattr(mc, key, False))
+                status_texts = self.source_status_texts.get(key, ("已解析", "未解析", "解析状态：已解析 / 未解析"))
+                connected_text, disconnected_text, tooltip = status_texts
+                lbl.setToolTip(tooltip)
                 if enabled:
-                    lbl.setText("已解析")
+                    lbl.setText(connected_text)
                     lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
                 else:
-                    lbl.setText("未解析")
+                    lbl.setText(disconnected_text)
                     lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
         except Exception as e:
             logger.debug(f"更新解析状态标签失败: {e}")
@@ -1055,18 +1059,43 @@ class SettingsWindow(QDialog):
             group_warning,
             "wss://ws.fanstudio.tech/cenc-ir",
             "中国地震台网中心地震烈度速报",
-            default_value=True
+            default_value=True,
+            status_key="wss://ws.fanstudio.tech/cenc-ir",
+            status_tooltip="连接状态：已连接 / 未连接",
+            status_connected_text="已连接",
+            status_disconnected_text="未连接",
+        )
+        self._add_source_checkbox(
+            group_warning,
+            "https://api.fanstudio.tech/we/typhoon.php",
+            "台风实时与历史数据",
+            default_value=True,
+            status_key="https://api.fanstudio.tech/we/typhoon.php",
+            status_tooltip="解析状态：已解析 / 未解析",
+            status_connected_text="已解析",
+            status_disconnected_text="未解析",
+        )
+        self._add_source_checkbox(
+            group_warning,
+            "https://api.fanstudio.tech/we/aqi.php",
+            "城市空气质量指数",
+            default_value=True,
+            status_key="https://api.fanstudio.tech/we/aqi.php",
+            status_tooltip="解析状态：已解析 / 未解析",
+            status_connected_text="已解析",
+            status_disconnected_text="未解析",
         )
         # Fan Studio 所有子源纵向排列
         def _fs_cb(cfg_name: str, text: str) -> QCheckBox:
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
             cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-            status_label = QLabel("未解析")
-            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            status_label = QLabel("已解析")
+            status_label.setStyleSheet(STYLE_STATUS_CONNECTED)
             status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             status_label.setToolTip("解析状态：已解析 / 未解析")
             self.source_parse_labels[cfg_name] = status_label
+            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：已解析 / 未解析")
             row_layout = QHBoxLayout()
             row_layout.addWidget(cb)
             row_layout.addStretch()
@@ -1220,7 +1249,18 @@ class SettingsWindow(QDialog):
         self.notebook.addTab(scroll_area, "数据源")
         self._update_parse_status_labels()
     
-    def _add_source_checkbox(self, parent, url, name, is_all_source=False, default_value=False):
+    def _add_source_checkbox(
+        self,
+        parent,
+        url,
+        name,
+        is_all_source=False,
+        default_value=False,
+        status_key=None,
+        status_tooltip="解析状态：已解析 / 未解析",
+        status_connected_text="已解析",
+        status_disconnected_text="未解析",
+    ):
         """添加数据源复选框"""
         # 特殊处理：fanstudio_warning和fanstudio_report（仅用勾选控制解析范围，不写入单项 URL）
         if url in ["fanstudio_warning", "fanstudio_report"]:
@@ -1250,11 +1290,32 @@ class SettingsWindow(QDialog):
             # 如果是Fan Studio数据源（WebSocket URL），记录到Fan Studio列表
             if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
                 self.fanstudio_source_urls.append(url)
-        
-        # 不再需要互斥逻辑，因为all数据源已隐藏，所有单项数据源都从all数据源解析
-        
-        if isinstance(parent.layout(), QVBoxLayout):
-            parent.layout().addWidget(checkbox)
+
+        if status_key:
+            status_label = QLabel(status_connected_text if initial_value else status_disconnected_text)
+            status_label.setStyleSheet(STYLE_STATUS_CONNECTED if initial_value else STYLE_STATUS_NEUTRAL)
+            status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            status_label.setToolTip(status_tooltip)
+            self.source_parse_labels[status_key] = status_label
+            self.source_status_texts[status_key] = (
+                status_connected_text,
+                status_disconnected_text,
+                status_tooltip,
+            )
+            row_layout = QHBoxLayout()
+            row_layout.addWidget(checkbox)
+            row_layout.addStretch()
+            row_layout.addWidget(status_label)
+            if isinstance(parent.layout(), QVBoxLayout):
+                parent.layout().addLayout(row_layout)
+            else:
+                parent.layout().addWidget(checkbox)
+        else:
+            # 不再需要互斥逻辑，因为all数据源已隐藏，所有单项数据源都从all数据源解析
+            if isinstance(parent.layout(), QVBoxLayout):
+                parent.layout().addWidget(checkbox)
+            else:
+                parent.layout().addWidget(checkbox)
 
     def _toggle_select_all(self):
         """切换全选/恢复默认选中状态"""
