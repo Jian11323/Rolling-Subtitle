@@ -1484,7 +1484,7 @@ class MainWindow(QMainWindow):
 
         cenc_ir_url = "wss://ws.fanstudio.tech/cenc-ir"
         if source_name == "cenc-ir" or st == "cenc-ir":
-            if not es.get(cenc_ir_url, True):
+            if not es.get(cenc_ir_url, False):
                 logger.debug("已忽略消息：烈度速报（cenc-ir）数据源已在设置中关闭")
                 return False
 

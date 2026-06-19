@@ -1037,6 +1037,7 @@ class Config:
                 self.enabled_sources["https://api.fanstudio.tech/we/aqi.php"] = True
                 self.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = True
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
+                self.enabled_sources["wss://ws.fanstudio.tech/cenc-ir"] = False
                 logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
             else:
                 if all_url not in self.enabled_sources:

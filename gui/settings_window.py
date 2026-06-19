@@ -1078,7 +1078,7 @@ class SettingsWindow(QDialog):
             group_warning,
             "wss://ws.fanstudio.tech/cenc-ir",
             "中国地震台网中心地震烈度速报",
-            default_value=True,
+            default_value=False,
             status_key="wss://ws.fanstudio.tech/cenc-ir",
             status_tooltip="连接状态：已连接 / 未连接",
             status_connected_text="已连接",
@@ -2184,7 +2184,7 @@ class SettingsWindow(QDialog):
             if not self.config.log_config.validate():
                 QMessageBox.warning(self, "警告", "日志配置验证失败，请检查设置")
                 return False
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
             if show_message:
                 msg = QMessageBox(self)
                 msg.setWindowTitle("成功")
@@ -2685,6 +2685,36 @@ class SettingsWindow(QDialog):
             logger.error(f"检查更新失败: {e}")
             QMessageBox.critical(self, "错误", str(e))
     
+    def _sync_data_source_connection_switches_to_config(self):
+        """将「数据源」页连接开关同步到内存，避免在其他标签页保存时覆盖用户勾选。"""
+        if not hasattr(self, "source_vars"):
+            return
+        self._update_base_urls()
+        all_url = self.all_source_url
+        if hasattr(self, "fanstudio_all_connect_cb"):
+            self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
+        for url, checkbox in self.source_vars.items():
+            if url and url != all_url:
+                self.config.enabled_sources[url] = checkbox.isChecked()
+        if hasattr(self, "p2pquake_connect_cb"):
+            p2p_master = self.p2pquake_connect_cb.isChecked()
+            self.config.enabled_sources[P2PQUAKE_WSS_URL] = p2p_master
+            for http_u in P2PQUAKE_HTTP_SOURCE_KEYS:
+                self.config.enabled_sources[http_u] = p2p_master
+        if hasattr(self, "wolfx_all_connect_cb"):
+            self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = (
+                self.wolfx_all_connect_cb.isChecked()
+            )
+        removed_ws = self.config._enforce_public_ws_sources()
+        if removed_ws:
+            logger.debug(f"同步数据源连接开关时已清理非公开 WebSocket: {removed_ws}")
+        self.config.ws_urls = self.config._build_ws_urls_ordered()
+
+    def _save_config_with_data_source_toggles(self):
+        """保存配置前同步数据源连接开关，防止跨标签页保存把旧开关写回文件。"""
+        self._sync_data_source_connection_switches_to_config()
+        self.config.save_config()
+    
     def _save_data_source_settings(self, silent_restart=False):
         """保存数据源设置。silent_restart=True 时不弹「已保存」提示，直接重启。"""
         try:
@@ -2746,25 +2776,7 @@ class SettingsWindow(QDialog):
 
             # P2PQuake 仅使用 WSS + 启动时 HTTP 聚合拉取（内部固定 URL），不启用 HTTP 轮询
             # 更新其他数据源配置（NIED、P2PQuake WSS 等）
-            for url, checkbox in self.source_vars.items():
-                if url and url != all_url:
-                    self.config.enabled_sources[url] = checkbox.isChecked()
-            p2pquake_wss_url = P2PQUAKE_WSS_URL
-            if hasattr(self, "p2pquake_connect_cb"):
-                p2p_master = self.p2pquake_connect_cb.isChecked()
-                self.config.enabled_sources[p2pquake_wss_url] = p2p_master
-                for http_u in P2PQUAKE_HTTP_SOURCE_KEYS:
-                    self.config.enabled_sources[http_u] = p2p_master
-            if hasattr(self, "wolfx_all_connect_cb"):
-                self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = (
-                    self.wolfx_all_connect_cb.isChecked()
-                )
-            removed_ws = self.config._enforce_public_ws_sources()
-            if removed_ws:
-                logger.info(f"设置保存时已移除非公开 WebSocket 数据源: {removed_ws}")
-            
-            # 按固定顺序构建 ws_urls，确保轮播数据源顺序不变
-            self.config.ws_urls = self.config._build_ws_urls_ordered()
+            self._sync_data_source_connection_switches_to_config()
             logger.info(f"已更新ws_urls，包含{len(self.config.ws_urls)}个WebSocket数据源: {self.config.ws_urls}")
             
             # 地震速报 / 自定义文本 二选一
@@ -2779,7 +2791,7 @@ class SettingsWindow(QDialog):
             self.config._ensure_http_poll_interval_defaults()
             
             # 保存到文件
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
             
             logger.debug("数据源设置已保存")
             
@@ -2968,7 +2980,7 @@ class SettingsWindow(QDialog):
                 self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked()
 
             # 保存到文件
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
 
             # 通知主窗口更新（热更新，立即生效）
             self.config._notify_config_changed()
@@ -2996,7 +3008,7 @@ class SettingsWindow(QDialog):
                 new_backend = "cpu"
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
             self.config._notify_config_changed()
             msg = QMessageBox(self)
             msg.setWindowTitle("成功")
@@ -3022,7 +3034,7 @@ class SettingsWindow(QDialog):
             self.config.message_config.custom_text_color = self.current_custom_text_color
             
             # 保存到文件
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
             
             # 通知主窗口更新（热更新，立即生效）
             self.config._notify_config_changed()
@@ -3144,7 +3156,7 @@ class SettingsWindow(QDialog):
             if ct_min_spin is not None:
                 self.config.message_config.custom_text_return_seconds = max(60, min(3600, ct_min_spin.value() * 60))
 
-            self.config.save_config()
+            self._save_config_with_data_source_toggles()
             self.config._notify_config_changed()
             
             need_restart = timezone_changed or render_changed

@@ -304,7 +304,7 @@ class FanStudioAdapter(BaseAdapter):
                         config = Config()
                     # 烈度速报独立 WSS 已关闭时，/all 仍可能推送同源 update，此处与 main_window 入口过滤一致
                     if source == 'cenc-ir' and not config.enabled_sources.get(
-                        "wss://ws.fanstudio.tech/cenc-ir", True
+                        "wss://ws.fanstudio.tech/cenc-ir", False
                     ):
                         logger.debug("[FanStudio] update cenc-ir：独立数据源已关闭，跳过")
                         return None
