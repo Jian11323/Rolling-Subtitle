@@ -15,6 +15,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from utils.logger import get_logger
 from utils import timezone_utils
+from utils.place_name_utils import should_apply_place_name_fix, should_translate_place_name
+from utils.translation_service import TranslationService
+
+_place_name_fixer = None
+
+
+def _get_place_name_fixer():
+    global _place_name_fixer
+    if _place_name_fixer is None:
+        try:
+            from utils.place_name_fixer import PlaceNameFixer
+            _place_name_fixer = PlaceNameFixer()
+        except Exception as e:
+            logger.debug(f"初始化地名修正器失败: {e}")
+            _place_name_fixer = None
+    return _place_name_fixer
 
 
 def warning_shock_validity_max_seconds(source_type: str, msg_cfg: Any) -> float:
@@ -28,7 +44,7 @@ def warning_shock_validity_max_seconds(source_type: str, msg_cfg: Any) -> float:
                 msg_cfg.warning_shock_validity_seconds,
             )
         )
-    if st == "wolfx_sc_eew":
+    if st in ("wolfx_sc_eew", "early_est"):
         return float(
             getattr(
                 msg_cfg,
@@ -79,6 +95,90 @@ class MessageProcessor:
     
     def __init__(self):
         self.config = Config()
+        try:
+            self.translator = TranslationService(self.config)
+            logger.info("翻译服务已初始化")
+        except Exception as e:
+            logger.error(f"初始化翻译服务失败: {e}")
+            self.translator = None
+
+    def _apply_coord_place_name_fix(
+        self,
+        place_name: str,
+        source_type: str,
+        lat: Optional[float],
+        lon: Optional[float],
+    ) -> str:
+        """按经纬度修正地名（fe_fix 区域库）。"""
+        if lat is None or lon is None:
+            return place_name
+        fixer = _get_place_name_fixer()
+        if not fixer or not fixer.is_supported(source_type):
+            return place_name
+        try:
+            fixed = fixer.fix_place_name(place_name, lat, lon, source_type)
+            if fixed and fixed != place_name:
+                logger.debug(f"地名修正: {place_name} -> {fixed} ({source_type})")
+                return fixed
+        except Exception as e:
+            logger.debug(f"地名修正失败: {e}")
+        return place_name
+
+    def _localize_place_name(
+        self,
+        place_name: str,
+        source_type: str,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+    ) -> str:
+        """地名修正或百度翻译：非中文数据源二选一；翻译失败时回退经纬度修正。"""
+        if not place_name:
+            return place_name
+
+        lat = self._safe_float(latitude, 0.0) if latitude is not None else None
+        lon = self._safe_float(longitude, 0.0) if longitude is not None else None
+        if lat is not None and lon is not None and lat == 0.0 and lon == 0.0:
+            lat = lon = None
+
+        if should_apply_place_name_fix(self.config):
+            place_name = self._apply_coord_place_name_fix(
+                place_name, source_type, lat, lon
+            )
+            return place_name
+
+        if not getattr(self.config.translation_config, "enabled", False):
+            return place_name
+        if not should_translate_place_name(source_type, place_name):
+            return place_name
+        if not self.translator:
+            return place_name
+        original = place_name
+        try:
+            translated = self.translator.translate(place_name, quick_mode=False)
+            if translated and translated != place_name:
+                logger.info(f"地名翻译: {place_name} -> {translated} ({source_type})")
+                return translated
+        except Exception as e:
+            logger.warning(f"翻译地名失败，保持原文: {place_name}, 错误: {e}")
+        # 百度翻译未生效时，仍尝试经纬度修正（如 BMKG / GeoNet / INGV 等）
+        return self._apply_coord_place_name_fix(original, source_type, lat, lon)
+
+    def _translate_text_if_needed(self, text: str) -> str:
+        """百度翻译模式下，翻译含非中文的文本（如火山情报字段）。"""
+        if not text or not getattr(self.config.translation_config, "enabled", False):
+            return text
+        if not self.translator:
+            return text
+        has_non_chinese = bool(re.search(r"[^\u4e00-\u9fff\s]", text))
+        if not has_non_chinese:
+            return text
+        try:
+            translated = self.translator.translate(text, quick_mode=False)
+            if translated and translated.strip():
+                return translated.strip()
+        except Exception as e:
+            logger.debug(f"文本翻译失败，保持原文: {e}")
+        return text
     
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -444,7 +544,7 @@ class MessageProcessor:
         注意：
         - cancel字段为true时，消息会被忽略（不显示）
         - final字段为true时，显示"最终报"而不是"第x报"
-        - 预警地名保持数据源原文（公开版不进行翻译）
+        - 预警地名：百度翻译模式下对非中文数据源翻译；地名修正模式下保持适配器处理结果
         """
         try:
             organization = data.get('organization', '')
@@ -461,6 +561,13 @@ class MessageProcessor:
             info_type = ''
             magnitude = self._safe_float(data.get('magnitude', 0), 0.0)
             place_name = data.get('place_name', '')
+
+        place_name = self._localize_place_name(
+            place_name,
+            source_type,
+            data.get('latitude'),
+            data.get('longitude'),
+        )
         
         # 获取updates、shock_time、depth等字段并构建消息
         updates = data.get('updates')
@@ -510,6 +617,8 @@ class MessageProcessor:
                 message_parts.append("【Wolfx重庆市地震局】")
             elif source_type == 'wolfx_cwa_eew':
                 message_parts.append("【Wolfx 台湾中央气象署】")
+            elif source_type == 'early_est':
+                message_parts.append("【Early-est预警】")
             elif source_type == 'jma':
                 # 日本气象厅格式：【日本气象厅 紧急地震速报 infoTypeName】
                 if info_type:
@@ -847,8 +956,12 @@ class MessageProcessor:
         depth = self._safe_float(data.get('depth', 0), 10.0)  # 无深度时默认为10km
         info_type = data.get('info_type', '')  # 获取infoTypeName字段（用于CENC）
         
-        # 速报消息使用地名修正（已在适配器中完成，这里不再进行翻译）
-        # 地名修正逻辑在adapters/fanstudio_adapter.py的_parse_earthquake_report方法中处理
+        place_name = self._localize_place_name(
+            place_name,
+            data.get('source_type', ''),
+            data.get('latitude'),
+            data.get('longitude'),
+        )
         
         # 格式化时间
         if not shock_time:
@@ -1111,25 +1224,10 @@ class MessageProcessor:
         description = (data.get('description') or '').strip()
         name = (data.get('name') or '').strip()
         shock_time = (data.get('shock_time') or '').strip()
-        if getattr(self.config.translation_config, 'use_volcano_translation', False):
-            app_id = getattr(self.config.translation_config, 'baidu_app_id', '') or ''
-            secret = getattr(self.config.translation_config, 'baidu_secret', '') or ''
-            if app_id and secret:
-                try:
-                    from utils.translation_service import TranslationService
-                    if not hasattr(self, '_volcano_translation_service'):
-                        self._volcano_translation_service = TranslationService(self.config.translation_config)
-                    svc = self._volcano_translation_service
-                    if title:
-                        title = svc.translate(title, force_lang='zh', skip_cache=False)
-                    if volcano:
-                        volcano = svc.translate(volcano, force_lang='zh', skip_cache=False)
-                    if description:
-                        description = svc.translate(description, force_lang='zh', skip_cache=False)
-                    if name:
-                        name = svc.translate(name, force_lang='zh', skip_cache=False)
-                except Exception as e:
-                    logger.debug(f"火山情报翻译跳过: {e}")
+        title = self._translate_text_if_needed(title)
+        volcano = self._translate_text_if_needed(volcano)
+        description = self._translate_text_if_needed(description)
+        name = self._translate_text_if_needed(name)
         if getattr(self.config.message_config, 'force_single_line', True):
             title = (title or '').replace('\n', ' ')
             volcano = (volcano or '').replace('\n', ' ')
@@ -1143,7 +1241,12 @@ class MessageProcessor:
     def _format_generic_message(self, data: Dict[str, Any]) -> str:
         """格式化通用消息"""
         organization = data.get('organization', '')
-        place_name = data.get('place_name', '')
+        place_name = self._localize_place_name(
+            data.get('place_name', ''),
+            data.get('source_type', ''),
+            data.get('latitude'),
+            data.get('longitude'),
+        )
         shock_time = data.get('shock_time', '')
         
         parts = [f"【{organization}】"]

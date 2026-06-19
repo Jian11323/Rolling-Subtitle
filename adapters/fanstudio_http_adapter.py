@@ -187,7 +187,17 @@ class FanStudioHttpAdapter(BaseAdapter):
 
         if isinstance(data, list):
             items = [build_item(entry) for entry in data if isinstance(entry, dict)]
-            return items if items else None
+            if not items:
+                return None
+            # 首包仅入队最新一批，避免 300+ 城市同时灌满消息队列
+            items.sort(key=lambda x: (x.get('shock_time') or ''), reverse=True)
+            max_aqi_batch = 30
+            if len(items) > max_aqi_batch:
+                logger.debug(
+                    f"[FanStudio HTTP] AQI 共 {len(items)} 条，首包仅处理最新 {max_aqi_batch} 条"
+                )
+                items = items[:max_aqi_batch]
+            return items
         if isinstance(data, dict):
             return build_item(data)
         return None

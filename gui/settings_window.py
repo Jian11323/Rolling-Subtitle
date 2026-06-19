@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QStyle, QShortcut,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
-from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence
+from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics
 from typing import Optional, Dict, Any, List, Tuple
 import re
 import datetime
@@ -29,6 +29,12 @@ from config import (
     APP_DECLARATION_TEXT,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     p2pquake_master_enabled,
+    BMKG_HTTP_URL,
+    GEONET_HTTP_URL,
+    INGV_HTTP_URL,
+    EARLYEST_HTTP_URL,
+    JMA_ATOM_LONG_URL,
+    DEFAULT_HTTP_POLL_INTERVALS,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path
@@ -178,6 +184,7 @@ class SettingsWindow(QDialog):
 
         # 数据源分类定义
         self.source_vars = {}
+        self.http_poll_spinboxes: Dict[str, QSpinBox] = {}
         self.source_parse_labels = {}   # parse_key -> QLabel，显示「已解析/未解析」或「已连接/未连接」
         self.source_status_texts: Dict[str, tuple] = {}  # key -> (connected_text, disconnected_text, tooltip)
         # 数据源状态页：按分钟记录绿/红条（True=绿，False=红）
@@ -1035,6 +1042,18 @@ class SettingsWindow(QDialog):
         scroll_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         scroll_layout.setSpacing(22)
 
+        fanstudio_http_poll_sources = [
+            ("https://api.fanstudio.tech/we/typhoon.php", "台风实时与历史数据"),
+            ("https://api.fanstudio.tech/we/aqi.php", "城市空气质量指数"),
+        ]
+        intl_sources = [
+            (BMKG_HTTP_URL, "BMKG 印尼地震速报", False),
+            (GEONET_HTTP_URL, "GeoNet 新西兰地震速报", False),
+            (INGV_HTTP_URL, "INGV 意大利地震速报", False),
+            (EARLYEST_HTTP_URL, "Early-est 地震预警", False),
+            (JMA_ATOM_LONG_URL, "JMA-Atom 火山情报（长周期）", False),
+        ]
+
         # Fan Studio（QGroupBox）
         group_warning = QGroupBox("Fan Studio")
         group_warning.setStyleSheet(STYLE_GROUPBOX)
@@ -1178,6 +1197,29 @@ class SettingsWindow(QDialog):
         )
         scroll_layout.addWidget(group_ali)
 
+        # 国际/独立 HTTP 数据源（开关与访问间隔分开展示）
+        group_intl = QGroupBox("国际数据源")
+        group_intl.setStyleSheet(STYLE_GROUPBOX)
+        gi_layout = QVBoxLayout(group_intl)
+        gi_layout.setContentsMargins(12, 14, 12, 12)
+        gi_layout.setSpacing(12)
+        intl_hint = QLabel("勾选后启用对应 HTTP 拉取。")
+        intl_hint.setStyleSheet(STYLE_HINT)
+        intl_hint.setWordWrap(True)
+        gi_layout.addWidget(intl_hint)
+        for url, label, default_on in intl_sources:
+            self._add_source_checkbox(
+                group_intl,
+                url,
+                label,
+                default_value=default_on,
+                status_key=url,
+                status_tooltip="拉取状态：已启用 / 未启用",
+                status_connected_text="已启用",
+                status_disconnected_text="未启用",
+            )
+        scroll_layout.addWidget(group_intl)
+
         # 地震历史（QGroupBox）
         group_history = QGroupBox("P2PQuake")
         group_history.setStyleSheet(STYLE_GROUPBOX)
@@ -1222,6 +1264,21 @@ class SettingsWindow(QDialog):
         self.p2pquake_parse_551_cb = _p2p_parse_row("p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報")
         self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")
         scroll_layout.addWidget(group_history)
+
+        poll_interval_sources = fanstudio_http_poll_sources + [
+            (url, label) for url, label, _ in intl_sources
+        ]
+        group_poll = QGroupBox("数据源访问间隔")
+        group_poll.setStyleSheet(STYLE_GROUPBOX)
+        gp_layout = QVBoxLayout(group_poll)
+        gp_layout.setContentsMargins(12, 14, 12, 12)
+        gp_layout.setSpacing(12)
+        poll_hint = QLabel("Get 轮询间隔（秒），最低 1 秒；各数据源独立设置。")
+        poll_hint.setStyleSheet(STYLE_HINT)
+        poll_hint.setWordWrap(True)
+        gp_layout.addWidget(poll_hint)
+        self._add_http_poll_interval_grid(gp_layout, poll_interval_sources)
+        scroll_layout.addWidget(group_poll)
         
         scroll_layout.addStretch()
         
@@ -1249,6 +1306,89 @@ class SettingsWindow(QDialog):
         self.notebook.addTab(scroll_area, "数据源")
         self._update_parse_status_labels()
     
+    def _make_http_poll_spinbox(self, url: str) -> QSpinBox:
+        """为 HTTP 数据源创建 Get 间隔 SpinBox（最低 1 秒）。"""
+        spin = QSpinBox()
+        spin.setMinimum(1)
+        spin.setMaximum(2147483647)
+        spin.setSuffix(" 秒")
+        default_val = self.config.get_http_poll_interval(url)
+        spin.setValue(default_val)
+        spin.setToolTip("HTTP 数据源 Get 轮询间隔（秒）")
+        spin.setStyleSheet("font-size: 14px; min-width: 90px;")
+        self.http_poll_spinboxes[url] = spin
+        return spin
+
+    def _add_http_poll_interval_grid(
+        self,
+        parent_layout: QVBoxLayout,
+        sources: List[Tuple[str, str]],
+    ) -> None:
+        """在「数据源访问间隔」区块中以网格对齐标签与 Get 间隔输入框。"""
+        if not sources:
+            return
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(10)
+        label_font = QFont()
+        label_font.setPixelSize(16)
+        fm = QFontMetrics(label_font)
+        label_col_w = max(fm.width(label) for _, label in sources) + 12
+        spin_col_w = 110
+        hdr_style = "font-size: 14px; color: #666666; font-weight: bold;"
+        hdr_name = QLabel("数据源")
+        hdr_name.setStyleSheet(hdr_style)
+        hdr_interval = QLabel("Get 间隔")
+        hdr_interval.setStyleSheet(hdr_style)
+        grid.addWidget(hdr_name, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.addWidget(hdr_interval, 0, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        for row, (url, label) in enumerate(sources, start=1):
+            name_lbl = QLabel(label)
+            name_lbl.setStyleSheet(STYLE_LABEL)
+            name_lbl.setMinimumWidth(label_col_w)
+            poll_spin = self._make_http_poll_spinbox(url)
+            poll_spin.setFixedWidth(spin_col_w)
+            grid.addWidget(name_lbl, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+            grid.addWidget(poll_spin, row, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        grid.setColumnStretch(2, 1)
+        parent_layout.addLayout(grid)
+
+    def _add_http_source_row(
+        self,
+        parent,
+        url: str,
+        name: str,
+        default_value: bool = False,
+        status_key: Optional[str] = None,
+    ):
+        """添加带 Get 间隔的 HTTP 数据源行（开关 + 间隔 + 状态）。"""
+        config_value = self.config.enabled_sources.get(url)
+        initial_value = default_value if config_value is None else bool(config_value)
+        checkbox = QCheckBox(name, parent)
+        checkbox.setChecked(initial_value)
+        checkbox.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        self.source_vars[url] = checkbox
+        if url not in self.individual_source_urls:
+            self.individual_source_urls.append(url)
+        poll_spin = self._make_http_poll_spinbox(url)
+        sk = status_key or url
+        status_label = QLabel("已解析" if initial_value else "未解析")
+        status_label.setStyleSheet(STYLE_STATUS_CONNECTED if initial_value else STYLE_STATUS_NEUTRAL)
+        status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        status_label.setToolTip("解析状态：已解析 / 未解析")
+        self.source_parse_labels[sk] = status_label
+        self.source_status_texts[sk] = ("已解析", "未解析", "解析状态：已解析 / 未解析")
+        row_layout = QHBoxLayout()
+        row_layout.addWidget(checkbox)
+        row_layout.addWidget(QLabel("Get"))
+        row_layout.addWidget(poll_spin)
+        row_layout.addStretch()
+        row_layout.addWidget(status_label)
+        if isinstance(parent.layout(), QVBoxLayout):
+            parent.layout().addLayout(row_layout)
+        checkbox.stateChanged.connect(self._update_parse_status_labels)
+
     def _add_source_checkbox(
         self,
         parent,
@@ -1260,6 +1400,7 @@ class SettingsWindow(QDialog):
         status_tooltip="解析状态：已解析 / 未解析",
         status_connected_text="已解析",
         status_disconnected_text="未解析",
+        with_poll_interval: bool = False,
     ):
         """添加数据源复选框"""
         # 特殊处理：fanstudio_warning和fanstudio_report（仅用勾选控制解析范围，不写入单项 URL）
@@ -1304,6 +1445,9 @@ class SettingsWindow(QDialog):
             )
             row_layout = QHBoxLayout()
             row_layout.addWidget(checkbox)
+            if with_poll_interval and url:
+                row_layout.addWidget(QLabel("Get"))
+                row_layout.addWidget(self._make_http_poll_spinbox(url))
             row_layout.addStretch()
             row_layout.addWidget(status_label)
             if isinstance(parent.layout(), QVBoxLayout):
@@ -1311,8 +1455,17 @@ class SettingsWindow(QDialog):
             else:
                 parent.layout().addWidget(checkbox)
         else:
-            # 不再需要互斥逻辑，因为all数据源已隐藏，所有单项数据源都从all数据源解析
-            if isinstance(parent.layout(), QVBoxLayout):
+            if with_poll_interval and url:
+                row_layout = QHBoxLayout()
+                row_layout.addWidget(checkbox)
+                row_layout.addWidget(QLabel("Get"))
+                row_layout.addWidget(self._make_http_poll_spinbox(url))
+                row_layout.addStretch()
+                if isinstance(parent.layout(), QVBoxLayout):
+                    parent.layout().addLayout(row_layout)
+                else:
+                    parent.layout().addWidget(checkbox)
+            elif isinstance(parent.layout(), QVBoxLayout):
                 parent.layout().addWidget(checkbox)
             else:
                 parent.layout().addWidget(checkbox)
@@ -1422,6 +1575,12 @@ class SettingsWindow(QDialog):
             if cb is not None:
                 default_val = getattr(self.config.message_config, cfg_name, True)
                 cb.setChecked(bool(default_val))
+        for url, spin in self.http_poll_spinboxes.items():
+            spin.setValue(self.config.get_http_poll_interval(url))
+        if hasattr(self, "custom_http_poll_spinbox"):
+            self.custom_http_poll_spinbox.setValue(
+                self.config.get_http_poll_interval("__custom_http__")
+            )
         self._update_parse_status_labels()
     
     def _create_advanced_tab(self):
@@ -1434,34 +1593,53 @@ class SettingsWindow(QDialog):
         main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         main_layout.setSpacing(SPACING_TAB)
         
-        # ---------- 1. 地名修正 ----------
-        sec1_title = QLabel("地名修正")
+        # ---------- 1. 地名处理方式（二选一） ----------
+        sec1_title = QLabel("地名处理方式")
         sec1_title.setStyleSheet(STYLE_SECTION_TITLE)
         main_layout.addWidget(sec1_title)
-        fix_checkbox = QCheckBox("速报使用地名修正")
-        fix_checkbox.setChecked(self.config.translation_config.use_place_name_fix)
-        fix_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(fix_checkbox)
-        fix_info = QLabel("速报消息根据经纬度自动修正地名（支持 usgs、emsc、bcsf、gfz、usp、kma 等数据源），无需 API 密钥。")
+
+        mode_hint = QLabel("非中文数据源统一使用以下方式之一处理地名，二者不可同时启用。")
+        mode_hint.setStyleSheet(STYLE_HINT + " line-height: 1.5;")
+        mode_hint.setWordWrap(True)
+        main_layout.addWidget(mode_hint)
+
+        place_mode_group = QButtonGroup(scrollable_widget)
+
+        fix_radio = QRadioButton("地名修正")
+        fix_radio.setStyleSheet("font-size: 16px; padding: 5px;")
+        place_mode_group.addButton(fix_radio, 0)
+        main_layout.addWidget(fix_radio)
+        fix_info = QLabel(
+            "根据经纬度自动修正地名（支持 usgs、emsc、bcsf、gfz、usp、kma、bmkg、geonet、ingv、early_est 等数据源），无需 API 密钥。"
+        )
         fix_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
         fix_info.setWordWrap(True)
         main_layout.addWidget(fix_info)
 
-        # 百度翻译（火山情报）
-        volcano_trans_checkbox = QCheckBox("百度翻译")
-        volcano_trans_checkbox.setChecked(getattr(self.config.translation_config, 'use_volcano_translation', False))
-        volcano_trans_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(volcano_trans_checkbox)
-        volcano_trans_info = QLabel("用于火山情报日文→中文翻译。勾选后填写下方 AppID 与密钥。")
-        volcano_trans_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
-        volcano_trans_info.setWordWrap(True)
-        main_layout.addWidget(volcano_trans_info)
+        baidu_radio = QRadioButton("百度翻译")
+        baidu_radio.setStyleSheet("font-size: 16px; padding: 5px;")
+        place_mode_group.addButton(baidu_radio, 1)
+        main_layout.addWidget(baidu_radio)
+        baidu_info = QLabel(
+            "将日语、韩语、英语等非中文地名翻译为中文，适用于所有非中文数据源（含速报、预警、火山情报等）。"
+            "需要配置百度翻译 API 密钥。"
+        )
+        baidu_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
+        baidu_info.setWordWrap(True)
+        main_layout.addWidget(baidu_info)
+
+        tc = self.config.translation_config
+        if getattr(tc, "enabled", False):
+            baidu_radio.setChecked(True)
+        else:
+            fix_radio.setChecked(True)
+
         baidu_app_id_label = QLabel("百度翻译 AppID：")
         baidu_app_id_label.setStyleSheet(STYLE_LABEL)
         main_layout.addWidget(baidu_app_id_label)
         baidu_app_id_entry = QLineEdit()
         baidu_app_id_entry.setPlaceholderText("在百度翻译开放平台申请")
-        baidu_app_id_entry.setText(getattr(self.config.translation_config, 'baidu_app_id', '') or '')
+        baidu_app_id_entry.setText(getattr(tc, "baidu_app_id", "") or "")
         baidu_app_id_entry.setStyleSheet(STYLE_LINEEDIT)
         main_layout.addWidget(baidu_app_id_entry)
         baidu_secret_label = QLabel("百度翻译密钥：")
@@ -1470,18 +1648,28 @@ class SettingsWindow(QDialog):
         baidu_secret_entry = QLineEdit()
         baidu_secret_entry.setPlaceholderText("与 AppID 对应的密钥")
         baidu_secret_entry.setEchoMode(QLineEdit.Password)
-        baidu_secret_entry.setText(getattr(self.config.translation_config, 'baidu_secret', '') or '')
+        baidu_secret_entry.setText(getattr(tc, "baidu_secret", "") or "")
         baidu_secret_entry.setStyleSheet(STYLE_LINEEDIT)
         main_layout.addWidget(baidu_secret_entry)
 
-        def _update_baidu_visible(checked):
-            volcano_trans_info.setVisible(checked)
-            baidu_app_id_label.setVisible(checked)
-            baidu_app_id_entry.setVisible(checked)
-            baidu_secret_label.setVisible(checked)
-            baidu_secret_entry.setVisible(checked)
-        volcano_trans_checkbox.toggled.connect(_update_baidu_visible)
-        _update_baidu_visible(volcano_trans_checkbox.isChecked())
+        link_label = QLabel(
+            '获取 API 密钥：<a href="https://fanyi-api.baidu.com/" style="color: #4A90E2;">百度翻译开放平台</a>'
+        )
+        link_label.setOpenExternalLinks(True)
+        link_label.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
+        main_layout.addWidget(link_label)
+
+        def _update_baidu_api_visible():
+            use_baidu = baidu_radio.isChecked()
+            baidu_app_id_label.setVisible(use_baidu)
+            baidu_app_id_entry.setVisible(use_baidu)
+            baidu_secret_label.setVisible(use_baidu)
+            baidu_secret_entry.setVisible(use_baidu)
+            link_label.setVisible(use_baidu)
+
+        fix_radio.toggled.connect(lambda _: _update_baidu_api_visible())
+        baidu_radio.toggled.connect(lambda _: _update_baidu_api_visible())
+        _update_baidu_api_visible()
         
         # 分隔线
         sep1 = QFrame()
@@ -1779,13 +1967,28 @@ class SettingsWindow(QDialog):
         custom_url_entry.setText(self.config.custom_data_source_url or "")
         custom_url_entry.setStyleSheet(STYLE_LINEEDIT)
         main_layout.addWidget(custom_url_entry)
+        custom_poll_layout = QHBoxLayout()
+        custom_poll_label = QLabel("HTTP Get 间隔（秒）：")
+        custom_poll_label.setStyleSheet(STYLE_LABEL)
+        custom_poll_layout.addWidget(custom_poll_label)
+        custom_http_poll_spinbox = QSpinBox()
+        custom_http_poll_spinbox.setMinimum(1)
+        custom_http_poll_spinbox.setMaximum(2147483647)
+        custom_http_poll_spinbox.setSuffix(" 秒")
+        custom_http_poll_spinbox.setValue(self.config.get_http_poll_interval("__custom_http__"))
+        custom_http_poll_spinbox.setStyleSheet(STYLE_SPINBOX)
+        custom_http_poll_spinbox.setToolTip("自定义 HTTP 数据源轮询间隔（仅 http/https 生效）")
+        custom_poll_layout.addWidget(custom_http_poll_spinbox)
+        custom_poll_layout.addStretch()
+        main_layout.addLayout(custom_poll_layout)
+        self.custom_http_poll_spinbox = custom_http_poll_spinbox
         custom_source_status_label = QLabel("状态：—")
         custom_source_status_label.setStyleSheet(STYLE_HINT)
         custom_source_status_label.setObjectName("custom_source_status_label")
         self.custom_source_status_label = custom_source_status_label
         main_layout.addWidget(custom_source_status_label)
         custom_hint = QLabel(
-            "• HTTP/HTTPS：软件将每秒向该 URL 发送一次 GET 请求以获取预警数据；留空即关闭。\n"
+            "• HTTP/HTTPS：按上方 Get 间隔向该 URL 轮询；留空即关闭。\n"
             "• WS/WSS：请确保数据格式符合要求并能连接到服务器。"
         )
         custom_hint.setStyleSheet(STYLE_HINT + " line-height: 1.5;")
@@ -1856,23 +2059,23 @@ class SettingsWindow(QDialog):
         save_btn.setMinimumHeight(35)
         save_btn.setStyleSheet(STYLE_SAVE_BTN)
         save_btn.clicked.connect(lambda: self._save_advanced_settings(
-            fix_checkbox, output_file_checkbox, clear_log_checkbox,
+            fix_radio, baidu_radio, output_file_checkbox, clear_log_checkbox,
             split_date_checkbox, log_size_spinbox, custom_url_entry,
-            volcano_trans_checkbox, baidu_app_id_entry, baidu_secret_entry
+            baidu_app_id_entry, baidu_secret_entry
         ))
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
         main_layout.addWidget(button_frame)
         
         self.advanced_vars = {
-            'fix_checkbox': fix_checkbox,
+            'fix_radio': fix_radio,
+            'baidu_radio': baidu_radio,
             'output_file_checkbox': output_file_checkbox,
             'clear_log_checkbox': clear_log_checkbox,
             'split_date_checkbox': split_date_checkbox,
             'log_size_spinbox': log_size_spinbox,
             'custom_url_entry': custom_url_entry,
             'custom_source_status_label': custom_source_status_label,
-            'volcano_trans_checkbox': volcano_trans_checkbox,
             'baidu_app_id_entry': baidu_app_id_entry,
             'baidu_secret_entry': baidu_secret_entry,
             'alert_enable_cb': alert_enable_cb,
@@ -1931,11 +2134,11 @@ class SettingsWindow(QDialog):
         except Exception as e:
             logger.error(f"模拟预警失败: {e}")
 
-    def _save_advanced_settings(self, fix_checkbox, output_file_checkbox, clear_log_checkbox,
+    def _save_advanced_settings(self, fix_radio, baidu_radio, output_file_checkbox, clear_log_checkbox,
                                   split_date_checkbox, log_size_spinbox, custom_url_entry,
-                                  volcano_trans_checkbox=None, baidu_app_id_entry=None, baidu_secret_entry=None,
+                                  baidu_app_id_entry=None, baidu_secret_entry=None,
                                   show_message=True):
-        """保存高级设置（地名修正、日志、自定义数据源）。show_message=False 时不弹成功提示（由调用方统一提示）。返回 True 表示保存成功，False 表示未保存（校验失败或异常）。"""
+        """保存高级设置（地名处理、日志、自定义数据源）。show_message=False 时不弹成功提示（由调用方统一提示）。返回 True 表示保存成功，False 表示未保存（校验失败或异常）。"""
         try:
             custom_url = custom_url_entry.text().strip()
             if custom_url:
@@ -1946,19 +2149,33 @@ class SettingsWindow(QDialog):
                         "自定义数据源 URL 必须以 http://、https://、ws:// 或 wss:// 开头，请修改后重试。"
                     )
                     return False
-            self.config.translation_config.use_place_name_fix = fix_checkbox.isChecked()
-            if volcano_trans_checkbox is not None:
-                self.config.translation_config.use_volcano_translation = volcano_trans_checkbox.isChecked()
+            use_baidu = baidu_radio.isChecked()
+            self.config.translation_config.enabled = use_baidu
+            self.config.translation_config.use_place_name_fix = not use_baidu
             if baidu_app_id_entry is not None:
                 self.config.translation_config.baidu_app_id = baidu_app_id_entry.text().strip()
             if baidu_secret_entry is not None:
                 self.config.translation_config.baidu_secret = baidu_secret_entry.text().strip()
+            if use_baidu:
+                app_id = self.config.translation_config.baidu_app_id
+                secret = self.config.translation_config.baidu_secret
+                if not app_id or not secret:
+                    QMessageBox.warning(
+                        self, "警告",
+                        "启用百度翻译需要配置 AppID 与密钥。\n翻译功能将保持禁用，请填写后重新保存。"
+                    )
+                    self.config.translation_config.enabled = False
+                    self.config.translation_config.use_place_name_fix = True
             # 日志与数据源相关设置
             self.config.log_config.output_to_file = output_file_checkbox.isChecked()
             self.config.log_config.clear_log_on_startup = clear_log_checkbox.isChecked()
             self.config.log_config.split_by_date = split_date_checkbox.isChecked()
             self.config.log_config.max_log_size = log_size_spinbox.value()
             self.config.custom_data_source_url = custom_url
+            if hasattr(self, "custom_http_poll_spinbox"):
+                self.config.http_poll_intervals["__custom_http__"] = max(
+                    1, int(self.custom_http_poll_spinbox.value())
+                )
 
             try:
                 self._save_alert_settings()
@@ -2419,16 +2636,20 @@ class SettingsWindow(QDialog):
             self._save_appearance_settings()
             advanced_saved = False
             if hasattr(self, 'advanced_vars'):
-                advanced_required = ('fix_checkbox', 'output_file_checkbox', 'clear_log_checkbox', 'split_date_checkbox', 'log_size_spinbox', 'custom_url_entry', 'volcano_trans_checkbox', 'baidu_app_id_entry', 'baidu_secret_entry')
+                advanced_required = (
+                    'fix_radio', 'baidu_radio', 'output_file_checkbox', 'clear_log_checkbox',
+                    'split_date_checkbox', 'log_size_spinbox', 'custom_url_entry',
+                    'baidu_app_id_entry', 'baidu_secret_entry',
+                )
                 if all(k in self.advanced_vars for k in advanced_required):
                     advanced_saved = self._save_advanced_settings(
-                        self.advanced_vars['fix_checkbox'],
+                        self.advanced_vars['fix_radio'],
+                        self.advanced_vars['baidu_radio'],
                         self.advanced_vars['output_file_checkbox'],
                         self.advanced_vars['clear_log_checkbox'],
                         self.advanced_vars['split_date_checkbox'],
                         self.advanced_vars['log_size_spinbox'],
                         self.advanced_vars['custom_url_entry'],
-                        self.advanced_vars['volcano_trans_checkbox'],
                         self.advanced_vars['baidu_app_id_entry'],
                         self.advanced_vars['baidu_secret_entry'],
                         show_message=False,
@@ -2548,6 +2769,14 @@ class SettingsWindow(QDialog):
             
             # 地震速报 / 自定义文本 二选一
             self.config.message_config.use_custom_text = self.radio_custom_text.isChecked()
+
+            for url, spin in self.http_poll_spinboxes.items():
+                self.config.http_poll_intervals[url] = max(1, int(spin.value()))
+            if hasattr(self, "custom_http_poll_spinbox"):
+                self.config.http_poll_intervals["__custom_http__"] = max(
+                    1, int(self.custom_http_poll_spinbox.value())
+                )
+            self.config._ensure_http_poll_interval_defaults()
             
             # 保存到文件
             self.config.save_config()

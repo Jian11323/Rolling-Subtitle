@@ -47,9 +47,10 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'kma': 20,
     'bmkg': 21,
     'geonet': 22,
-    'ptwc': 23,
-    'fssn': 24,
-    'fssn-cmt': 25,
+    'ingv': 23,
+    'ptwc': 24,
+    'fssn': 25,
+    'fssn-cmt': 26,
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
     'cea': 0,
     'cea-pr': 0,
@@ -64,6 +65,7 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'wolfx_cenc_eew': 0,
     'wolfx_cq_eew': 0,
     'wolfx_cwa_eew': 0,
+    'early_est': 0,
     # 默认优先级（未知数据源）
     'default': 99,
 }
@@ -73,12 +75,13 @@ SOURCE_FIXED_ORDER: List[str] = [
     # 地震预警（priority=0）
     'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
     'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
+    'early_est',
     # 速报
     'weatheralarm', 'fanstudio_aqi', 'fanstudio_typhoon', 'tsunami', '海啸信息',
     'cenc-ir', 'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
     'p2pquake', 'p2pquake_tsunami', 'jma_volcano',
     'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma',
-    'bmkg', 'geonet', 'ptwc', 'fssn', 'fssn-cmt',
+    'bmkg', 'geonet', 'ingv', 'ptwc', 'fssn', 'fssn-cmt',
 ]
 SOURCE_FIXED_ORDER_INDEX: Dict[str, int] = {
     source: idx for idx, source in enumerate(SOURCE_FIXED_ORDER)

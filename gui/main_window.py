@@ -23,7 +23,17 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config, APP_VERSION, CHANGELOG_TEXT, APP_DECLARATION_TEXT
+from config import (
+    Config,
+    APP_VERSION,
+    CHANGELOG_TEXT,
+    APP_DECLARATION_TEXT,
+    BMKG_HTTP_URL,
+    GEONET_HTTP_URL,
+    INGV_HTTP_URL,
+    EARLYEST_HTTP_URL,
+    JMA_ATOM_LONG_URL,
+)
 from adapters.fanstudio_adapter import FanStudioAdapter
 from data_sources import WebSocketManager, HTTPPollingManager
 from utils.message_processor import MessageProcessor
@@ -1502,6 +1512,27 @@ class MainWindow(QMainWindow):
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
                 logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
                 return False
+
+        http_source_map = {
+            "bmkg": BMKG_HTTP_URL,
+            "geonet": GEONET_HTTP_URL,
+            "ingv": INGV_HTTP_URL,
+            "early_est": EARLYEST_HTTP_URL,
+            "jma_volcano": JMA_ATOM_LONG_URL,
+        }
+        mapped_url = http_source_map.get(st) or http_source_map.get(sn)
+        if mapped_url and not es.get(mapped_url, False):
+            logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」已在设置中关闭")
+            return False
+
+        fanstudio_http_map = {
+            "fanstudio_typhoon": "https://api.fanstudio.tech/we/typhoon.php",
+            "fanstudio_aqi": "https://api.fanstudio.tech/we/aqi.php",
+        }
+        fs_http_url = fanstudio_http_map.get(sn) or fanstudio_http_map.get(st)
+        if fs_http_url and not es.get(fs_http_url, False):
+            logger.debug(f"已忽略消息：Fan Studio HTTP 源「{sn or st}」已关闭")
+            return False
 
         return True
 

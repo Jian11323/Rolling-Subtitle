@@ -662,7 +662,8 @@ class FanStudioAdapter(BaseAdapter):
             try:
                 from config import Config
                 config = Config()
-                if config.translation_config.use_place_name_fix:
+                from utils.place_name_utils import should_apply_place_name_fix
+                if should_apply_place_name_fix(config):
                     place_name_fixer = get_place_name_fixer()
                     if place_name_fixer and place_name_fixer.is_supported(source_type):
                         try:
@@ -743,7 +744,8 @@ class FanStudioAdapter(BaseAdapter):
             try:
                 from config import Config
                 config = Config()
-                if config.translation_config.use_place_name_fix:
+                from utils.place_name_utils import should_apply_place_name_fix
+                if should_apply_place_name_fix(config):
                     # 对于USGS/SA，使用JSON格式的区域数据修正
                     if source_type == 'sa':
                         try:

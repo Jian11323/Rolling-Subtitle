@@ -35,6 +35,37 @@ FANSTUDIO_HTTP_SOURCE_KEYS: List[str] = [
     "https://api.fanstudio.tech/we/aqi.php",
 ]
 
+BMKG_HTTP_URL = "https://data.bmkg.go.id/DataMKG/TEWS/gempaterkini.json"
+GEONET_HTTP_URL = "https://api.geonet.org.nz/quake?MMI=-1"
+INGV_HTTP_URL = "https://api.terraquakeapi.com/v1/earthquakes/recent?limit=5"
+EARLYEST_HTTP_URL = "http://early-est.rm.ingv.it/hypomessage.html"
+JMA_ATOM_LONG_URL = "https://www.data.jma.go.jp/developer/xml/feed/eqvol_l.xml"
+
+NEW_HTTP_SOURCE_KEYS: List[str] = [
+    BMKG_HTTP_URL,
+    GEONET_HTTP_URL,
+    INGV_HTTP_URL,
+    EARLYEST_HTTP_URL,
+    JMA_ATOM_LONG_URL,
+]
+
+# 各 HTTP 数据源默认轮询间隔（秒）
+DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
+    BMKG_HTTP_URL: 30,
+    GEONET_HTTP_URL: 30,
+    INGV_HTTP_URL: 30,
+    EARLYEST_HTTP_URL: 5,
+    JMA_ATOM_LONG_URL: 1800,
+    "https://api.fanstudio.tech/we/typhoon.php": 5,
+    "https://api.fanstudio.tech/we/aqi.php": 5,
+    "https://api.p2pquake.net/v2/history?codes=551&limit=3": 2,
+    "https://api.p2pquake.net/v2/jma/tsunami?limit=1": 2,
+}
+
+ALL_KNOWN_HTTP_SOURCE_KEYS: List[str] = (
+    P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS + NEW_HTTP_SOURCE_KEYS
+)
+
 
 def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     """
@@ -46,16 +77,18 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.11"
+APP_VERSION = "2.4.12"
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.11
+CHANGELOG_TEXT = """版本 2.4.12
 
-1、修复部分数据源无法关闭问题"""
+1、新增 BMKG、GeoNet、INGV、Early-est、JMA-Atom 数据源
+2、支持为每个 HTTP 数据源单独配置 Get 轮询间隔
+3、增加百度翻译，支持地名修正和百度翻译二选一"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -339,14 +372,22 @@ class WebSocketConfig:
 
 @dataclass
 class TranslationConfig:
-    """地名修正配置类（原翻译配置，公开版仅保留地名修正）"""
-    use_place_name_fix: bool = True  # 是否使用地名修正（速报根据经纬度修正地名），默认开启
-    use_volcano_translation: bool = False  # 是否对火山情报使用百度翻译（日文→中文）
+    """地名处理配置：地名修正与百度翻译二选一。"""
+    use_place_name_fix: bool = True  # 非中文数据源使用地名修正（与百度翻译互斥），默认开启
+    enabled: bool = False  # 非中文数据源使用百度翻译（与地名修正互斥）
     baidu_app_id: str = ""  # 百度翻译开放平台 AppID
     baidu_secret: str = ""  # 百度翻译开放平台密钥
-    
+    # 兼容旧版配置（仅加载时使用，不再持久化）
+    use_volcano_translation: bool = False
+
     def validate(self) -> bool:
-        """验证配置有效性"""
+        """验证配置有效性，并强制地名修正与百度翻译互斥。"""
+        if self.enabled and self.use_place_name_fix:
+            self.use_place_name_fix = False
+        if self.enabled and not self.baidu_app_id.strip():
+            logger.warning("百度翻译已启用但未配置 AppID，翻译功能将不可用")
+        if self.enabled and not self.baidu_secret.strip():
+            logger.warning("百度翻译已启用但未配置密钥，翻译功能将不可用")
         return True
 
 
@@ -397,6 +438,7 @@ class Config:
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
         self.custom_data_source_url: str = ""  # 自定义数据源 URL（http/https/ws/wss），空为关闭
+        self.http_poll_intervals: Dict[str, int] = dict(DEFAULT_HTTP_POLL_INTERVALS)
         
         # 配置变更回调
         self._config_callbacks: List[Callable] = []
@@ -594,7 +636,7 @@ class Config:
             },
             'TRANSLATION_CONFIG': {
                 'use_place_name_fix': self.translation_config.use_place_name_fix,
-                'use_volcano_translation': getattr(self.translation_config, 'use_volcano_translation', False),
+                'enabled': self.translation_config.enabled,
                 'baidu_app_id': getattr(self.translation_config, 'baidu_app_id', ''),
                 'baidu_secret': getattr(self.translation_config, 'baidu_secret', ''),
             },
@@ -606,6 +648,7 @@ class Config:
             },
             'ENABLED_SOURCES': self._get_persisted_enabled_sources(),
             'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
+            'HTTP_POLL_INTERVALS': dict(self.http_poll_intervals),
         }
     
     def _is_fanstudio_individual_url(self, url: str) -> bool:
@@ -656,7 +699,7 @@ class Config:
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         allowed_ws = {all_url, *WS_URL_CANONICAL_ORDER}
-        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS)
+        allowed_http = set(ALL_KNOWN_HTTP_SOURCE_KEYS)
         removed: List[str] = []
         for url in list(self.enabled_sources.keys()):
             if self._is_websocket_url(url) and url not in allowed_ws:
@@ -673,7 +716,7 @@ class Config:
         base_domain = "fanstudio.tech"
         all_url = f"wss://ws.{base_domain}/all"
         allowed_ws = {all_url, *WS_URL_CANONICAL_ORDER}
-        allowed_http = set(P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS)
+        allowed_http = set(ALL_KNOWN_HTTP_SOURCE_KEYS)
         return {
             k: v
             for k, v in self.enabled_sources.items()
@@ -683,6 +726,33 @@ class Config:
                 and (self._is_websocket_url(k) or k in allowed_http)
             )
         }
+
+    def get_http_poll_interval(self, url: str) -> int:
+        """获取指定 HTTP 数据源的轮询间隔（秒），最低 1 秒。"""
+        if self.custom_data_source_url and url == self.custom_data_source_url:
+            custom_key = "__custom_http__"
+            if custom_key in self.http_poll_intervals:
+                return max(1, int(self.http_poll_intervals[custom_key]))
+            return 1
+        try:
+            val = self.http_poll_intervals.get(url, DEFAULT_HTTP_POLL_INTERVALS.get(url, 2))
+            return max(1, int(val))
+        except (TypeError, ValueError):
+            return max(1, DEFAULT_HTTP_POLL_INTERVALS.get(url, 2))
+
+    def _ensure_http_poll_interval_defaults(self) -> None:
+        """补全已知 HTTP 源的默认轮询间隔（不覆盖用户已设值）。"""
+        for url, default_sec in DEFAULT_HTTP_POLL_INTERVALS.items():
+            if url not in self.http_poll_intervals:
+                self.http_poll_intervals[url] = default_sec
+        if "__custom_http__" not in self.http_poll_intervals:
+            self.http_poll_intervals["__custom_http__"] = 1
+
+    def _ensure_new_http_source_defaults(self) -> None:
+        """补全五路新 HTTP 数据源开关缺项，默认关闭。"""
+        for url in NEW_HTTP_SOURCE_KEYS:
+            if url not in self.enabled_sources:
+                self.enabled_sources[url] = False
 
     def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
         """仅对 existing 做缺项补全：只补 full 中有而 existing 中没有的键，不删除 existing 中任何键。"""
@@ -900,8 +970,17 @@ class Config:
                     success = False
             
             if 'TRANSLATION_CONFIG' in config_data:
-                trans_data = {k: v for k, v in config_data['TRANSLATION_CONFIG'].items() if hasattr(self.translation_config, k)}
-                # 只更新配置文件中存在的字段，对于不存在的字段保留当前值
+                raw_trans = config_data['TRANSLATION_CONFIG']
+                # 兼容旧版：use_volcano_translation → enabled
+                if 'enabled' not in raw_trans and raw_trans.get('use_volcano_translation'):
+                    raw_trans = dict(raw_trans)
+                    raw_trans['enabled'] = True
+                    raw_trans['use_place_name_fix'] = False
+                # 兼容 PySide6 版密钥字段名
+                if 'baidu_secret_key' in raw_trans and 'baidu_secret' not in raw_trans:
+                    raw_trans = dict(raw_trans)
+                    raw_trans['baidu_secret'] = raw_trans.pop('baidu_secret_key')
+                trans_data = {k: v for k, v in raw_trans.items() if hasattr(self.translation_config, k)}
                 for key, value in trans_data.items():
                     if hasattr(self.translation_config, key):
                         setattr(self.translation_config, key, value)
@@ -933,6 +1012,18 @@ class Config:
             if removed_ws:
                 logger.info(f"已清理非公开 WebSocket 数据源: {removed_ws}")
             self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
+
+            raw_poll = config_data.get('HTTP_POLL_INTERVALS', {})
+            if isinstance(raw_poll, dict) and raw_poll:
+                try:
+                    self.http_poll_intervals = {
+                        k: max(1, int(v)) for k, v in raw_poll.items()
+                    }
+                except (TypeError, ValueError):
+                    self.http_poll_intervals = dict(DEFAULT_HTTP_POLL_INTERVALS)
+            else:
+                self.http_poll_intervals = dict(DEFAULT_HTTP_POLL_INTERVALS)
+            self._ensure_http_poll_interval_defaults()
 
             # 如果配置文件中没有数据源配置，使用默认配置（仅 all + weather + 非 Fan Studio 单项）
             weather_source = 'weatheralarm'
@@ -977,6 +1068,7 @@ class Config:
 
             # P2PQuake：一个总开关，两条 HTTP 拉取与 WSS 项保持一致
             self._sync_p2pquake_http_with_wss()
+            self._ensure_new_http_source_defaults()
 
             # 根据服务器选择更新URL
             self._update_urls_for_server_selection()
@@ -1111,6 +1203,8 @@ class Config:
         self.enabled_sources["wss://ws-api.wolfx.jp/cwa_eew"] = False
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
         self.enabled_sources["wss://ws.fanstudio.tech/cenc-ir"] = True
+        self._ensure_new_http_source_defaults()
+        self._ensure_http_poll_interval_defaults()
         self._enforce_public_ws_sources()
 
         self.ws_urls = self._build_ws_urls_ordered()
@@ -1175,6 +1269,11 @@ class Config:
         http_url_to_name = {
             "https://api.fanstudio.tech/we/typhoon.php": "fanstudio_typhoon",
             "https://api.fanstudio.tech/we/aqi.php": "fanstudio_aqi",
+            BMKG_HTTP_URL: "bmkg",
+            GEONET_HTTP_URL: "geonet",
+            INGV_HTTP_URL: "ingv",
+            EARLYEST_HTTP_URL: "early_est",
+            JMA_ATOM_LONG_URL: "jma_volcano",
         }
         if normalized_url in http_url_to_name:
             return http_url_to_name[normalized_url]
@@ -1249,6 +1348,11 @@ class Config:
             "wolfx_cenc_eew": "中国地震台网",
             "wolfx_cq_eew": "重庆市地震局",
             "wolfx_cwa_eew": "台湾中央气象署",
+            "bmkg": "印尼气象气候和地球物理局",
+            "geonet": "新西兰 GeoNet",
+            "ingv": "意大利国家地球物理与火山学研究所",
+            "early_est": "Early-est",
+            "jma_volcano": "日本气象厅火山情报",
         }
         
         return organization_name_mapping.get(source_name, source_name)

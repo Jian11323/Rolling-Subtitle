@@ -39,9 +39,14 @@ SA、KMA-EEW-Fe Fix/
 # 本地辅助（不上传）
 cleanup_only.sh
 clear_repo_and_cleanup.bat
+run.bat
 上传到GitHub.bat
 同步到GitHub.bat
 GITHUB_上传说明.md
+
+# Wiki 本地源文件（单独推送到 *.wiki 仓库，不上传主仓库）
+wiki/
+.wiki-tmp/
 
 # 非核心文档与脚本（不上传）
 使用说明书.md

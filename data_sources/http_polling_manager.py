@@ -15,14 +15,58 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config, APP_VERSION, FANSTUDIO_HTTP_SOURCE_KEYS
-from adapters import FanStudioHttpAdapter, P2PQuakeAdapter, P2PQuakeTsunamiAdapter, CustomAdapter
+from config import (
+    Config,
+    APP_VERSION,
+    P2PQUAKE_WSS_URL,
+    FANSTUDIO_HTTP_SOURCE_KEYS,
+    BMKG_HTTP_URL,
+    GEONET_HTTP_URL,
+    INGV_HTTP_URL,
+    EARLYEST_HTTP_URL,
+    JMA_ATOM_LONG_URL,
+)
+from adapters import (
+    FanStudioHttpAdapter,
+    P2PQuakeAdapter,
+    P2PQuakeTsunamiAdapter,
+    CustomAdapter,
+    BMKGAdapter,
+    GeoNetAdapter,
+    INGVAdapter,
+    EarlyEstAdapter,
+    JmaAtomAdapter,
+)
 from utils.logger import get_logger
 
 logger = get_logger()
 
 # 多路 HTTP 数据源同时启动时，各线程首次请求前的错开间隔（秒），减轻瞬时负载
 HTTP_POLL_STARTUP_STAGGER_SEC = 1.0
+
+
+def is_http_source_enabled(config: Config, url: str) -> bool:
+    """判断指定 HTTP URL 是否应发起 Get 轮询（与设置页开关、P2PQuake 总开关一致）。"""
+    if not url:
+        return False
+    low = url.lower()
+    # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
+    custom_url = (config.custom_data_source_url or "").strip()
+    if custom_url and url == custom_url:
+        return True
+    if not config.enabled_sources.get(url, False):
+        return False
+    if "api.p2pquake.net" in low:
+        if not config.enabled_sources.get(P2PQUAKE_WSS_URL, False):
+            return False
+        mc = config.message_config
+        if "history" in low and "551" in low:
+            if not getattr(mc, "p2pquake_parse_551", True):
+                return False
+        if "tsunami" in low:
+            if not getattr(mc, "p2pquake_parse_552", True):
+                return False
+    return True
 
 
 class HTTPPollingConnection:
@@ -101,14 +145,21 @@ class HTTPPollingConnection:
     def _poll(self, message_callback: Callable[[str, Dict], None]):
         """执行一次轮询（失败时最多重试3次，每次间隔2秒；同源同错误60秒内只记一次ERROR）"""
         try:
+            if not is_http_source_enabled(self.config, self.url):
+                logger.debug(f"[{self.source_name}] 数据源已关闭，跳过 Get: {self.url}")
+                return
             logger.debug(f"[{self.source_name}] 开始轮询: {self.url}")
             
             # 发送HTTP请求，失败时重试最多3次，每次间隔2秒
             response = None
             for attempt in range(1, 4):
                 try:
+                    req_headers = dict(getattr(self.adapter, "fetch_headers", None) or {})
                     response = self._session.get(
-                        self.url, timeout=30, proxies={'http': None, 'https': None}
+                        self.url,
+                        timeout=30,
+                        proxies={'http': None, 'https': None},
+                        headers=req_headers if req_headers else None,
                     )
                     response.raise_for_status()
                     break
@@ -135,13 +186,26 @@ class HTTPPollingConnection:
             self.last_request_ok = True
             self.last_request_time = time.time()
             
-            # 解析响应
-            data = response.json()
+            # 解析响应（按适配器声明的格式）
+            response_format = getattr(self.adapter, "response_format", "json")
+            if response_format == "json":
+                data = response.json()
+            elif response_format == "text":
+                data = response.text
+            elif response_format == "bytes":
+                data = response.content
+            else:
+                data = response.content
             
             # 计算数据哈希（简单检测是否有新数据）
             import hashlib
-            data_str = json.dumps(data, sort_keys=True)
-            data_hash = hashlib.md5(data_str.encode()).hexdigest()
+            if isinstance(data, (bytes, bytearray)):
+                data_hash = hashlib.md5(bytes(data)).hexdigest()
+            elif isinstance(data, str):
+                data_hash = hashlib.md5(data.encode("utf-8", errors="replace")).hexdigest()
+            else:
+                data_str = json.dumps(data, sort_keys=True, default=str)
+                data_hash = hashlib.md5(data_str.encode()).hexdigest()
             
             # 如果数据没有变化，跳过处理
             if data_hash == self._last_data_hash:
@@ -229,6 +293,16 @@ class HTTPPollingManager:
         # P2PQuake 地震情报
         if 'api.p2pquake.net' in url:
             return P2PQuakeAdapter('p2pquake', url)
+        if url == BMKG_HTTP_URL:
+            return BMKGAdapter('bmkg', url)
+        if url == GEONET_HTTP_URL:
+            return GeoNetAdapter('geonet', url)
+        if url == INGV_HTTP_URL:
+            return INGVAdapter('ingv', url)
+        if url == EARLYEST_HTTP_URL:
+            return EarlyEstAdapter('early_est', url)
+        if url == JMA_ATOM_LONG_URL:
+            return JmaAtomAdapter('jma_volcano', url)
         # 已下线的 Wolfx HTTP 不提供适配器，跳过
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
@@ -238,26 +312,9 @@ class HTTPPollingManager:
         """启动所有HTTP轮询连接"""
         # 从配置中获取启用的HTTP数据源
         http_urls = []
-        mc = self.config.message_config
-        p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
-        p2p_ws_enabled = self.config.enabled_sources.get(p2p_wss_url, False)
         for url in self.config.enabled_sources.keys():
             if url.startswith('http://') or url.startswith('https://'):
-                if self.config.enabled_sources.get(url, False):
-                    low = url.lower()
-                    # P2PQuake HTTP 与 WSS 总开关一致：关闭 P2PQuake 时不进行任何 HTTP 拉取
-                    if "api.p2pquake.net" in low:
-                        if not p2p_ws_enabled:
-                            logger.debug(f"跳过HTTP数据源（P2PQuake 已关闭）: {url}")
-                            continue
-                        if "history" in low and "551" in low:
-                            if not getattr(mc, "p2pquake_parse_551", True):
-                                logger.debug(f"跳过HTTP数据源（地震情報解析已关闭）: {url}")
-                                continue
-                        if "tsunami" in low:
-                            if not getattr(mc, "p2pquake_parse_552", True):
-                                logger.debug(f"跳过HTTP数据源（津波予報解析已关闭）: {url}")
-                                continue
+                if is_http_source_enabled(self.config, url):
                     http_urls.append(url)
                     logger.debug(f"发现启用的HTTP数据源: {url}")
                 else:
@@ -285,13 +342,7 @@ class HTTPPollingManager:
                 # 对于未配置适配器的 HTTP 数据源，直接跳过，不再输出错误日志
                 continue
             
-            # 轮询间隔：自定义数据源 1 秒，Fan Studio HTTP 5 秒，其余 2 秒
-            if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
-                poll_interval = 1
-            elif url in FANSTUDIO_HTTP_SOURCE_KEYS:
-                poll_interval = 5
-            else:
-                poll_interval = 2
+            poll_interval = self.config.get_http_poll_interval(url)
             connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)
             self.connections[url] = connection
             

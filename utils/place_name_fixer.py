@@ -55,7 +55,11 @@ class PlaceNameFixer:
             source_type="fe-fix",
         )
 
-        self.supported_sources = {"usgs", "emsc", "bcsf", "gfz", "usp", "kma"}
+        self.supported_sources = {
+            "usgs", "emsc", "bcsf", "gfz", "usp", "kma",
+            "bmkg", "geonet", "ingv", "early_est",
+            "p2pquake", "p2pquake_tsunami",
+        }
 
         if not self.fix_file_path.exists():
             logger.warning(f"地名修正文件不存在: {self.fix_file_path}")
