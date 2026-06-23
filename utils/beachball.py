@@ -8,6 +8,7 @@
 
 import re
 import math
+import sys
 import tempfile
 import hashlib
 from pathlib import Path
@@ -148,11 +149,18 @@ def _render_pillow(
         return False
 
 
+def _pygmt_usable() -> bool:
+    """PyInstaller lite 打包版不含 PyGMT，仅开发环境可选启用。"""
+    return not getattr(sys, 'frozen', False)
+
+
 def _render_pygmt(
     strike: float, dip: float, rake: float,
     facecolor: str, depth_km: float, out_path: Path, size: int, linewidth: int
 ) -> bool:
     """使用 PyGMT 绘制沙滩球，透明 PNG。"""
+    if not _pygmt_usable():
+        return False
     try:
         import pygmt
     except ImportError:
@@ -217,7 +225,9 @@ def render_beachball_to_file(
     out_path = write_dir / name
 
     try:
-        if _render_pygmt(strike, dip, rake, facecolor, depth_km, out_path, size, linewidth):
+        if _pygmt_usable() and _render_pygmt(
+            strike, dip, rake, facecolor, depth_km, out_path, size, linewidth
+        ):
             return str(out_path.resolve())
         if _render_pillow(strike, dip, rake, facecolor, out_path, size, linewidth):
             return str(out_path.resolve())
@@ -234,11 +244,12 @@ def render_beachball_to_file(
 
 def beachball_backend_available() -> bool:
     """检测是否有可用的沙滩球绘制后端（PyGMT 或 Pillow）。"""
-    try:
-        import pygmt
-        return True
-    except ImportError:
-        pass
+    if _pygmt_usable():
+        try:
+            import pygmt
+            return True
+        except ImportError:
+            pass
     try:
         from PIL import Image, ImageDraw
         return True

@@ -440,9 +440,9 @@ class MainWindow(QMainWindow):
         settings_action = self.context_menu.addAction("设置")
         settings_action.triggered.connect(self._open_settings)
 
-        # 退出菜单项
+        # 退出菜单项（显式退出，不受「关闭窗口时最小化到托盘」影响）
         exit_action = self.context_menu.addAction("退出")
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self._quit_application)
         
         logger.debug("右键菜单已创建")
     

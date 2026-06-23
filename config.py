@@ -91,7 +91,8 @@ AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifes
 CHANGELOG_TEXT = """版本 2.6.1
 
 1、修复窗口局部配色问题
-2、修复预警系统通知时 PowerShell 窗口闪一下的问题"""
+2、修复预警系统通知时 PowerShell 窗口闪一下的问题
+3、修复右键退出无法退出软件的问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
