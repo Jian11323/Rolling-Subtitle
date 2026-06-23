@@ -36,8 +36,8 @@ class P2PQuakeAdapter(BaseAdapter):
             如果无法解析则返回None
             
         Note:
-            P2PQuake API返回数组，但为了符合基类接口，这里只返回第一个事件
-            如果需要处理所有事件，应该在HTTP轮询管理器中调用parse_all方法
+            P2PQuake API 返回数组；HTTP 轮询入队展示仅需最新一条，故 parse() 只返回首个有效事件。
+            parse_all() 供启动补拉等需批量处理的场景使用。
         """
         try:
             # 如果输入是字符串，尝试解析JSON

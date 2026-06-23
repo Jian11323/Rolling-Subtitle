@@ -13,11 +13,11 @@ import threading
 import time
 from datetime import datetime
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QApplication, QMessageBox,
-    QDialog, QLabel, QScrollArea, QPushButton, QFrame
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QApplication,
+    QDialog, QLabel, QScrollArea, QPushButton, QFrame, QSystemTrayIcon, QAction,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
-from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent, QColor, QPalette
+from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent
 from typing import Dict, Any, Optional, Union, List, Tuple
 
 # 添加项目根目录到路径
@@ -33,16 +33,24 @@ from config import (
     INGV_HTTP_URL,
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
+    PTWC_CAP_URL,
 )
 from adapters.fanstudio_adapter import FanStudioAdapter
 from data_sources import WebSocketManager, HTTPPollingManager
 from utils.message_processor import MessageProcessor
 from utils.logger import get_logger
 from utils import timezone_utils
+from utils.geo_utils import should_accept_message
+from utils.audio_alert import play_alert_sound
+from utils.tts_alert import trigger_alert_feedback
+from utils.desktop_notify import show_event_notification
+from utils.event_dedup import find_duplicate_index, merge_sources
+from utils.event_history_store import EventHistoryStore
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
 from .alert import AlertController, build_warning_hint_segments
+from .qt_light_theme import apply_light_palette, light_dialog_stylesheet, LIGHT_SCROLLBAR_QSS
 
 logger = get_logger()
 
@@ -52,13 +60,15 @@ class MainWindow(QMainWindow):
     
     # 定义信号：用于在主线程中更新设置窗口的气象预警图片
     weather_image_update = pyqtSignal(dict)
+    # 数据源回调可能在 WebSocket/HTTP 线程中触发，经信号派发到主线程处理
+    message_received_signal = pyqtSignal(str, object)
     
     def __init__(self, config=None):
         super().__init__()
         self.config = config if config is not None else Config()
         self.message_processor = MessageProcessor()
         _mq = getattr(self.config.message_config, "message_queue_maxsize", 300)
-        _mb = getattr(self.config.message_config, "message_buffer_max_size", 50)
+        _mb = getattr(self.config.message_config, "message_buffer_max_size", 100)
         self.message_queue = MessageQueue(maxsize=_mq)
         self.message_buffer = MessageBuffer(max_size=_mb)
         # 分别存储预警和速报消息
@@ -67,6 +77,8 @@ class MainWindow(QMainWindow):
         self.scrolling_text: Optional[Union[ScrollingText, ScrollingTextCPU, Any]] = None
         self.data_sources: Dict[str, Any] = {}
         self.ws_manager: Optional[WebSocketManager] = None  # WebSocket管理器引用
+        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # 状态标志
         self.running = True
@@ -90,8 +102,10 @@ class MainWindow(QMainWindow):
         
         # 右键菜单缓存（避免每次右键点击时重新创建）
         self.context_menu = None
-        # 事件历史：按 source_name 仅保留最新一条
-        self._event_history: Dict[str, Dict[str, Any]] = {}
+        # 事件历史：环形缓冲 + 每源最新一条索引
+        max_hist = getattr(self.config.message_config, "event_history_max_entries", 500)
+        self._event_history_store = EventHistoryStore(max_hist)
+        self._tray_icon: Optional[QSystemTrayIcon] = None
         
         # 窗口大小变更防抖：拖拽结束后再写入配置
         self._resize_save_timer = QTimer(self)
@@ -103,6 +117,7 @@ class MainWindow(QMainWindow):
         
         # 连接信号到槽函数
         self.weather_image_update.connect(self._update_settings_weather_image)
+        self.message_received_signal.connect(self._process_message_received)
         
         # 注册配置变更回调（支持热修改）
         self.config.add_config_callback(self._on_config_changed)
@@ -141,8 +156,69 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1000, self._precreate_settings_window)
             # 更新说明弹窗（每个版本仅展示一次，延后到预创建之后避免被抢焦点）
             QTimer.singleShot(1500, self._show_changelog_if_needed)
+            self._setup_system_tray()
         except Exception as e:
             logger.error(f"延迟启动后台任务失败: {e}")
+
+    def _record_cea_test_history(
+        self,
+        source_name: str,
+        parsed_data: Dict[str, Any],
+    ) -> None:
+        """initial_all 启动同步：写入/更新一条最新 CEA，供设置页预警 TTS 测试。"""
+        try:
+            pd = dict(parsed_data)
+            pd["_cea_test_seed"] = True
+            message = self.message_processor.format_message(
+                pd,
+                ignore_warning_expiry=True,
+            )
+            if not message:
+                return
+
+            source_display = self._get_history_source_display(source_name, pd)
+            type_display = self._get_history_type_display("warning")
+            content_display = self._build_history_content(pd, message)
+            raw_time = pd.get("shock_time") or pd.get("time") or pd.get("created_at") or ""
+            event_time = self._normalize_history_event_time(raw_time)
+
+            entry = {
+                "source_name": source_name,
+                "source_display": source_display,
+                "message_type": "warning",
+                "type_display": type_display,
+                "event_time": event_time,
+                "message_text": content_display,
+                "scroll_text": message,
+                "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "received_at_ts": time.time(),
+                "parsed_data": pd,
+                "merged_sources": [source_display or source_name],
+            }
+
+            dup_idx = self._event_history_store.find_index_from_end(
+                lambda e: (e.get("parsed_data") or {}).get("_cea_test_seed")
+            )
+            if dup_idx is not None:
+                self._event_history_store.update_entry(dup_idx, entry)
+            else:
+                self._event_history_store.append(
+                    source_name,
+                    "warning",
+                    content_display,
+                    pd,
+                    source_display=source_display,
+                    type_display=type_display,
+                    event_time=event_time,
+                    scroll_text=message,
+                )
+            logger.info(
+                "已写入最新 CEA 测试数据: %s M%s",
+                pd.get("place_name"),
+                pd.get("magnitude"),
+            )
+        except Exception as e:
+            logger.debug(f"写入 CEA 测试数据失败: {e}")
     
     def _setup_ui(self):
         """设置用户界面"""
@@ -210,6 +286,7 @@ class MainWindow(QMainWindow):
             
             # 设置样式
             self.setStyleSheet(f"background-color: {self.config.gui_config.bg_color};")
+            self._apply_always_on_top()
             
             # 窗口位置：已保存则恢复，否则居中
             g = self.config.gui_config
@@ -234,6 +311,21 @@ class MainWindow(QMainWindow):
             logger.error(f"用户界面初始化失败: {e}")
             raise
     
+    def _apply_always_on_top(self):
+        """根据配置设置主窗口置顶"""
+        try:
+            on_top = bool(getattr(self.config.gui_config, 'always_on_top', False))
+            flags = self.windowFlags()
+            has_hint = bool(flags & Qt.WindowStaysOnTopHint)
+            if on_top and not has_hint:
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+                self.show()
+            elif not on_top and has_hint:
+                self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+                self.show()
+        except Exception as e:
+            logger.error(f"应用窗口置顶设置失败: {e}")
+
     def _center_window(self):
         """窗口居中"""
         try:
@@ -374,6 +466,58 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self.context_menu.hide)
         except Exception as e:
             logger.debug(f"右键菜单预弹失败（可忽略）: {e}")
+
+    def _setup_system_tray(self):
+        """初始化系统托盘（可选最小化到托盘）。"""
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                return
+            if self._tray_icon is not None:
+                return
+            icon = self.windowIcon()
+            if icon.isNull():
+                icon = QIcon()
+            tray = QSystemTrayIcon(icon, self)
+            tray.setToolTip("地震情报实况栏")
+            menu = QMenu(self)
+            menu.setStyleSheet("""
+                QMenu {
+                    background-color: white;
+                    color: black;
+                    border: 1px solid #ccc;
+                }
+                QMenu::item {
+                    padding: 5px 20px 5px 20px;
+                }
+                QMenu::item:selected {
+                    background-color: #e0e0e0;
+                }
+            """)
+            show_action = menu.addAction("显示窗口")
+            show_action.triggered.connect(self._show_from_tray)
+            settings_action = menu.addAction("设置")
+            settings_action.triggered.connect(self._open_settings)
+            quit_action = menu.addAction("退出")
+            quit_action.triggered.connect(self._quit_application)
+            tray.setContextMenu(menu)
+            tray.activated.connect(self._on_tray_activated)
+            tray.show()
+            self._tray_icon = tray
+        except Exception as e:
+            logger.debug(f"系统托盘初始化失败: {e}")
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._show_from_tray()
+
+    def _quit_application(self):
+        self._force_quit = True
+        QApplication.instance().quit()
     
     def _show_context_menu(self, position, source_widget=None):
         """显示右键菜单（使用缓存的菜单对象，优化性能）
@@ -420,6 +564,8 @@ class MainWindow(QMainWindow):
             if abs(current_opacity - new_opacity) > 0.01:  # 避免浮点数精度问题
                 self.setWindowOpacity(new_opacity)
                 logger.info(f"窗口透明度已更新: {current_opacity:.2f} -> {new_opacity:.2f}")
+
+            self._apply_always_on_top()
             
             # 更新背景颜色
             new_bg_color = self.config.gui_config.bg_color
@@ -489,20 +635,11 @@ class MainWindow(QMainWindow):
             dlg.setWindowModality(Qt.WindowModal)
             dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
             dlg.setMinimumWidth(300)
-            # 主窗口常为纯黑背景；本对话框在 Win 深色主题下易继承深色 Window/Base 调色板，标题区会呈黑底。
-            _cl_bg = QColor("#f5f5f5")
-            _pal = dlg.palette()
-            _pal.setColor(QPalette.Window, _cl_bg)
-            _pal.setColor(QPalette.Base, _cl_bg)
-            _pal.setColor(QPalette.WindowText, QColor("#333333"))
-            _pal.setColor(QPalette.Text, QColor("#333333"))
-            dlg.setPalette(_pal)
-            dlg.setAutoFillBackground(True)
+            # 主窗口常为纯黑背景；Win 深色主题下子对话框易继承深色调色板。
+            apply_light_palette(dlg, "#f5f5f5", "#333333")
             dlg.setStyleSheet(
-                "QDialog { background-color: #f5f5f5; }"
-                "QDialog QLabel { background-color: #f5f5f5; }"
-                "QDialog QFrame { background-color: #f5f5f5; }"
-                "QScrollArea { background-color: #f5f5f5; border: none; }"
+                light_dialog_stylesheet("#f5f5f5")
+                + LIGHT_SCROLLBAR_QSS
             )
             layout = QVBoxLayout(dlg)
             layout.setSpacing(8)
@@ -599,6 +736,7 @@ class MainWindow(QMainWindow):
                 if self.settings_window is None:
                     # 如果预创建失败或尚未完成，按需创建一次
                     self.settings_window = SettingsWindow(self)
+                self.settings_window._reload_controls_from_config()
                 self.settings_window.show()
                 self.settings_window.raise_()
                 self.settings_window.activateWindow()
@@ -629,7 +767,7 @@ class MainWindow(QMainWindow):
         message_text: str,
         parsed_data: Dict[str, Any],
     ):
-        """记录事件历史（每个 source_name 仅保留最新一条）"""
+        """记录事件历史（环形缓冲，支持跨源去重）。"""
         try:
             source_display = self._get_history_source_display(source_name, parsed_data)
             type_display = self._get_history_type_display(message_type)
@@ -641,14 +779,29 @@ class MainWindow(QMainWindow):
                 or ""
             )
             normalized_event_time = self._normalize_history_event_time(raw_time)
-            self._event_history[source_name] = {
-                "source_name": source_display,
-                "message_type": type_display,
-                "message_text": content_display,
-                "event_time": normalized_event_time,
-                "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "event_id": parsed_data.get("event_id", ""),
-            }
+            recent = self._event_history_store.get_entries_snapshot()
+            dup_idx = find_duplicate_index(parsed_data, recent)
+            if dup_idx is not None:
+                entries = self._event_history_store.get_entries_snapshot()
+                if 0 <= dup_idx < len(entries):
+                    existing = dict(entries[dup_idx])
+                    merge_sources(existing, source_display)
+                    existing["message_text"] = content_display
+                    existing["scroll_text"] = message_text
+                    existing["received_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    existing["received_at_ts"] = time.time()
+                    self._event_history_store.update_entry(dup_idx, existing)
+                    return
+            self._event_history_store.append(
+                source_name,
+                message_type,
+                content_display,
+                parsed_data,
+                source_display=source_display,
+                type_display=type_display,
+                event_time=normalized_event_time,
+                scroll_text=message_text,
+            )
         except Exception as e:
             logger.debug(f"写入事件历史失败: {e}")
 
@@ -772,12 +925,22 @@ class MainWindow(QMainWindow):
         return fallback_text
 
     def get_event_history_snapshot(self) -> Dict[str, Dict[str, Any]]:
-        """获取事件历史快照（供历史窗口展示）"""
-        return {k: dict(v) for k, v in self._event_history.items()}
+        """获取事件历史快照（供历史窗口展示，兼容旧接口）。"""
+        return self._event_history_store.get_per_source_snapshot()
+
+    def get_full_event_history(self) -> list:
+        """获取完整环形历史列表。"""
+        return self._event_history_store.get_entries_snapshot()
+
+    def export_event_history_csv(self, path: str) -> bool:
+        return self._event_history_store.export_csv(path)
+
+    def export_event_history_json(self, path: str) -> bool:
+        return self._event_history_store.export_json(path)
 
     def clear_event_history(self):
         """清空事件历史缓存"""
-        self._event_history.clear()
+        self._event_history_store.clear()
 
     def _warning_display_segments(
         self, message: MessageItem
@@ -1519,6 +1682,7 @@ class MainWindow(QMainWindow):
             "ingv": INGV_HTTP_URL,
             "early_est": EARLYEST_HTTP_URL,
             "jma_volcano": JMA_ATOM_LONG_URL,
+            "ptwc": PTWC_CAP_URL,
         }
         mapped_url = http_source_map.get(st) or http_source_map.get(sn)
         if mapped_url and not es.get(mapped_url, False):
@@ -1537,12 +1701,23 @@ class MainWindow(QMainWindow):
         return True
 
     def on_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
-        """接收到消息时的回调"""
+        """接收到消息时的回调（可能来自后台线程，经信号派发到主线程）"""
+        self.message_received_signal.emit(source_name, parsed_data)
+
+    def _process_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
+        """在主线程中处理数据源消息"""
         try:
             if not self._should_process_data_source_message(source_name, parsed_data):
                 return
 
             message_type = parsed_data.get('type', 'report')
+
+            if not should_accept_message(parsed_data, self.config, message_type):
+                logger.debug(
+                    f"消息被过滤: source={source_name}, type={message_type}, "
+                    f"mag={parsed_data.get('magnitude')}"
+                )
+                return
             
             # JMA数据特殊处理：检查cancel字段，如果为true，从预警缓冲区移除对应事件
             if message_type == 'warning' and source_name == 'jma':
@@ -1606,6 +1781,9 @@ class MainWindow(QMainWindow):
             # 对于预警消息，先检查是否过期，避免将过期消息误报为格式化失败
             if message_type == 'warning':
                 logger.info(f"收到预警消息: source={source_name}, place_name={parsed_data.get('place_name')}, magnitude={parsed_data.get('magnitude')}, source_type={parsed_data.get('source_type')}")
+                startup_sync = bool(parsed_data.get("_suppress_tts"))
+                if startup_sync and parsed_data.get("source_type") == "cea":
+                    self._record_cea_test_history(source_name, parsed_data)
                 # 入口侧统一按发震时间窗口过滤预警：
                 # - 全局默认窗口：warning_shock_validity_seconds
                 # - Wolfx JMA 使用 warning_shock_validity_seconds_nied
@@ -1631,6 +1809,29 @@ class MainWindow(QMainWindow):
                     pass
 
             self._record_event_history(source_name, message_type, message, parsed_data)
+
+            ac = self.config.alert_config
+            feedback_mode = str(getattr(ac, "alert_feedback_mode", "sound") or "sound").strip().lower()
+            if feedback_mode == "tts":
+                if message_type in ("warning", "report", "weather"):
+                    trigger_alert_feedback(
+                        self.config,
+                        message_type,
+                        parsed_data,
+                        display_text=message,
+                    )
+            else:
+                play_alert_sound(
+                    self.config,
+                    message_type,
+                    parsed_data=parsed_data if message_type == "warning" else None,
+                )
+            if message_type == "warning":
+                show_event_notification(
+                    self.config,
+                    "地震预警",
+                    message[:200],
+                )
             
             # 对于预警消息，记录格式化成功的信息；按 AlertConfig 阈值触发告警序列
             if message_type == 'warning':
@@ -1681,33 +1882,7 @@ class MainWindow(QMainWindow):
                 image_path = parsed_data.get('logo_url')
                 if image_path:
                     logger.info(f"✓ 海啸预警图标路径: {image_path}")
-            elif message_type == 'report' and (parsed_data.get('source_type') == 'fssn-cmt' or parsed_data.get('nodal_plane_1')):
-                # FSSN CMT：用 PyGMT 或 Pillow 绘制震源机制沙滩球，按深度着色，输出透明 PNG
-                try:
-                    from utils.beachball import render_beachball_to_file
-                    nodal_plane_1 = parsed_data.get('nodal_plane_1') or (parsed_data.get('raw_data') or {}).get('nodalPlane1', '')
-                    event_id_for_cmt = parsed_data.get('event_id', '')
-                    if nodal_plane_1:
-                        image_path = render_beachball_to_file(
-                            nodal_plane_1,
-                            parsed_data=parsed_data,
-                            event_id=event_id_for_cmt or None,
-                        )
-                        if image_path:
-                            logger.info(f"✓ FSSN CMT 沙滩球已生成: {image_path}")
-                except Exception as e:
-                    logger.warning(f"FSSN CMT 沙滩球生成失败: {e}")
-                    image_path = None
-            elif message_type == 'report' and parsed_data.get('source_type') == 'cenc-ir':
-                # CENC 烈度速报：根据等震线+台站烈度绘制静态烈度图（含每站数据）
-                try:
-                    from utils.cenc_station_intensity_map import render_cenc_station_map_to_file
-                    image_path = render_cenc_station_map_to_file(parsed_data)
-                    if image_path:
-                        logger.info(f"✓ CENC 烈度图已生成: {image_path}")
-                except Exception as e:
-                    logger.warning(f"CENC 烈度图生成失败: {e}")
-                    image_path = None
+            # FSSN CMT / CENC 烈度图在 process_messages 中异步生成，避免阻塞主线程
 
             # 获取event_id（用于识别同一条地震事件的更新）
             event_id = parsed_data.get('event_id', '')
@@ -1721,12 +1896,17 @@ class MainWindow(QMainWindow):
                     or parsed_data.get('nodal_plane_1')
                     or parsed_data.get('source_type') == 'cenc-ir'
                 )
-                and image_path
             )
             pd_store = None
-            if message_type in ("weather", "warning") and isinstance(parsed_data, dict):
-                # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
-                pd_store = dict(parsed_data)
+            if isinstance(parsed_data, dict):
+                if message_type in ("weather", "warning"):
+                    # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
+                    pd_store = dict(parsed_data)
+                elif message_type == 'report' and (
+                    parsed_data.get('source_type') in ('fssn-cmt', 'cenc-ir')
+                    or parsed_data.get('nodal_plane_1')
+                ):
+                    pd_store = dict(parsed_data)
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -1758,6 +1938,43 @@ class MainWindow(QMainWindow):
                 logger.warning("消息队列已满，丢弃消息")
         except Exception as e:
             logger.error(f"处理消息时出错: {e}")
+
+    def _start_deferred_report_image_render(self, msg_item: MessageItem):
+        """在后台线程生成 FSSN CMT 沙滩球或 CENC 烈度图，完成后更新消息项"""
+        if not msg_item.parsed_data:
+            return
+
+        def render_worker():
+            image_path = None
+            pd = msg_item.parsed_data
+            try:
+                source_type = pd.get('source_type', '')
+                if source_type == 'fssn-cmt' or pd.get('nodal_plane_1'):
+                    from utils.beachball import render_beachball_to_file
+                    nodal_plane_1 = pd.get('nodal_plane_1') or (pd.get('raw_data') or {}).get('nodalPlane1', '')
+                    if nodal_plane_1:
+                        image_path = render_beachball_to_file(
+                            nodal_plane_1,
+                            parsed_data=pd,
+                            event_id=pd.get('event_id') or None,
+                        )
+                elif source_type == 'cenc-ir':
+                    from utils.cenc_station_intensity_map import render_cenc_station_map_to_file
+                    image_path = render_cenc_station_map_to_file(pd)
+            except Exception as e:
+                logger.warning(f"异步生成速报配图失败 ({msg_item.source}): {e}")
+            if image_path:
+                def apply_update():
+                    msg_item.image_after_text = True
+                    self._update_message_image_path(msg_item, image_path)
+                    logger.info(f"✓ 速报配图已异步生成: {image_path}")
+                QTimer.singleShot(0, apply_update)
+
+        threading.Thread(
+            target=render_worker,
+            daemon=True,
+            name="ReportImageRenderer",
+        ).start()
     
     def _start_message_processing(self):
         """启动消息处理循环"""
@@ -1925,6 +2142,10 @@ class MainWindow(QMainWindow):
                                 # 使用线程异步执行，避免阻塞
                                 thread = threading.Thread(target=get_image_path_async, daemon=True, name="WeatherImagePathLoader")
                                 thread.start()
+                            elif msg.message_type == 'report' and not msg.image_path and msg.parsed_data:
+                                st = msg.parsed_data.get('source_type', '')
+                                if st in ('fssn-cmt', 'cenc-ir') or msg.parsed_data.get('nodal_plane_1'):
+                                    self._start_deferred_report_image_render(msg)
                         
                         # 检查是否正在滚动
                         is_scrolling = self.scrolling_text and self.scrolling_text.is_scrolling()
@@ -2035,14 +2256,25 @@ class MainWindow(QMainWindow):
             def ws_thread():
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
+                self._ws_loop = loop
                 try:
                     loop.run_until_complete(ws_manager.start_all_connections())
                 except Exception as e:
                     logger.error(f"WebSocket连接失败: {e}")
                 finally:
+                    try:
+                        pending = asyncio.all_tasks(loop)
+                        for task in pending:
+                            task.cancel()
+                        if pending:
+                            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except Exception:
+                        pass
                     loop.close()
+                    self._ws_loop = None
             
             thread = threading.Thread(target=ws_thread, daemon=True, name="WebSocketThread")
+            self._ws_thread = thread
             thread.start()
             logger.debug("WebSocket连接线程已启动")
             
@@ -2126,6 +2358,14 @@ class MainWindow(QMainWindow):
                 False,
             ):
                 return True
+            inactivity_limit = getattr(
+                self.config.message_config, "max_warning_inactivity_time", 600
+            )
+            if message.timestamp and (time.time() - message.timestamp) > inactivity_limit:
+                logger.debug(
+                    f"预警无活动超时: 距上次更新 {time.time() - message.timestamp:.0f}s"
+                )
+                return False
             min_display = self.config.message_config.warning_min_display_seconds
             # 保证最少展示时长：自首次显示起未满 min_display 秒则仍有效
             if message.first_displayed_at is not None:
@@ -2186,15 +2426,55 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭事件"""
         try:
+            if (
+                getattr(self.config.gui_config, "minimize_to_tray", False)
+                and self._tray_icon is not None
+                and not getattr(self, "_force_quit", False)
+            ):
+                event.ignore()
+                self.hide()
+                self._tray_icon.showMessage(
+                    "地震情报实况栏",
+                    "程序已最小化到系统托盘，仍在后台接收地震信息。",
+                    QSystemTrayIcon.Information,
+                    3000,
+                )
+                return
             self.running = False
             self._resize_save_timer.stop()
             self._move_save_timer.stop()
             self._persist_window_geometry_to_config()
             try:
+                self.config.remove_config_callback(self._on_config_changed)
+            except Exception as e_cb:
+                logger.debug(f"移除配置回调失败（可忽略）: {e_cb}")
+            try:
                 if self.alert_controller is not None:
                     self.alert_controller.dispose()
             except Exception as e_alert:
                 logger.debug(f"关闭时释放 AlertController 失败（可忽略）: {e_alert}")
+
+            if self.scrolling_text and hasattr(self.scrolling_text, 'timer') and self.scrolling_text.timer:
+                try:
+                    self.scrolling_text.timer.stop()
+                except Exception:
+                    pass
+            
+            # 停止 WebSocket 管理器
+            if self.ws_manager is not None:
+                try:
+                    if self._ws_loop is not None and self._ws_loop.is_running():
+                        fut = asyncio.run_coroutine_threadsafe(
+                            self.ws_manager.stop_all(), self._ws_loop
+                        )
+                        try:
+                            fut.result(timeout=3)
+                        except Exception as e_ws:
+                            logger.debug(f"等待 WebSocket 停止超时或失败（可忽略）: {e_ws}")
+                    else:
+                        self.ws_manager._running = False
+                except Exception as e:
+                    logger.error(f"停止 WebSocket 管理器失败: {e}")
             
             # 停止HTTP轮询管理器
             if 'http_polling' in self.data_sources:

@@ -25,6 +25,7 @@ from config import (
     INGV_HTTP_URL,
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
+    PTWC_CAP_URL,
 )
 from adapters import (
     FanStudioHttpAdapter,
@@ -36,6 +37,7 @@ from adapters import (
     INGVAdapter,
     EarlyEstAdapter,
     JmaAtomAdapter,
+    PtwcAdapter,
 )
 from utils.logger import get_logger
 
@@ -211,19 +213,24 @@ class HTTPPollingConnection:
             if data_hash == self._last_data_hash:
                 logger.debug(f"[{self.source_name}] 数据未变化，跳过处理")
                 return
-            
+
+            is_first_poll = self._last_data_hash is None
             self._last_data_hash = data_hash
             
-            # 使用适配器解析数据
+            # 使用适配器解析数据（P2PQuake HTTP 等仅需首条时由 parse() 返回单条）
             logger.debug(f"[{self.source_name}] 开始解析数据，数据类型: {type(data)}, 数据长度: {len(data) if isinstance(data, (list, dict)) else 'N/A'}")
             parsed_result = self.adapter.parse(data)
             
             if parsed_result:
                 if isinstance(parsed_result, list):
                     for idx, item in enumerate(parsed_result, start=1):
+                        if is_first_poll and isinstance(item, dict):
+                            item["_suppress_tts"] = True
                         message_callback(self.source_name, item)
                     logger.info(f"[{self.source_name}] 解析成功，处理了{len(parsed_result)}条数据")
                 else:
+                    if is_first_poll and isinstance(parsed_result, dict):
+                        parsed_result["_suppress_tts"] = True
                     logger.info(f"[{self.source_name}] 解析成功，解析结果: type={parsed_result.get('type')}, organization={parsed_result.get('organization')}, place_name={parsed_result.get('place_name')}")
                     message_callback(self.source_name, parsed_result)
                     logger.info(f"[{self.source_name}] 轮询成功，处理了最新1条数据")
@@ -303,6 +310,8 @@ class HTTPPollingManager:
             return EarlyEstAdapter('early_est', url)
         if url == JMA_ATOM_LONG_URL:
             return JmaAtomAdapter('jma_volcano', url)
+        if url == PTWC_CAP_URL:
+            return PtwcAdapter('ptwc', url)
         # 已下线的 Wolfx HTTP 不提供适配器，跳过
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
@@ -381,3 +390,12 @@ class HTTPPollingManager:
         
         self.connections.clear()
         logger.info("所有HTTP轮询连接已停止")
+
+    def update_poll_intervals(self, intervals: Dict[str, int]) -> None:
+        """热更新已运行连接的轮询间隔（秒）"""
+        for url, connection in self.connections.items():
+            if url in intervals:
+                connection.poll_interval = max(1, int(intervals[url]))
+                logger.info(
+                    f"已更新 HTTP 轮询间隔: {connection.source_name} -> {connection.poll_interval}s"
+                )

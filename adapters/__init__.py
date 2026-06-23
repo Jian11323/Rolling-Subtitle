@@ -18,6 +18,7 @@ from .geonet_adapter import GeoNetAdapter
 from .ingv_adapter import INGVAdapter
 from .earlyest_adapter import EarlyEstAdapter
 from .jma_atom_adapter import JmaAtomAdapter
+from .ptwc_adapter import PtwcAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -33,4 +34,5 @@ __all__ = [
     'INGVAdapter',
     'EarlyEstAdapter',
     'JmaAtomAdapter',
+    'PtwcAdapter',
 ]

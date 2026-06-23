@@ -134,7 +134,7 @@ class _ScrollingTextMixin:
         self._lead_badge_timer.setTimerType(Qt.PreciseTimer)
         self._lead_badge_timer.timeout.connect(self._on_lead_badge_timeout)
 
-        self.timer = QTimer()
+        self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._scroll)
         target_fps = config.gui_config.target_fps

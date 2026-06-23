@@ -85,6 +85,7 @@ class WebSocketManager:
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # 连接任务字典
         self._health_status: Dict[str, Dict[str, Any]] = {}
         self._wolfx_all_eew_bootstrap_done: Optional[asyncio.Event] = None
+        self._running = True
         
         # 加载配置
         config = Config()
@@ -256,6 +257,8 @@ class WebSocketManager:
             )
             if source_type in direct_sub_sources:
                 return source_type
+            if source_type == 'ptwc':
+                return 'ptwc'
             if source_type:
                 return config.get_source_name(f"wss://ws.fanstudio.tech/{source_type}")
             
@@ -371,18 +374,19 @@ class WebSocketManager:
             # 处理initial_all类型
             if isinstance(data, dict) and data.get('type') == 'initial_all' and data_source_type == 'all':
                 logger.info(f"[{source_name}] 收到initial_all类型消息，开始处理所有数据源")
-                all_parsed_data = adapter.parse_all_sources(data)
+                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 logger.info(f"[{source_name}] initial_all解析完成，共{len(all_parsed_data)}条有效数据")
                 
                 for parsed_data in all_parsed_data:
                     if parsed_data:
+                        parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                         msg_type = parsed_data.get('type', 'unknown')
                         logger.info(f"[{actual_source}] {msg_type}消息")
                         self.message_callback(actual_source, parsed_data)
             else:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
-                parsed_data = adapter.parse(data)
+                parsed_data = await asyncio.to_thread(adapter.parse, data)
                 if parsed_data:
                     # Wolfx / P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
@@ -532,10 +536,12 @@ class WebSocketManager:
         """
         adapter = self.get_adapter(url)
         
-        while True:
+        while self._running:
             # 检查是否启用
             if not self.enabled_sources.get(url, True):
                 self.connection_states[url] = "unconnected"
+                if not self._running:
+                    break
                 await asyncio.sleep(30)
                 continue
             
@@ -599,7 +605,7 @@ class WebSocketManager:
                         self._send_queues[url] = Queue()
                     
                     # 主消息循环
-                    while True:
+                    while self._running:
                         # 发送待发送的消息
                         await self._send_pending_messages(websocket, url, source_name)
                         
@@ -619,11 +625,21 @@ class WebSocketManager:
             except TimeoutError as e:
                 logger.warning(f"[{source_name}] 连接超时（握手阶段）: {e}，将按重连间隔重试")
                 self._cleanup_connection(url, source_name)
+            except (ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, BrokenPipeError) as e:
+                logger.warning(
+                    f"[{source_name}] 连接被重置或拒绝（握手/建连阶段）: {e}，将按重连间隔重试"
+                )
+                self._cleanup_connection(url, source_name)
+            except OSError as e:
+                logger.warning(f"[{source_name}] 网络错误: {e}，将按重连间隔重试")
+                self._cleanup_connection(url, source_name)
             except Exception as e:
                 logger.error(f"[{source_name}] 连接错误: {e}", exc_info=True)
                 self._cleanup_connection(url, source_name)
             
             # 重连逻辑
+            if not self._running:
+                break
             if not await self._should_reconnect(url, source_name):
                 continue
             
@@ -631,7 +647,24 @@ class WebSocketManager:
             wait_time = min(self.reconnect_attempts[url] * 2, 30)
             attempt = self.reconnect_attempts[url]
             logger.debug(f"[{source_name}] {wait_time}秒后重连(第{attempt}次)")
+            if not self._running:
+                break
             await asyncio.sleep(wait_time)
+    
+    async def stop_all(self):
+        """停止所有 WebSocket 连接任务"""
+        if not self._running:
+            return
+        self._running = False
+        logger.info("正在停止所有 WebSocket 连接...")
+        for url, task in list(self._connection_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+        if self._connection_tasks:
+            await asyncio.gather(*self._connection_tasks.values(), return_exceptions=True)
+        self._connection_tasks.clear()
+        self.connections.clear()
+        logger.info("所有 WebSocket 连接已停止")
     
     def is_connection_active(self, url: str) -> bool:
         """
@@ -790,6 +823,7 @@ class WebSocketManager:
                             logger.error(f"[p2pquake] 启动前 HTTP 解析地震情报单条失败: {e}", exc_info=True)
                             continue
                         if parsed:
+                            parsed["_suppress_tts"] = True
                             self.message_callback("p2pquake", parsed)
                             eq_count += 1
                     elif code == 552:
@@ -801,6 +835,7 @@ class WebSocketManager:
                             logger.error(f"[p2pquake_tsunami] 启动前 HTTP 解析海啸情报单条失败: {e}", exc_info=True)
                             continue
                         if parsed:
+                            parsed["_suppress_tts"] = True
                             self.message_callback("p2pquake_tsunami", parsed)
                             tsu_count += 1
 

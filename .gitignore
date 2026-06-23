@@ -9,10 +9,23 @@ dist/
 单文件版/
 非压缩版/
 installer版/
+release版/
 venv/
 .venv/
 env/
 .env/
+.env
+.env.*
+!.env.example
+
+# 本地配置与密钥（防止误提交）
+settings.json
+settings.json.bak
+translation_cache.json
+credentials.json
+secrets.json
+*.pem
+*.key
 
 # 构建/打包（忽略构建输出及打包脚本、spec）
 build/
@@ -42,6 +55,7 @@ clear_repo_and_cleanup.bat
 run.bat
 上传到GitHub.bat
 同步到GitHub.bat
+发布Release.bat
 GITHUB_上传说明.md
 
 # Wiki 本地源文件（单独推送到 *.wiki 仓库，不上传主仓库）

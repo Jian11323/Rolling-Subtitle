@@ -197,7 +197,12 @@ class MessageProcessor:
         except (ValueError, TypeError):
             return default
     
-    def format_message(self, parsed_data: Dict[str, Any]) -> Optional[str]:
+    def format_message(
+        self,
+        parsed_data: Dict[str, Any],
+        *,
+        ignore_warning_expiry: bool = False,
+    ) -> Optional[str]:
         """
         格式化消息
         
@@ -227,11 +232,16 @@ class MessageProcessor:
                 # - wolfx_jma_eew: warning_shock_validity_seconds_nied（默认 5 分钟）
                 # - wolfx_sc_eew: warning_shock_validity_seconds_early_est（默认 10 分钟）
                 is_valid = self._is_warning_valid(parsed_data)
-                if not is_valid:
+                if not is_valid and not ignore_warning_expiry:
                     shock_time = parsed_data.get('shock_time', '')
                     event_id = parsed_data.get('event_id', '')
                     logger.debug(f"预警消息已过期（format_message 阶段），忽略: event_id={event_id}, shock_time={shock_time}, source_type={source_type}")
                     return None
+                if not is_valid and ignore_warning_expiry:
+                    logger.debug(
+                        "预警已过期，但 ignore_warning_expiry=True，仍格式化供历史/TTS 测试: "
+                        f"event_id={parsed_data.get('event_id')}, source_type={source_type}"
+                    )
                 
                 # 格式化预警消息
                 try:
@@ -984,18 +994,21 @@ class MessageProcessor:
                 message_parts.append("【美国地质调查局地震信息】")
             # CENC特殊处理：根据infoTypeName动态显示
             elif organization == "中国地震台网中心自动测定/正式测定":
-                # 从infoTypeName中提取测定类型（去掉方括号）
-                # infoTypeName格式可能是 "[正式测定]" 或 "[自动测定]"
-                determination_type = "自动测定/正式测定"  # 默认值
-                if info_type:
-                    # 去掉方括号
-                    info_type_clean = info_type.strip('[]')
-                    if "正式测定" in info_type_clean:
-                        determination_type = "正式测定"
-                    elif "自动测定" in info_type_clean:
-                        determination_type = "自动测定"
-                
-                message_parts.append(f"【中国地震台网中心{determination_type}】")
+                det = ""
+                raw = data.get("raw_data")
+                if isinstance(raw, dict):
+                    raw_it = raw.get("infoTypeName") or info_type
+                else:
+                    raw_it = info_type
+                clean = str(raw_it or "").strip("[]")
+                if "正式测定" in clean:
+                    det = "正式测定"
+                elif "自动测定" in clean:
+                    det = "自动测定"
+                if det:
+                    message_parts.append(f"【中国地震台网中心{det}】")
+                else:
+                    message_parts.append("【中国地震台网中心地震信息】")
             # 如果机构名称已经包含"地震信息"或"地震情报"，直接使用，不再添加
             elif "地震信息" in organization or "地震情报" in organization or "海啸" in organization:
                 message_parts.append(f"【{organization}】")

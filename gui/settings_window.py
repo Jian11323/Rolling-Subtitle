@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QTabWidget, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
     QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QGroupBox,
-    QSizePolicy, QStyle, QShortcut,
+    QSizePolicy, QStyle, QShortcut, QFileDialog,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
 from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics
@@ -34,11 +34,27 @@ from config import (
     INGV_HTTP_URL,
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
+    PTWC_CAP_URL,
     DEFAULT_HTTP_POLL_INTERVALS,
 )
 from utils.logger import get_logger
-from utils.resource_path import get_executable_path
+from utils.resource_path import get_executable_path, get_resource_path
+from utils.performance_presets import (
+    PERFORMANCE_MODE_CUSTOM,
+    PERFORMANCE_MODE_STANDARD,
+    PERFORMANCE_MODE_LABELS,
+    PERFORMANCE_MODES,
+)
 from .color_manager import Color48Picker
+from .qt_light_theme import (
+    apply_light_palette,
+    light_dialog_stylesheet,
+    LIGHT_SCROLLBAR_QSS,
+    show_info,
+    show_warning,
+    show_critical,
+    styled_message_box,
+)
 
 logger = get_logger()
 
@@ -167,6 +183,44 @@ STYLE_SELECT_ALL_BTN = """
     QPushButton:hover { background-color: #357ABD; }
     QPushButton:pressed { background-color: #2E5F8F; }
 """
+STYLE_AUDIO_COMPACT_BTN = """
+    QPushButton {
+        background-color: #4A90E2;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: bold;
+        padding: 5px 8px;
+        min-height: 28px;
+    }
+    QPushButton:hover { background-color: #357ABD; }
+    QPushButton:pressed { background-color: #2E5F8F; }
+"""
+STYLE_AUDIO_FILE_BTN = """
+    QPushButton {
+        background-color: #FFFFFF;
+        color: #333333;
+        border: 1px solid #CCCCCC;
+        border-radius: 4px;
+        font-size: 14px;
+        padding: 5px 8px;
+        min-height: 28px;
+        text-align: left;
+    }
+    QPushButton:hover { border: 1px solid #4A90E2; background-color: #F7FAFD; }
+    QPushButton:pressed { background-color: #EEF4FB; }
+"""
+
+_AUDIO_TIER_SOUND = (
+    ('tier_felt_cb', 'felt_sound_enabled'),
+    ('tier_critical_cb', 'critical_sound_enabled'),
+)
+_AUDIO_TIER_TTS = (
+    ('tier_report_cb', 'report_tts_enabled'),
+    ('tier_weather_cb', 'weather_tts_enabled'),
+    ('tier_tsunami_cb', 'tsunami_tts_enabled'),
+)
 
 
 class SettingsWindow(QDialog):
@@ -224,8 +278,13 @@ class SettingsWindow(QDialog):
         # 使用非模态窗口，避免阻塞主界面事件循环
         self.setModal(False)
         
-        # 设置窗口背景为白色
-        self.setStyleSheet("background-color: white;")
+        # 设置窗口背景为白色（Win 深色主题下需同时设置 QPalette，避免继承黑底）
+        apply_light_palette(self, "#FFFFFF")
+        self.setStyleSheet(
+            "background-color: white;"
+            + light_dialog_stylesheet("#FFFFFF")
+            + LIGHT_SCROLLBAR_QSS
+        )
         
         # 创建主布局
         main_layout = QVBoxLayout(self)
@@ -236,8 +295,9 @@ class SettingsWindow(QDialog):
         self.notebook = QTabWidget()
         main_layout.addWidget(self.notebook)
         
-        # 标签页顺序：外观与显示、数据源、数据源状态、高级、关于
+        # 标签页顺序：外观与显示、音频、数据源、数据源状态、高级、关于
         self._create_appearance_tab()
+        self._create_audio_tab()
         self._create_data_source_tab()
         self._create_data_source_status_tab()
         self._create_advanced_tab()
@@ -254,12 +314,13 @@ class SettingsWindow(QDialog):
         self._custom_source_status_timer.setInterval(2000)
         self._custom_source_status_timer.timeout.connect(self._update_custom_source_status)
         # 数据源页连接/解析状态定时刷新
-        self._data_source_tab_index = 1
-        self._data_source_status_tab_index = 2
+        self._data_source_tab_index = 2
+        self._data_source_status_tab_index = 3
         self._status_refresh_timer = QTimer(self)
         self._status_refresh_timer.setInterval(2000)
         self._status_refresh_timer.timeout.connect(self._on_status_refresh_tick)
-        self._advanced_tab_index = 3  # 高级页在 notebook 中的索引
+        self._advanced_tab_index = 4  # 高级页在 notebook 中的索引
+        self._audio_tab_index = 1
         self.notebook.currentChanged.connect(self._on_settings_tab_changed)
     
     def _on_settings_tab_changed(self, index: int):
@@ -390,6 +451,191 @@ class SettingsWindow(QDialog):
         self._status_refresh_timer.stop()
         self._custom_source_status_timer.stop()
         super().hideEvent(event)
+
+    def _on_cancel_clicked(self):
+        """取消：从磁盘重新加载配置并刷新控件，避免未保存的修改残留"""
+        try:
+            self.config.load_config()
+            self._reload_controls_from_config()
+        except Exception as e:
+            logger.error(f"取消时恢复配置失败: {e}")
+        self.reject()
+
+    def _reload_controls_from_config(self):
+        """将各标签页控件同步为当前 Config 中的已保存值"""
+        try:
+            g = self.config.gui_config
+            mc = self.config.message_config
+            if hasattr(self, 'display_vars') and self.display_vars:
+                if 'always_on_top' in self.display_vars:
+                    self.display_vars['always_on_top'].setChecked(getattr(g, 'always_on_top', False))
+                if 'speed' in self.display_vars:
+                    self.display_vars['speed'].setValue(int(round(g.text_speed * 10)))
+                if 'width' in self.display_vars:
+                    self.display_vars['width'].setValue(g.window_width)
+                if 'height' in self.display_vars:
+                    self.display_vars['height'].setValue(g.window_height)
+                if 'opacity' in self.display_vars:
+                    self.display_vars['opacity'].setValue(int(round(g.opacity * 10)))
+                if 'vsync_enabled' in self.display_vars:
+                    self.display_vars['vsync_enabled'].setChecked(g.vsync_enabled)
+                if 'target_fps' in self.display_vars:
+                    self.display_vars['target_fps'].setValue(g.target_fps)
+                if 'font_bold' in self.display_vars:
+                    self.display_vars['font_bold'].setChecked(g.font_bold)
+                if 'font_italic' in self.display_vars:
+                    self.display_vars['font_italic'].setChecked(g.font_italic)
+                if 'warning_min_display_seconds' in self.display_vars:
+                    self.display_vars['warning_min_display_seconds'].setValue(
+                        getattr(mc, 'warning_min_display_seconds', 300)
+                    )
+                if 'minimize_to_tray' in self.display_vars:
+                    self.display_vars['minimize_to_tray'].setChecked(
+                        getattr(g, 'minimize_to_tray', False)
+                    )
+                if 'toast_notifications_enabled' in self.display_vars:
+                    self.display_vars['toast_notifications_enabled'].setChecked(
+                        getattr(g, 'toast_notifications_enabled', False)
+                    )
+                if 'auto_update_check_on_startup' in self.display_vars:
+                    self.display_vars['auto_update_check_on_startup'].setChecked(
+                        getattr(g, 'auto_update_check_on_startup', True)
+                    )
+                ac = self.config.alert_config
+            adv = getattr(self, 'advanced_vars', {}) or {}
+            alert_cb = adv.get('alert_enable_cb')
+            if alert_cb is not None:
+                alert_cb.setChecked(bool(getattr(self.config.alert_config, 'enabled', False)))
+            audio = getattr(self, 'audio_vars', {}) or {}
+            if audio:
+                self._refresh_audio_tab_from_config()
+            if hasattr(self, 'render_vars') and self.render_vars:
+                backend = getattr(g, 'render_backend', None) or (
+                    'opengl' if g.use_gpu_rendering else 'cpu'
+                )
+                if 'cpu_radio' in self.render_vars:
+                    self.render_vars['cpu_radio'].setChecked(backend != 'opengl')
+                if 'opengl_radio' in self.render_vars:
+                    self.render_vars['opengl_radio'].setChecked(backend == 'opengl')
+            if hasattr(self, 'performance_vars') and self.performance_vars:
+                combo = self.performance_vars.get('performance_mode_combo')
+                if combo is not None:
+                    mode = getattr(g, 'performance_mode', 'standard') or 'standard'
+                    idx = combo.findData(mode)
+                    if idx < 0:
+                        idx = combo.findData(PERFORMANCE_MODE_CUSTOM)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+            if hasattr(self, 'source_vars'):
+                for url, cb in self.source_vars.items():
+                    cb.setChecked(self.config.enabled_sources.get(url, True))
+            if hasattr(self, 'fanstudio_all_connect_cb'):
+                self.fanstudio_all_connect_cb.setChecked(
+                    self.config.enabled_sources.get(self.all_source_url, True)
+                )
+            for attr, cfg_name in [
+                ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
+                ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
+                ('fanstudio_parse_cwa_eew_cb', 'fanstudio_parse_cwa_eew'),
+                ('fanstudio_parse_jma_cb', 'fanstudio_parse_jma'),
+                ('fanstudio_parse_sa_cb', 'fanstudio_parse_sa'),
+                ('fanstudio_parse_kma_eew_cb', 'fanstudio_parse_kma_eew'),
+                ('fanstudio_parse_cenc_cb', 'fanstudio_parse_cenc'),
+                ('fanstudio_parse_ningxia_cb', 'fanstudio_parse_ningxia'),
+                ('fanstudio_parse_guangxi_cb', 'fanstudio_parse_guangxi'),
+                ('fanstudio_parse_shanxi_cb', 'fanstudio_parse_shanxi'),
+                ('fanstudio_parse_beijing_cb', 'fanstudio_parse_beijing'),
+                ('fanstudio_parse_yunnan_cb', 'fanstudio_parse_yunnan'),
+                ('fanstudio_parse_cwa_cb', 'fanstudio_parse_cwa'),
+                ('fanstudio_parse_hko_cb', 'fanstudio_parse_hko'),
+                ('fanstudio_parse_usgs_cb', 'fanstudio_parse_usgs'),
+                ('fanstudio_parse_emsc_cb', 'fanstudio_parse_emsc'),
+                ('fanstudio_parse_bcsf_cb', 'fanstudio_parse_bcsf'),
+                ('fanstudio_parse_gfz_cb', 'fanstudio_parse_gfz'),
+                ('fanstudio_parse_usp_cb', 'fanstudio_parse_usp'),
+                ('fanstudio_parse_kma_cb', 'fanstudio_parse_kma'),
+                ('fanstudio_parse_fssn_cb', 'fanstudio_parse_fssn'),
+                ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
+                ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
+                ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
+            ]:
+                cb = getattr(self, attr, None)
+                if cb is not None:
+                    cb.setChecked(getattr(mc, cfg_name, True))
+            if hasattr(self, 'ali_all_parse_nied_cb'):
+                self.ali_all_parse_nied_cb.setChecked(getattr(mc, 'ali_all_parse_nied', True))
+            if hasattr(self, 'ali_all_parse_early_est_cb'):
+                self.ali_all_parse_early_est_cb.setChecked(getattr(mc, 'ali_all_parse_early_est', True))
+            if hasattr(self, 'ali_all_parse_jma_volcano_cb'):
+                self.ali_all_parse_jma_volcano_cb.setChecked(getattr(mc, 'ali_all_parse_jma_volcano', True))
+            if hasattr(self, 'ali_all_parse_bmkg_cb'):
+                self.ali_all_parse_bmkg_cb.setChecked(getattr(mc, 'ali_all_parse_bmkg', True))
+            if hasattr(self, 'ali_all_parse_cq_eew_cb'):
+                self.ali_all_parse_cq_eew_cb.setChecked(getattr(mc, 'ali_all_parse_cq_eew', True))
+            if hasattr(self, 'p2pquake_parse_551_cb'):
+                self.p2pquake_parse_551_cb.setChecked(getattr(mc, 'p2pquake_parse_551', True))
+            if hasattr(self, 'p2pquake_parse_552_cb'):
+                self.p2pquake_parse_552_cb.setChecked(getattr(mc, 'p2pquake_parse_552', True))
+            if hasattr(self, 'radio_custom_text') and hasattr(self, 'radio_report'):
+                use_custom = getattr(mc, 'use_custom_text', False)
+                self.radio_custom_text.setChecked(use_custom)
+                self.radio_report.setChecked(not use_custom)
+            if hasattr(self, 'http_poll_spinboxes'):
+                for url, spin in self.http_poll_spinboxes.items():
+                    spin.setValue(max(1, int(self.config.get_http_poll_interval(url))))
+            if hasattr(self, 'custom_http_poll_spinbox'):
+                self.custom_http_poll_spinbox.setValue(
+                    max(1, int(self.config.get_http_poll_interval("__custom_http__")))
+                )
+            self.current_report_color = mc.report_color
+            self.current_warning_color = mc.warning_color
+            self.current_custom_text_color = getattr(mc, 'custom_text_color', '#01FF00')
+        except Exception as e:
+            logger.debug(f"刷新设置控件时部分项失败: {e}")
+
+    def _get_data_source_restart_snapshot(self) -> tuple:
+        """采集影响数据源连接/解析范围的配置快照，用于判断保存后是否必须重启"""
+        mc = self.config.message_config
+        flags = (
+            getattr(mc, 'use_custom_text', False),
+            getattr(mc, 'fanstudio_parse_cea', True),
+            getattr(mc, 'fanstudio_parse_cea_pr', True),
+            getattr(mc, 'fanstudio_parse_cwa_eew', True),
+            getattr(mc, 'fanstudio_parse_jma', True),
+            getattr(mc, 'fanstudio_parse_sa', True),
+            getattr(mc, 'fanstudio_parse_kma_eew', True),
+            getattr(mc, 'fanstudio_parse_cenc', True),
+            getattr(mc, 'fanstudio_parse_ningxia', True),
+            getattr(mc, 'fanstudio_parse_guangxi', True),
+            getattr(mc, 'fanstudio_parse_shanxi', True),
+            getattr(mc, 'fanstudio_parse_beijing', True),
+            getattr(mc, 'fanstudio_parse_yunnan', True),
+            getattr(mc, 'fanstudio_parse_cwa', True),
+            getattr(mc, 'fanstudio_parse_hko', True),
+            getattr(mc, 'fanstudio_parse_usgs', True),
+            getattr(mc, 'fanstudio_parse_emsc', True),
+            getattr(mc, 'fanstudio_parse_bcsf', True),
+            getattr(mc, 'fanstudio_parse_gfz', True),
+            getattr(mc, 'fanstudio_parse_usp', True),
+            getattr(mc, 'fanstudio_parse_kma', True),
+            getattr(mc, 'fanstudio_parse_fssn', True),
+            getattr(mc, 'fanstudio_parse_fssn_cmt', True),
+            getattr(mc, 'fanstudio_parse_weatheralarm', True),
+            getattr(mc, 'fanstudio_parse_tsunami', True),
+            getattr(mc, 'ali_all_parse_nied', True),
+            getattr(mc, 'ali_all_parse_early_est', True),
+            getattr(mc, 'ali_all_parse_jma_volcano', True),
+            getattr(mc, 'ali_all_parse_bmkg', True),
+            getattr(mc, 'ali_all_parse_cq_eew', True),
+            getattr(mc, 'p2pquake_parse_551', True),
+            getattr(mc, 'p2pquake_parse_552', True),
+        )
+        return (
+            tuple(self.config.ws_urls),
+            tuple(sorted(self.config.enabled_sources.items())),
+            (self.config.custom_data_source_url or '').strip(),
+            flags,
+        )
     
     def _adjust_window_to_screen(self):
         """调整窗口大小和位置，确保不超出屏幕"""
@@ -620,10 +866,65 @@ class SettingsWindow(QDialog):
         always_on_top_cb.setStyleSheet("font-size: 16px;")
         always_on_top_cb.setToolTip("开启后主窗口始终置于其他窗口之上")
         block2_layout.addWidget(always_on_top_cb)
+        minimize_tray_cb = QCheckBox("关闭窗口时最小化到系统托盘")
+        minimize_tray_cb.setChecked(getattr(self.config.gui_config, 'minimize_to_tray', False))
+        minimize_tray_cb.setStyleSheet("font-size: 16px;")
+        block2_layout.addWidget(minimize_tray_cb)
+        toast_notify_cb = QCheckBox("预警时显示系统通知")
+        toast_notify_cb.setChecked(getattr(self.config.gui_config, 'toast_notifications_enabled', False))
+        toast_notify_cb.setStyleSheet("font-size: 16px;")
+        block2_layout.addWidget(toast_notify_cb)
         group_window_layout = QVBoxLayout(group_window)
         group_window_layout.setContentsMargins(10, 12, 10, 10)
         group_window_layout.addWidget(block2)
         main_layout.addWidget(group_window)
+        main_layout.addSpacing(10)
+
+        mc = self.config.message_config
+        group_filter = QGroupBox("消息过滤")
+        group_filter.setStyleSheet(STYLE_GROUPBOX)
+        gf_layout = QVBoxLayout(group_filter)
+        gf_layout.setContentsMargins(10, 12, 10, 10)
+        gf_layout.setSpacing(8)
+        min_report_mag_row = QHBoxLayout()
+        min_report_mag_label = QLabel("速报最低震级（0 表示不限制）：")
+        min_report_mag_label.setStyleSheet(STYLE_LABEL)
+        min_report_mag_spin = QDoubleSpinBox()
+        min_report_mag_spin.setRange(0.0, 10.0)
+        min_report_mag_spin.setDecimals(1)
+        min_report_mag_spin.setSingleStep(0.1)
+        min_report_mag_spin.setValue(float(getattr(mc, 'min_report_magnitude', 0) or 0))
+        min_report_mag_spin.setSuffix(" M")
+        min_report_mag_spin.setStyleSheet(STYLE_SPINBOX)
+        min_report_mag_row.addWidget(min_report_mag_label)
+        min_report_mag_row.addWidget(min_report_mag_spin)
+        min_report_mag_row.addStretch()
+        gf_layout.addLayout(min_report_mag_row)
+        geo_filter_cb = QCheckBox("启用关注区域过滤（圆心 + 半径）")
+        geo_filter_cb.setChecked(getattr(mc, 'geo_filter_enabled', False))
+        geo_filter_cb.setStyleSheet("font-size: 16px;")
+        gf_layout.addWidget(geo_filter_cb)
+        geo_lat_row = QHBoxLayout()
+        geo_lat_row.addWidget(QLabel("圆心纬度："))
+        geo_lat_spin = QDoubleSpinBox()
+        geo_lat_spin.setRange(-90, 90)
+        geo_lat_spin.setDecimals(4)
+        geo_lat_spin.setValue(float(getattr(mc, 'geo_filter_latitude', 39.9042)))
+        geo_lat_row.addWidget(geo_lat_spin)
+        geo_lat_row.addWidget(QLabel("经度："))
+        geo_lon_spin = QDoubleSpinBox()
+        geo_lon_spin.setRange(-180, 180)
+        geo_lon_spin.setDecimals(4)
+        geo_lon_spin.setValue(float(getattr(mc, 'geo_filter_longitude', 116.4074)))
+        geo_lat_row.addWidget(geo_lon_spin)
+        geo_lat_row.addWidget(QLabel("半径 km："))
+        geo_radius_spin = QSpinBox()
+        geo_radius_spin.setRange(1, 20000)
+        geo_radius_spin.setValue(int(getattr(mc, 'geo_filter_radius_km', 1000)))
+        geo_lat_row.addWidget(geo_radius_spin)
+        geo_lat_row.addStretch()
+        gf_layout.addLayout(geo_lat_row)
+        main_layout.addWidget(group_filter)
         main_layout.addSpacing(10)
 
         # 水印设置（QGroupBox，含背景水印文字 + 字体/字号/位置）
@@ -725,6 +1026,39 @@ class SettingsWindow(QDialog):
         block3_layout = QVBoxLayout(block3)
         block3_layout.setContentsMargins(0, 0, 0, 0)
         block3_layout.setSpacing(6)
+        preset_row = QHBoxLayout()
+        preset_label = QLabel("性能模式:")
+        preset_label.setStyleSheet(STYLE_LABEL)
+        performance_mode_combo = QComboBox()
+        performance_mode_combo.setStyleSheet(STYLE_SPINBOX)
+        for mode_id in PERFORMANCE_MODES:
+            performance_mode_combo.addItem(PERFORMANCE_MODE_LABELS[mode_id], mode_id)
+        current_mode = getattr(self.config.gui_config, "performance_mode", "standard") or "standard"
+        mode_index = performance_mode_combo.findData(current_mode)
+        if mode_index < 0:
+            mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_STANDARD)
+        performance_mode_combo.setCurrentIndex(max(0, mode_index))
+        performance_mode_combo.setToolTip(
+            "低配：降低帧率与数据源负载，保留核心预警；\n"
+            "标准：与程序默认配置接近；\n"
+            "高配：启用 GPU 渲染、完整数据源与告警体验。"
+        )
+        apply_preset_btn = QPushButton("应用性能模式")
+        apply_preset_btn.setStyleSheet("font-size: 16px; padding: 4px 12px;")
+        apply_preset_btn.setToolTip("按所选模式批量调整渲染、数据源与告警等设置")
+        apply_preset_btn.clicked.connect(self._apply_performance_preset)
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(performance_mode_combo)
+        preset_row.addWidget(apply_preset_btn)
+        preset_row.addStretch()
+        block3_layout.addLayout(preset_row)
+        preset_hint = QLabel(
+            "切换性能模式会覆盖渲染、数据源与告警等相关设置；预警显示能力保留。"
+            "应用后若变更渲染或数据源，需重启生效。"
+        )
+        preset_hint.setWordWrap(True)
+        preset_hint.setStyleSheet(STYLE_HINT)
+        block3_layout.addWidget(preset_hint)
         render_row = QHBoxLayout()
         cpu_radio = QRadioButton("CPU 渲染（软件）")
         opengl_radio = QRadioButton("GPU 渲染（OpenGL）")
@@ -1000,6 +1334,13 @@ class SettingsWindow(QDialog):
             'target_fps': fps_spin,
             'timezone': timezone_combo,
             'always_on_top': always_on_top_cb,
+            'minimize_to_tray': minimize_tray_cb,
+            'toast_notifications_enabled': toast_notify_cb,
+            'min_report_magnitude': min_report_mag_spin,
+            'geo_filter_enabled': geo_filter_cb,
+            'geo_filter_latitude': geo_lat_spin,
+            'geo_filter_longitude': geo_lon_spin,
+            'geo_filter_radius_km': geo_radius_spin,
             'watermark_text': watermark_edit,
             'watermark_font_family': watermark_font_combo,
             'watermark_font_auto': watermark_font_auto_cb,
@@ -1010,6 +1351,10 @@ class SettingsWindow(QDialog):
             'custom_text_return_seconds': custom_text_return_minutes_spin,
         }
         self.render_vars = {'cpu_radio': cpu_radio, 'opengl_radio': opengl_radio}
+        self.performance_vars = {
+            'performance_mode_combo': performance_mode_combo,
+            'apply_preset_btn': apply_preset_btn,
+        }
         
         main_layout.addStretch()
         
@@ -1029,7 +1374,707 @@ class SettingsWindow(QDialog):
         
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "外观与显示")
-    
+
+    def _audio_is_sound_mode(self) -> bool:
+        av = getattr(self, 'audio_vars', {}) or {}
+        radio = av.get('feedback_sound_radio')
+        return radio is None or radio.isChecked()
+
+    def _sync_eew_master_checkbox(self) -> None:
+        av = getattr(self, 'audio_vars', {}) or {}
+        eew_cb = av.get('tier_eew_cb')
+        if eew_cb is None:
+            return
+        ac = self.config.alert_config
+        eew_cb.blockSignals(True)
+        eew_cb.setChecked(
+            bool(getattr(ac, 'felt_tts_enabled', False))
+            and bool(getattr(ac, 'critical_tts_enabled', False))
+        )
+        eew_cb.blockSignals(False)
+
+    def _apply_tier_cb_from_config(self) -> None:
+        av = getattr(self, 'audio_vars', {}) or {}
+        ac = self.config.alert_config
+        for ui_key, attr in _AUDIO_TIER_SOUND:
+            cb = av.get(ui_key)
+            if cb is not None:
+                cb.setChecked(bool(getattr(ac, attr, True)))
+        for ui_key, attr in _AUDIO_TIER_TTS:
+            cb = av.get(ui_key)
+            if cb is not None:
+                default = True
+                cb.setChecked(bool(getattr(ac, attr, default)))
+        self._sync_eew_master_checkbox()
+
+    def _write_tier_cbs_to_config(self) -> None:
+        av = getattr(self, 'audio_vars', {}) or {}
+        ac = self.config.alert_config
+        if self._audio_is_sound_mode():
+            for ui_key, attr in _AUDIO_TIER_SOUND:
+                cb = av.get(ui_key)
+                if cb is not None:
+                    setattr(ac, attr, bool(cb.isChecked()))
+        else:
+            eew_cb = av.get('tier_eew_cb')
+            eew_on = bool(eew_cb.isChecked()) if eew_cb is not None else False
+            ac.felt_tts_enabled = eew_on
+            ac.critical_tts_enabled = eew_on
+            for ui_key, attr in _AUDIO_TIER_TTS:
+                cb = av.get(ui_key)
+                if cb is not None:
+                    setattr(ac, attr, bool(cb.isChecked()))
+
+    def _sync_audio_tier_checkboxes(self, is_sound: bool, *, from_user_switch: bool = False) -> None:
+        """切换反馈方式时，互斥同步「预警分级开关」复选框。"""
+        av = getattr(self, 'audio_vars', {}) or {}
+        if from_user_switch:
+            if is_sound:
+                for ui_key, _attr in _AUDIO_TIER_SOUND:
+                    cb = av.get(ui_key)
+                    if cb is not None:
+                        cb.setChecked(True)
+                for ui_key, _attr in _AUDIO_TIER_TTS:
+                    cb = av.get(ui_key)
+                    if cb is not None:
+                        cb.setChecked(False)
+                eew_cb = av.get('tier_eew_cb')
+                if eew_cb is not None:
+                    eew_cb.setChecked(False)
+            else:
+                for ui_key, _attr in _AUDIO_TIER_SOUND:
+                    cb = av.get(ui_key)
+                    if cb is not None:
+                        cb.setChecked(False)
+                for ui_key, _attr in _AUDIO_TIER_TTS:
+                    cb = av.get(ui_key)
+                    if cb is not None:
+                        cb.setChecked(True)
+                eew_cb = av.get('tier_eew_cb')
+                if eew_cb is not None:
+                    eew_cb.setChecked(True)
+        else:
+            self._apply_tier_cb_from_config()
+
+    def _on_audio_feedback_mode_changed(self) -> None:
+        av = getattr(self, 'audio_vars', {}) or {}
+        sound_radio = av.get('feedback_sound_radio')
+        if sound_radio is None:
+            return
+        self._sync_audio_tier_checkboxes(bool(sound_radio.isChecked()), from_user_switch=True)
+        self._update_audio_mode_ui()
+
+    def _update_audio_mode_ui(self) -> None:
+        """根据反馈方式启用/禁用预设音与 TTS 控件组。"""
+        av = getattr(self, 'audio_vars', {}) or {}
+        sound_radio = av.get('feedback_sound_radio')
+        if sound_radio is None:
+            return
+        is_sound = bool(sound_radio.isChecked())
+        sound_keys = (
+            'felt_path_btn', 'felt_repeat_spin', 'critical_path_btn', 'critical_repeat_spin',
+        )
+        tts_keys = (
+            'tts_rate_spin', 'warning_tts_repeat_spin',
+            'report_tts_repeat_spin', 'weather_tts_repeat_spin', 'tsunami_tts_repeat_spin',
+            'tts_policy_combo', 'tts_cooldown_spin',
+            'warning_tts_test_btn', 'report_tts_test_btn',
+            'weather_tts_test_btn', 'tsunami_tts_test_btn',
+        )
+        for key in sound_keys:
+            w = av.get(key)
+            if w is not None:
+                w.setEnabled(is_sound)
+        for ui_key, _attr in _AUDIO_TIER_SOUND:
+            w = av.get(ui_key)
+            if w is not None:
+                w.setEnabled(is_sound)
+                if not is_sound:
+                    w.blockSignals(True)
+                    w.setChecked(False)
+                    w.blockSignals(False)
+        for ui_key, _attr in _AUDIO_TIER_TTS:
+            w = av.get(ui_key)
+            if w is not None:
+                w.setEnabled(not is_sound)
+                if is_sound:
+                    w.blockSignals(True)
+                    w.setChecked(False)
+                    w.blockSignals(False)
+        eew_cb = av.get('tier_eew_cb')
+        if eew_cb is not None:
+            eew_cb.setEnabled(not is_sound)
+            if is_sound:
+                eew_cb.blockSignals(True)
+                eew_cb.setChecked(False)
+                eew_cb.blockSignals(False)
+        for key in tts_keys:
+            w = av.get(key)
+            if w is not None:
+                w.setEnabled(not is_sound)
+
+    def _refresh_audio_tab_from_config(self) -> None:
+        av = getattr(self, 'audio_vars', {}) or {}
+        if not av:
+            return
+        ac = self.config.alert_config
+        mode = str(getattr(ac, 'alert_feedback_mode', 'sound') or 'sound')
+        sound_radio = av.get('feedback_sound_radio')
+        tts_radio = av.get('feedback_tts_radio')
+        if sound_radio is not None and tts_radio is not None:
+            sound_radio.blockSignals(True)
+            tts_radio.blockSignals(True)
+            sound_radio.setChecked(mode != 'tts')
+            tts_radio.setChecked(mode == 'tts')
+            sound_radio.blockSignals(False)
+            tts_radio.blockSignals(False)
+        self._apply_tier_cb_from_config()
+        spin_map = (
+            ('felt_repeat_spin', 'felt_sound_repeat'),
+            ('critical_repeat_spin', 'critical_sound_repeat'),
+            ('warning_tts_repeat_spin', 'felt_tts_repeat'),
+            ('report_tts_repeat_spin', 'report_tts_repeat'),
+            ('weather_tts_repeat_spin', 'weather_tts_repeat'),
+            ('tsunami_tts_repeat_spin', 'tsunami_tts_repeat'),
+            ('tts_rate_spin', 'tts_rate'),
+            ('tts_cooldown_spin', 'tts_cooldown_seconds'),
+        )
+        for ui_key, cfg_key in spin_map:
+            spin = av.get(ui_key)
+            if spin is None:
+                continue
+            try:
+                spin.setValue(int(getattr(ac, cfg_key, spin.value()) or spin.value()))
+            except RuntimeError:
+                continue
+        combo = av.get('tts_policy_combo')
+        if combo is not None:
+            policy = str(getattr(ac, 'tts_repeat_policy', 'smart') or 'smart')
+            idx = combo.findData(policy)
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+        for btn_key, path_attr, default_rel in (
+            ('felt_path_btn', 'felt_sound_path', 'media/eewalert.wav'),
+            ('critical_path_btn', 'critical_sound_path', 'media/eewcritical.wav'),
+        ):
+            btn = av.get(btn_key)
+            if btn is not None:
+                path_val = getattr(ac, path_attr, '') or ''
+                btn.setProperty('_sound_path', path_val)
+                name = os.path.basename((path_val or default_rel).replace('\\', '/'))
+                btn.setToolTip(name)
+                avail = max(40, btn.width() - 12) if btn.width() > 0 else 120
+                btn.setText(QFontMetrics(btn.font()).elidedText(name, Qt.ElideMiddle, avail))
+        self._update_audio_mode_ui()
+
+    def _create_audio_tab(self):
+        """创建音频与语音播报设置标签页。"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scrollable_widget = QWidget()
+        scrollable_widget.setMinimumWidth(0)
+        scrollable_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        main_layout = QVBoxLayout(scrollable_widget)
+        main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
+        main_layout.setSpacing(10)
+
+        ac = self.config.alert_config
+        _tts_lbl_w = 72
+        _tts_field_gap = 12
+        _tts_field_x = _tts_lbl_w + _tts_field_gap
+        _tts_repeat_col_gap = 24
+        _spin_w = 42
+        _test_w = 72
+
+        mode_group = QGroupBox("音频设置")
+        mode_group.setStyleSheet(STYLE_GROUPBOX)
+        mode_layout = QVBoxLayout(mode_group)
+        mode_layout.setContentsMargins(10, 12, 10, 10)
+        mode_layout.setSpacing(4)
+        mode_hint = QLabel("预设提示音与语音播报只能启用一种，避免同时响起造成干扰。")
+        mode_hint.setStyleSheet(STYLE_HINT)
+        mode_hint.setWordWrap(True)
+        mode_layout.addWidget(mode_hint)
+        feedback_sound_radio = QRadioButton("预设提示音（WAV）")
+        feedback_tts_radio = QRadioButton("语音播报（TTS / Windows SAPI）")
+        feedback_sound_radio.setStyleSheet("font-size: 16px;")
+        feedback_tts_radio.setStyleSheet("font-size: 16px;")
+        current_mode = str(getattr(ac, 'alert_feedback_mode', 'sound') or 'sound')
+        feedback_sound_radio.setChecked(current_mode != 'tts')
+        feedback_tts_radio.setChecked(current_mode == 'tts')
+        mode_layout.addWidget(feedback_sound_radio)
+        mode_layout.addWidget(feedback_tts_radio)
+        main_layout.addWidget(mode_group)
+
+        tier_group = QGroupBox("预警分级开关")
+        tier_group.setStyleSheet(STYLE_GROUPBOX)
+        tier_grid = QGridLayout(tier_group)
+        tier_grid.setContentsMargins(10, 12, 10, 10)
+        tier_grid.setHorizontalSpacing(8)
+        tier_grid.setVerticalSpacing(10)
+        tier_grid.setColumnStretch(0, 1)
+        tier_grid.setColumnStretch(2, 1)
+        tier_grid.setColumnMinimumWidth(1, 2)
+
+        def _tier_event_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setStyleSheet(STYLE_LABEL)
+            return lbl
+
+        def _tier_half_row(label_text: str, cb: QCheckBox) -> QWidget:
+            row = QWidget()
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(8)
+            lay.addWidget(_tier_event_label(label_text))
+            lay.addStretch()
+            lay.addWidget(cb)
+            return row
+
+        tier_felt_cb = QCheckBox()
+        tier_critical_cb = QCheckBox()
+        tier_eew_cb = QCheckBox()
+        tier_eew_cb.setToolTip("同时控制有感地震与强震预警的语音播报。")
+        tier_report_cb = QCheckBox()
+        tier_weather_cb = QCheckBox()
+        tier_weather_cb.setToolTip("朗读内容与滚动字幕一致（不含左侧图标）。")
+        tier_tsunami_cb = QCheckBox()
+        tier_tsunami_cb.setToolTip("朗读内容与滚动字幕一致。")
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setFrameShadow(QFrame.Sunken)
+        divider.setFixedWidth(2)
+
+        left_panel = QWidget()
+        left_lay = QVBoxLayout(left_panel)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(10)
+        left_lay.addStretch()
+        left_lay.addWidget(_tier_half_row("有感地震", tier_felt_cb))
+        left_lay.addWidget(_tier_half_row("强震预警", tier_critical_cb))
+        left_lay.addStretch()
+
+        tier_grid.addWidget(left_panel, 0, 0, 4, 1)
+        tier_grid.addWidget(divider, 0, 1, 4, 1)
+        tier_grid.addWidget(_tier_half_row("地震预警", tier_eew_cb), 0, 2)
+        tier_grid.addWidget(_tier_half_row("地震速报", tier_report_cb), 1, 2)
+        tier_grid.addWidget(_tier_half_row("气象预警", tier_weather_cb), 2, 2)
+        tier_grid.addWidget(_tier_half_row("海啸预警", tier_tsunami_cb), 3, 2)
+        main_layout.addWidget(tier_group)
+
+        sound_group = QGroupBox("预设提示音")
+        sound_group.setStyleSheet(STYLE_GROUPBOX)
+        sound_outer = QVBoxLayout(sound_group)
+        sound_outer.setContentsMargins(10, 12, 10, 10)
+        sound_outer.setSpacing(8)
+
+        _sound_title_w = 72
+        _sound_path_w = 132
+        _sound_row_h = 34
+        _repeat_lbl_w = 36
+
+        def _sound_basename(path: str, default_rel: str) -> str:
+            p = (path or "").strip() or default_rel.replace("\\", "/")
+            return os.path.basename(p.replace("\\", "/"))
+
+        def _update_sound_btn_text(btn: QPushButton, path: str, default_rel: str) -> None:
+            name = _sound_basename(path, default_rel)
+            btn.setToolTip(name)
+            avail = max(40, btn.width() - 12)
+            btn.setText(QFontMetrics(btn.font()).elidedText(name, Qt.ElideMiddle, avail))
+
+        sound_grid = QGridLayout()
+        sound_grid.setContentsMargins(0, 0, 0, 0)
+        sound_grid.setHorizontalSpacing(6)
+        sound_grid.setVerticalSpacing(12)
+        sound_grid.setColumnMinimumWidth(0, _sound_title_w)
+        sound_grid.setColumnMinimumWidth(1, _sound_path_w)
+        sound_grid.setColumnMinimumWidth(2, _repeat_lbl_w)
+        sound_grid.setColumnMinimumWidth(3, _spin_w)
+        sound_grid.setColumnMinimumWidth(4, _test_w)
+
+        def _build_sound_row(row, title, tooltip, path_value, default_rel, repeat_value, tier):
+            title_lbl = QLabel(title)
+            title_lbl.setStyleSheet(STYLE_LABEL)
+            title_lbl.setToolTip(tooltip)
+            title_lbl.setFixedWidth(_sound_title_w)
+            path_btn = QPushButton()
+            path_btn.setCursor(Qt.PointingHandCursor)
+            path_btn.setStyleSheet(STYLE_AUDIO_FILE_BTN)
+            path_btn.setFixedWidth(_sound_path_w)
+            path_btn.setFixedHeight(_sound_row_h)
+            path_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            path_btn.setProperty("_sound_path", path_value or "")
+            path_btn.setProperty("_sound_default", default_rel)
+
+            def _refresh_path_btn():
+                _update_sound_btn_text(
+                    path_btn,
+                    str(path_btn.property("_sound_path") or ""),
+                    str(path_btn.property("_sound_default") or default_rel),
+                )
+
+            def _pick_sound():
+                start_dir = ""
+                cur = (path_btn.property("_sound_path") or "").strip()
+                if cur and os.path.isfile(cur):
+                    start_dir = os.path.dirname(cur)
+                elif get_resource_path(default_rel).is_file():
+                    start_dir = str(get_resource_path(default_rel).parent)
+                picked, _ = QFileDialog.getOpenFileName(
+                    self, f"选择{title}", start_dir,
+                    "音频文件 (*.wav *.mp3);;所有文件 (*.*)",
+                )
+                if picked:
+                    path_btn.setProperty("_sound_path", picked)
+                    _refresh_path_btn()
+
+            path_btn.clicked.connect(_pick_sound)
+            _refresh_path_btn()
+            repeat_lbl = QLabel("重复")
+            repeat_lbl.setStyleSheet(STYLE_LABEL)
+            repeat_lbl.setFixedWidth(_repeat_lbl_w)
+            repeat_lbl.setAlignment(Qt.AlignCenter)
+            repeat_spin = QSpinBox()
+            repeat_spin.setRange(1, 10)
+            repeat_spin.setValue(max(1, min(10, int(repeat_value or 1))))
+            repeat_spin.setFixedWidth(_spin_w)
+            repeat_spin.setFixedHeight(_sound_row_h)
+            repeat_spin.setStyleSheet(STYLE_SPINBOX)
+            test_btn = QPushButton("测试")
+            test_btn.setFixedWidth(_test_w)
+            test_btn.setFixedHeight(_sound_row_h)
+            test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+
+            def _test_sound():
+                from utils.audio_alert import play_alert_sound
+                self._save_audio_settings()
+                play_alert_sound(self.config, "warning", tier=tier)
+
+            test_btn.clicked.connect(_test_sound)
+            sound_grid.addWidget(title_lbl, row, 0, Qt.AlignVCenter)
+            sound_grid.addWidget(path_btn, row, 1)
+            sound_grid.addWidget(repeat_lbl, row, 2, Qt.AlignVCenter)
+            sound_grid.addWidget(repeat_spin, row, 3)
+            sound_grid.addWidget(test_btn, row, 4)
+            return path_btn, repeat_spin
+
+        felt_path_btn, felt_repeat_spin = _build_sound_row(
+            0, "有感预警", "震级低于 4.8 且预估烈度低于 7 时播放。",
+            getattr(ac, 'felt_sound_path', '') or '', "media/eewalert.wav",
+            int(getattr(ac, 'felt_sound_repeat', 1) or 1), "felt",
+        )
+        critical_path_btn, critical_repeat_spin = _build_sound_row(
+            1, "强震预警", "震级不低于 4.8 或预估烈度不低于 7 时播放。",
+            getattr(ac, 'critical_sound_path', '') or '', "media/eewcritical.wav",
+            int(getattr(ac, 'critical_sound_repeat', 1) or 1), "critical",
+        )
+        sound_outer.addLayout(sound_grid)
+        main_layout.addWidget(sound_group)
+
+        tts_group = QGroupBox("语音播报 (TTS)")
+        tts_group.setStyleSheet(STYLE_GROUPBOX)
+        tts_outer = QVBoxLayout(tts_group)
+        tts_outer.setContentsMargins(10, 12, 10, 10)
+        tts_outer.setSpacing(6)
+        tts_hint = QLabel(
+            "地震预警/速报：精简脚本朗读。"
+            "气象/海啸：与滚动字幕一致（不含左侧图标）。"
+            "需 Windows 10+ 且中文语音包。"
+        )
+        tts_hint.setStyleSheet(STYLE_HINT)
+        tts_hint.setWordWrap(True)
+        tts_outer.addWidget(tts_hint)
+
+        def _form_row(label_text: str, widget: QWidget, parent: QWidget) -> QWidget:
+            row = QWidget(parent)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(_tts_field_gap)
+            lbl = QLabel(label_text)
+            lbl.setStyleSheet(STYLE_LABEL)
+            lbl.setFixedWidth(_tts_lbl_w)
+            row_layout.addWidget(lbl)
+            row_layout.addWidget(widget, 1)
+            return row
+
+        tts_rate_spin = QSpinBox(tts_group)
+        tts_rate_spin.setRange(80, 300)
+        tts_rate_spin.setValue(max(80, min(300, int(getattr(ac, 'tts_rate', 150) or 150))))
+        tts_rate_spin.setSuffix(" 字/分")
+        tts_rate_spin.setStyleSheet(STYLE_SPINBOX)
+        tts_rate_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tts_outer.addWidget(_form_row("语速", tts_rate_spin, tts_group))
+
+        tts_repeat_row = QWidget(tts_group)
+        tts_repeat_grid = QGridLayout(tts_repeat_row)
+        tts_repeat_grid.setContentsMargins(0, 0, 0, 0)
+        tts_repeat_grid.setHorizontalSpacing(_tts_field_gap)
+        tts_repeat_grid.setVerticalSpacing(4)
+        tts_repeat_grid.setColumnMinimumWidth(0, _tts_lbl_w)
+        tts_repeat_grid.setColumnStretch(2, 1)
+
+        def _add_tts_repeat_cell(parent, label, value):
+            cell = QWidget(parent)
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            lbl = QLabel(label)
+            lbl.setStyleSheet(STYLE_LABEL)
+            spin = QSpinBox(cell)
+            spin.setRange(1, 10)
+            spin.setValue(max(1, min(10, int(value or 1))))
+            spin.setFixedWidth(_spin_w)
+            spin.setStyleSheet(STYLE_SPINBOX)
+            cell_layout.addWidget(lbl)
+            cell_layout.addWidget(spin)
+            return cell, spin
+
+        tts_repeat_cells = QWidget(tts_repeat_row)
+        tts_repeat_cells_grid = QGridLayout(tts_repeat_cells)
+        tts_repeat_cells_grid.setContentsMargins(0, 0, 0, 0)
+        tts_repeat_cells_grid.setHorizontalSpacing(_tts_repeat_col_gap)
+        tts_repeat_cells_grid.setVerticalSpacing(4)
+        tts_repeat_cells_grid.setColumnStretch(2, 1)
+
+        tts_repeat_lbl = QLabel("连播")
+        tts_repeat_lbl.setStyleSheet(STYLE_LABEL)
+        tts_repeat_lbl.setFixedWidth(_tts_lbl_w)
+        warning_cell, warning_tts_repeat_spin = _add_tts_repeat_cell(
+            tts_repeat_cells, "预警", int(getattr(ac, 'felt_tts_repeat', 1) or 1))
+        report_cell, report_tts_repeat_spin = _add_tts_repeat_cell(
+            tts_repeat_cells, "速报", int(getattr(ac, 'report_tts_repeat', 1) or 1))
+        weather_cell, weather_tts_repeat_spin = _add_tts_repeat_cell(
+            tts_repeat_cells, "气象", int(getattr(ac, 'weather_tts_repeat', 1) or 1))
+        tsunami_cell, tsunami_tts_repeat_spin = _add_tts_repeat_cell(
+            tts_repeat_cells, "海啸", int(getattr(ac, 'tsunami_tts_repeat', 1) or 1))
+        tts_repeat_cells_grid.addWidget(warning_cell, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        tts_repeat_cells_grid.addWidget(report_cell, 0, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        tts_repeat_cells_grid.addWidget(weather_cell, 1, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        tts_repeat_cells_grid.addWidget(tsunami_cell, 1, 1, Qt.AlignLeft | Qt.AlignVCenter)
+        tts_repeat_cells.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tts_repeat_grid.addWidget(tts_repeat_lbl, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        tts_repeat_grid.addWidget(tts_repeat_cells, 0, 1, 2, 1)
+        tts_outer.addWidget(tts_repeat_row)
+
+        tts_policy_combo = QComboBox(tts_group)
+        tts_policy_combo.setStyleSheet(STYLE_COMBOBOX)
+        tts_policy_combo.addItem("智能（首报/变化）", "smart")
+        tts_policy_combo.addItem("仅首报", "first_only")
+        tts_policy_combo.addItem("每次更新", "always")
+        policy = str(getattr(ac, 'tts_repeat_policy', 'smart') or 'smart')
+        pidx = tts_policy_combo.findData(policy)
+        tts_policy_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
+        tts_policy_combo.setToolTip(
+            "适用于气象/海啸预警。\n"
+            "智能：首报必播；内容变化时重播；否则受「同事件最短间隔」限制。\n"
+            "仅首报：同一事件只朗读第一次。\n"
+            "每次更新：每条更新都朗读，间隔不少于「同事件最短间隔」。\n"
+            "地震预警：收到更新报即朗读，不受此策略与间隔限制。\n"
+            "地震速报：收到即朗读，同一事件仅朗读一次（CENC 自动测定与正式测定分别朗读）。"
+        )
+        tts_policy_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tts_outer.addWidget(_form_row("重复策略", tts_policy_combo, tts_group))
+
+        tts_cooldown_spin = QSpinBox(tts_group)
+        tts_cooldown_spin.setRange(0, 600)
+        tts_cooldown_spin.setValue(max(0, min(600, int(getattr(ac, 'tts_cooldown_seconds', 60) or 60))))
+        tts_cooldown_spin.setSuffix(" 秒")
+        tts_cooldown_spin.setStyleSheet(STYLE_SPINBOX)
+        tts_cooldown_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tts_cooldown_spin.setToolTip(
+            "适用于气象/海啸预警的重复策略。\n"
+            "智能策略下，同一事件内容未变化时，距上次播报至少间隔此秒数才会再次朗读。\n"
+            "每次更新策略下，两次朗读的最小间隔（不少于 10 秒）。\n"
+            "地震预警不受此间隔限制；地震速报按同事件去重，不使用此间隔。"
+        )
+        tts_outer.addWidget(_form_row("最短间隔", tts_cooldown_spin, tts_group))
+        tts_cooldown_hint = QLabel(
+            "最短间隔仅作用于气象/海啸；地震预警收到更新报即朗读，速报按同事件去重（CENC 自动/正式测定分别朗读）。"
+        )
+        tts_cooldown_hint.setStyleSheet(STYLE_HINT)
+        tts_cooldown_hint.setWordWrap(True)
+        tts_cooldown_hint_row = QWidget()
+        tts_cooldown_hint_layout = QHBoxLayout(tts_cooldown_hint_row)
+        tts_cooldown_hint_layout.setContentsMargins(0, 0, 0, 0)
+        tts_cooldown_hint_layout.setSpacing(_tts_field_gap)
+        tts_cooldown_hint_spacer = QWidget()
+        tts_cooldown_hint_spacer.setFixedWidth(_tts_field_x)
+        tts_cooldown_hint_layout.addWidget(tts_cooldown_hint_spacer)
+        tts_cooldown_hint_layout.addWidget(tts_cooldown_hint, 1)
+        tts_outer.addWidget(tts_cooldown_hint_row)
+
+        tts_test_wrap = QWidget(tts_group)
+        tts_test_v = QVBoxLayout(tts_test_wrap)
+        tts_test_v.setContentsMargins(0, 0, 0, 0)
+        tts_test_v.setSpacing(4)
+        tts_test_row1 = QHBoxLayout()
+        tts_test_row1.setContentsMargins(0, 0, 0, 0)
+        tts_test_row1.setSpacing(6)
+        tts_test_row2 = QHBoxLayout()
+        tts_test_row2.setContentsMargins(0, 0, 0, 0)
+        tts_test_row2.setSpacing(6)
+        warning_tts_test_btn = QPushButton("预警")
+        warning_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        report_tts_test_btn = QPushButton("速报")
+        report_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        weather_tts_test_btn = QPushButton("气象")
+        weather_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        tsunami_tts_test_btn = QPushButton("海啸")
+        tsunami_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        for btn in (
+            warning_tts_test_btn, report_tts_test_btn,
+            weather_tts_test_btn, tsunami_tts_test_btn,
+        ):
+            btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        tts_test_row1.addWidget(warning_tts_test_btn)
+        tts_test_row1.addWidget(report_tts_test_btn)
+        tts_test_row2.addWidget(weather_tts_test_btn)
+        tts_test_row2.addWidget(tsunami_tts_test_btn)
+        tts_test_v.addLayout(tts_test_row1)
+        tts_test_v.addLayout(tts_test_row2)
+
+        def _get_tts_test_history() -> List[Dict[str, Any]]:
+            mw = self.parent()
+            if mw is not None and hasattr(mw, "get_full_event_history"):
+                rows = mw.get_full_event_history()
+                return list(rows) if rows else []
+            return []
+
+        def _test_tts_kind(kind: str, label: str) -> None:
+            from utils.tts_alert import test_tts_from_latest
+            self._save_audio_settings()
+            if not test_tts_from_latest(self.config, _get_tts_test_history(), kind):
+                show_info(
+                    self,
+                    "测试朗读",
+                    f"暂无{label}数据，请先接收后再试。",
+                )
+
+        def _test_tts_warning():
+            _test_tts_kind("warning", "预警")
+
+        def _test_tts_report():
+            _test_tts_kind("report", "速报")
+
+        def _test_tts_weather():
+            _test_tts_kind("weather", "气象")
+
+        def _test_tts_tsunami():
+            _test_tts_kind("tsunami", "海啸")
+
+        warning_tts_test_btn.clicked.connect(_test_tts_warning)
+        report_tts_test_btn.clicked.connect(_test_tts_report)
+        weather_tts_test_btn.clicked.connect(_test_tts_weather)
+        tsunami_tts_test_btn.clicked.connect(_test_tts_tsunami)
+        tts_test_row = QWidget(tts_group)
+        tts_test_row_layout = QHBoxLayout(tts_test_row)
+        tts_test_row_layout.setContentsMargins(0, 0, 0, 0)
+        tts_test_row_layout.setSpacing(_tts_field_gap)
+        tts_test_lbl = QLabel("测试")
+        tts_test_lbl.setStyleSheet(STYLE_LABEL)
+        tts_test_lbl.setFixedWidth(_tts_lbl_w)
+        tts_test_lbl.setAlignment(Qt.AlignTop)
+        tts_test_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tts_test_row_layout.addWidget(tts_test_lbl)
+        tts_test_row_layout.addWidget(tts_test_wrap, 1)
+        tts_outer.addWidget(tts_test_row)
+        main_layout.addWidget(tts_group)
+
+        self.audio_vars = {
+            'feedback_sound_radio': feedback_sound_radio,
+            'feedback_tts_radio': feedback_tts_radio,
+            'tier_felt_cb': tier_felt_cb,
+            'tier_critical_cb': tier_critical_cb,
+            'tier_eew_cb': tier_eew_cb,
+            'tier_report_cb': tier_report_cb,
+            'tier_weather_cb': tier_weather_cb,
+            'tier_tsunami_cb': tier_tsunami_cb,
+            'felt_path_btn': felt_path_btn,
+            'felt_repeat_spin': felt_repeat_spin,
+            'critical_path_btn': critical_path_btn,
+            'critical_repeat_spin': critical_repeat_spin,
+            'tts_rate_spin': tts_rate_spin,
+            'warning_tts_repeat_spin': warning_tts_repeat_spin,
+            'report_tts_repeat_spin': report_tts_repeat_spin,
+            'weather_tts_repeat_spin': weather_tts_repeat_spin,
+            'tsunami_tts_repeat_spin': tsunami_tts_repeat_spin,
+            'tts_policy_combo': tts_policy_combo,
+            'tts_cooldown_spin': tts_cooldown_spin,
+            'warning_tts_test_btn': warning_tts_test_btn,
+            'report_tts_test_btn': report_tts_test_btn,
+            'weather_tts_test_btn': weather_tts_test_btn,
+            'tsunami_tts_test_btn': tsunami_tts_test_btn,
+        }
+        feedback_sound_radio.toggled.connect(lambda _: self._on_audio_feedback_mode_changed())
+        feedback_tts_radio.toggled.connect(lambda _: self._on_audio_feedback_mode_changed())
+        self._apply_tier_cb_from_config()
+        self._update_audio_mode_ui()
+
+        button_frame = QFrame()
+        button_layout = QHBoxLayout(button_frame)
+        button_layout.setContentsMargins(0, 6, 0, 0)
+        button_layout.addStretch()
+        save_btn = QPushButton("保存音频设置")
+        save_btn.setMinimumWidth(120)
+        save_btn.setMinimumHeight(35)
+        save_btn.setStyleSheet(STYLE_SAVE_BTN)
+        save_btn.clicked.connect(self._save_audio_settings_and_persist)
+        button_layout.addWidget(save_btn)
+        button_layout.addStretch()
+        main_layout.addWidget(button_frame)
+
+        scroll_area.setWidget(scrollable_widget)
+        self.notebook.addTab(scroll_area, "音频")
+
+    def _save_audio_settings(self) -> None:
+        """从 audio_vars 写回 Config.alert_config（不持久化）。"""
+        av = getattr(self, 'audio_vars', {}) or {}
+        if not av:
+            return
+        ac = self.config.alert_config
+        tts_radio = av.get('feedback_tts_radio')
+        if tts_radio is not None and tts_radio.isChecked():
+            ac.alert_feedback_mode = 'tts'
+        else:
+            ac.alert_feedback_mode = 'sound'
+        self._write_tier_cbs_to_config()
+        for btn_key, attr in (
+            ('felt_path_btn', 'felt_sound_path'),
+            ('critical_path_btn', 'critical_sound_path'),
+        ):
+            btn = av.get(btn_key)
+            if btn is not None:
+                setattr(ac, attr, (btn.property("_sound_path") or "").strip())
+        for spin_key, attr, lo, hi in (
+            ('felt_repeat_spin', 'felt_sound_repeat', 1, 10),
+            ('critical_repeat_spin', 'critical_sound_repeat', 1, 10),
+            ('warning_tts_repeat_spin', 'felt_tts_repeat', 1, 10),
+            ('report_tts_repeat_spin', 'report_tts_repeat', 1, 10),
+            ('weather_tts_repeat_spin', 'weather_tts_repeat', 1, 10),
+            ('tsunami_tts_repeat_spin', 'tsunami_tts_repeat', 1, 10),
+            ('tts_rate_spin', 'tts_rate', 80, 300),
+            ('tts_cooldown_spin', 'tts_cooldown_seconds', 0, 600),
+        ):
+            spin = av.get(spin_key)
+            if spin is not None:
+                setattr(ac, attr, max(lo, min(hi, int(spin.value()))))
+        warning_spin = av.get('warning_tts_repeat_spin')
+        if warning_spin is not None:
+            ac.critical_tts_repeat = ac.felt_tts_repeat
+        combo = av.get('tts_policy_combo')
+        if combo is not None:
+            ac.tts_repeat_policy = str(combo.currentData() or 'smart')
+        ac.validate()
+
+    def _save_audio_settings_and_persist(self) -> None:
+        self._save_audio_settings()
+        if self.config.save_config():
+            show_info(self, "成功", "音频设置已保存")
+        else:
+            show_warning(self, "错误", "音频设置保存失败")
+
     def _create_data_source_tab(self):
         """创建数据源设置标签页"""
         scroll_area = QScrollArea()
@@ -1052,6 +2097,7 @@ class SettingsWindow(QDialog):
             (INGV_HTTP_URL, "INGV 意大利地震速报", False),
             (EARLYEST_HTTP_URL, "Early-est 地震预警", False),
             (JMA_ATOM_LONG_URL, "JMA-Atom 火山情报（长周期）", False),
+            (PTWC_CAP_URL, "PTWC 太平洋海啸预警", False),
         ]
 
         # Fan Studio（QGroupBox）
@@ -1708,6 +2754,8 @@ class SettingsWindow(QDialog):
             dlg.setModal(True)
             dlg.setMinimumWidth(460)
             dlg.setMaximumWidth(520)
+            apply_light_palette(dlg, "#FFFFFF")
+            dlg.setStyleSheet(light_dialog_stylesheet("#FFFFFF"))
             root = QVBoxLayout(dlg)
             root.setContentsMargins(24, 22, 24, 22)
             root.setSpacing(20)
@@ -1737,10 +2785,9 @@ class SettingsWindow(QDialog):
             body.setOpenExternalLinks(False)
             body.setText(
                 '<p style="margin: 0; line-height: 1.7;">'
-                '<span style="font-size: 16pt; font-weight: bold; color: #C62828;">'
-                "该功能尚未完成长期稳定验证，<br/>"
-                "存在不稳定风险，<br/>"
-                "请谨慎使用。"
+                '<span style="font-size: 14pt; color: #333333;">'
+                "启用后，满足震级与烈度条件的地震预警将先展示带安全提示的全文，"
+                "滚动完成后切回纯预警条文；日台类数据源不进入本序列。"
                 "</span></p>"
             )
             text_col.addWidget(sub)
@@ -2116,7 +3163,7 @@ class SettingsWindow(QDialog):
         try:
             mw = self.parent()
             if mw is None or not hasattr(mw, 'trigger_alert_simulation'):
-                QMessageBox.information(
+                show_info(
                     self,
                     "提示",
                     "未找到主窗口接口，无法模拟预警。",
@@ -2124,6 +3171,7 @@ class SettingsWindow(QDialog):
                 return
             try:
                 self._save_alert_settings()
+                self._save_audio_settings()
             except Exception:
                 pass
             mw.trigger_alert_simulation(
@@ -2144,7 +3192,7 @@ class SettingsWindow(QDialog):
             if custom_url:
                 low = custom_url.lower()
                 if not (low.startswith('http://') or low.startswith('https://') or low.startswith('ws://') or low.startswith('wss://')):
-                    QMessageBox.warning(
+                    show_warning(
                         self, "警告",
                         "自定义数据源 URL 必须以 http://、https://、ws:// 或 wss:// 开头，请修改后重试。"
                     )
@@ -2160,7 +3208,7 @@ class SettingsWindow(QDialog):
                 app_id = self.config.translation_config.baidu_app_id
                 secret = self.config.translation_config.baidu_secret
                 if not app_id or not secret:
-                    QMessageBox.warning(
+                    show_warning(
                         self, "警告",
                         "启用百度翻译需要配置 AppID 与密钥。\n翻译功能将保持禁用，请填写后重新保存。"
                     )
@@ -2178,15 +3226,18 @@ class SettingsWindow(QDialog):
                 )
 
             try:
+                self._save_audio_settings()
                 self._save_alert_settings()
             except Exception as e_int:
                 logger.debug(f"保存告警设置失败（忽略，不影响其他配置）: {e_int}")
+
             if not self.config.log_config.validate():
-                QMessageBox.warning(self, "警告", "日志配置验证失败，请检查设置")
+                show_warning(self, "警告", "日志配置验证失败，请检查设置")
                 return False
+            self._mark_performance_mode_custom()
             self._save_config_with_data_source_toggles()
             if show_message:
-                msg = QMessageBox(self)
+                msg = styled_message_box(self)
                 msg.setWindowTitle("成功")
                 msg.setText("高级设置已保存。\n数据源与日志相关设置需重启程序后生效。")
                 msg.setIcon(QMessageBox.Information)
@@ -2200,7 +3251,7 @@ class SettingsWindow(QDialog):
             return True
         except Exception as e:
             logger.error(f"保存高级设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
             return False
     
     def _create_about_tab(self):
@@ -2253,7 +3304,17 @@ class SettingsWindow(QDialog):
         data_source_label = QLabel("数据源支持")
         data_source_label.setStyleSheet(STYLE_SECTION_TITLE)
         layout.addWidget(data_source_label)
-        for name in ["Fan Studio", "P2PQuake", "NIED 日本防災科研所", "Wolfx"]:
+        for name in [
+            "Fan Studio API",
+            "Wolfx Open API",
+            "新西兰GeoNet",
+            "P2PQuake地震情報",
+            "意大利 Early-est",
+            "太平洋海啸预警中心PTWC",
+            "日本火山情報JMA-Atom",
+            "意大利意大利国家地球物理与火山学研究",
+            "印度尼西亚印度尼西亚气象气候和地球物理局",
+        ]:
             lb = QLabel(f"• {name}")
             lb.setStyleSheet(body_style)
             layout.addWidget(lb)
@@ -2545,7 +3606,7 @@ class SettingsWindow(QDialog):
         # 取消按钮（灰色）
         cancel_btn = QPushButton("取消")
         cancel_btn.setStyleSheet("background-color: #cccccc; color: black;")
-        cancel_btn.clicked.connect(self.reject)
+        cancel_btn.clicked.connect(self._on_cancel_clicked)
         button_layout.addWidget(cancel_btn)
         
         main_layout.addWidget(button_frame)
@@ -2601,7 +3662,7 @@ class SettingsWindow(QDialog):
             QApplication.instance().quit()
         except Exception as e:
             logger.error(f"重启应用程序失败: {e}")
-            QMessageBox.warning(
+            show_warning(
                 self, "错误",
                 f"无法自动重启程序：{e}\n\n请手动关闭程序后重新打开以使设置生效。"
             )
@@ -2613,7 +3674,7 @@ class SettingsWindow(QDialog):
             self._is_all_selected = False
             if hasattr(self, 'select_all_btn'):
                 self.select_all_btn.setText("全选")
-            msg = QMessageBox(self)
+            msg = styled_message_box(self)
             msg.setWindowTitle("提示")
             msg.setIcon(QMessageBox.Information)
             msg.setText("数据源已恢复为默认选中（日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并重启软件。")
@@ -2625,9 +3686,9 @@ class SettingsWindow(QDialog):
                     self._save_data_source_settings(silent_restart=True)
                 except Exception as e:
                     logger.error(f"保存并重启失败: {e}")
-                    QMessageBox.critical(self, "错误", f"保存失败：{e}")
+                    show_critical(self, "错误", f"保存失败：{e}")
         else:
-            QMessageBox.information(self, "提示", "当前页面无数据源选项，请切换到「数据源」标签页使用恢复默认。")
+            show_info(self, "提示", "当前页面无数据源选项，请切换到「数据源」标签页使用恢复默认。")
     
     def _save_all_settings(self):
         """保存所有设置"""
@@ -2657,7 +3718,7 @@ class SettingsWindow(QDialog):
                 else:
                     logger.warning("高级设置未就绪，请先打开「高级」标签页")
             if advanced_saved:
-                msg = QMessageBox(self)
+                msg = styled_message_box(self)
                 msg.setWindowTitle("成功")
                 msg.setText("所有设置已保存。\n数据源与高级设置需重启程序后生效。")
                 msg.setIcon(QMessageBox.Information)
@@ -2668,13 +3729,13 @@ class SettingsWindow(QDialog):
                     logger.debug("用户选择重启，正在重启软件...")
                     self._restart_application()
             else:
-                QMessageBox.information(
+                show_info(
                     self, "成功",
                     "所有设置已保存！\n数据源与高级设置需要重启程序才能生效。"
                 )
         except Exception as e:
             logger.error(f"保存设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
 
     def _on_auto_update_check_clicked(self):
         try:
@@ -2683,7 +3744,7 @@ class SettingsWindow(QDialog):
                 os._exit(0)
         except Exception as e:
             logger.error(f"检查更新失败: {e}")
-            QMessageBox.critical(self, "错误", str(e))
+            show_critical(self, "错误", str(e))
     
     def _sync_data_source_connection_switches_to_config(self):
         """将「数据源」页连接开关同步到内存，避免在其他标签页保存时覆盖用户勾选。"""
@@ -2718,6 +3779,7 @@ class SettingsWindow(QDialog):
     def _save_data_source_settings(self, silent_restart=False):
         """保存数据源设置。silent_restart=True 时不弹「已保存」提示，直接重启。"""
         try:
+            restart_snapshot_before = self._get_data_source_restart_snapshot()
             # 更新基础URL
             self._update_base_urls()
             
@@ -2790,13 +3852,30 @@ class SettingsWindow(QDialog):
                 )
             self.config._ensure_http_poll_interval_defaults()
             
+            self._mark_performance_mode_custom()
+
             # 保存到文件
             self._save_config_with_data_source_toggles()
             
             logger.debug("数据源设置已保存")
+
+            needs_restart = restart_snapshot_before != self._get_data_source_restart_snapshot()
+            if not needs_restart:
+                parent = self.parent()
+                if parent is not None and getattr(parent, 'data_sources', None):
+                    http_mgr = parent.data_sources.get('http_polling')
+                    if http_mgr is not None and hasattr(http_mgr, 'update_poll_intervals'):
+                        http_mgr.update_poll_intervals(dict(self.config.http_poll_intervals))
+                if not silent_restart:
+                    show_info(
+                        self,
+                        "提示",
+                        "数据源设置已保存。\n仅轮询间隔等项已热更新，无需重启。",
+                    )
+                return
             
             if not silent_restart:
-                QMessageBox.information(
+                show_info(
                     self,
                     "提示",
                     "数据源设置已保存，程序将自动重启以应用更改。\n切换「地震速报」/「自定义文本」需重启后生效。"
@@ -2806,7 +3885,7 @@ class SettingsWindow(QDialog):
             
         except Exception as e:
             logger.error(f"保存数据源设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
     
     def _open_color_picker(self, color_type: str):
         """
@@ -2840,7 +3919,7 @@ class SettingsWindow(QDialog):
                 
         except Exception as e:
             logger.error(f"打开颜色选择器失败: {e}")
-            QMessageBox.critical(self, "错误", f"打开颜色选择器失败: {e}")
+            show_critical(self, "错误", f"打开颜色选择器失败: {e}")
     
     def _on_color_selected(self, color_type: str, color: str):
         """
@@ -2924,6 +4003,60 @@ class SettingsWindow(QDialog):
         except Exception as e:
             logger.error(f"恢复默认颜色失败: {e}")
     
+    def _mark_performance_mode_custom(self) -> None:
+        """手动保存单项设置后，标记为不再跟随性能预设。"""
+        self.config.gui_config.performance_mode = PERFORMANCE_MODE_CUSTOM
+        combo = getattr(self, 'performance_vars', {}) or {}
+        widget = combo.get('performance_mode_combo')
+        if widget is not None:
+            idx = widget.findData(PERFORMANCE_MODE_CUSTOM)
+            if idx >= 0:
+                widget.setCurrentIndex(idx)
+
+    def _apply_performance_preset(self) -> None:
+        """应用所选低配/标准/高配性能模式。"""
+        perf = getattr(self, 'performance_vars', {}) or {}
+        combo = perf.get('performance_mode_combo')
+        if combo is None:
+            return
+        mode = combo.currentData()
+        if mode in (None, PERFORMANCE_MODE_CUSTOM):
+            show_info(
+                self,
+                "提示",
+                "请在下拉框中选择「低配模式」「标准模式」或「高配模式」后再点击应用。",
+            )
+            return
+        try:
+            result = self.config.apply_performance_preset(mode)
+            self._reload_controls_from_config()
+            self._save_config_with_data_source_toggles()
+            self.config._notify_config_changed()
+            label = PERFORMANCE_MODE_LABELS.get(mode, mode)
+            if result.get("needs_restart"):
+                msg = styled_message_box(self)
+                msg.setWindowTitle("成功")
+                msg.setText(
+                    f"已应用{label}。\n"
+                    "渲染方式或数据源连接范围已变更，请重启软件后完全生效。"
+                )
+                msg.setIcon(QMessageBox.Information)
+                msg.addButton("取消", QMessageBox.RejectRole)
+                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
+                msg.exec_()
+                if msg.clickedButton() == restart_btn:
+                    self._restart_application()
+            else:
+                show_info(
+                    self,
+                    "成功",
+                    f"已应用{label}，相关设置已保存并立即生效。",
+                )
+            logger.info("用户已应用性能模式: %s", mode)
+        except Exception as e:
+            logger.error(f"应用性能模式失败: {e}", exc_info=True)
+            show_critical(self, "错误", f"应用性能模式失败：{e}")
+
     def _save_display_settings(self):
         """保存显示设置"""
         try:
@@ -2959,6 +4092,7 @@ class SettingsWindow(QDialog):
             self.config.gui_config.vsync_enabled = self.display_vars['vsync_enabled'].isChecked()
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
+            self._mark_performance_mode_custom()
             self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or '').strip()
             wm_ff_widget = self.display_vars.get('watermark_font_family')
             if wm_ff_widget is not None:
@@ -2986,14 +4120,14 @@ class SettingsWindow(QDialog):
             self.config._notify_config_changed()
 
             if timezone_changed:
-                QMessageBox.information(self, "成功", "显示设置已保存。\n时区已变更，请重启软件后生效。")
+                show_info(self, "成功", "显示设置已保存。\n时区已变更，请重启软件后生效。")
             else:
-                QMessageBox.information(self, "成功", "显示设置已保存！\n设置已立即生效，无需重启程序。")
+                show_info(self, "成功", "显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("显示设置已保存（热更新）")
             
         except Exception as e:
             logger.error(f"保存显示设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
 
     def _save_render_settings(self):
         """保存渲染方式设置（仅渲染方式页使用）"""
@@ -3008,9 +4142,10 @@ class SettingsWindow(QDialog):
                 new_backend = "cpu"
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
+            self._mark_performance_mode_custom()
             self._save_config_with_data_source_toggles()
             self.config._notify_config_changed()
-            msg = QMessageBox(self)
+            msg = styled_message_box(self)
             msg.setWindowTitle("成功")
             msg.setText("渲染方式已保存，请重启软件后生效。")
             msg.setIcon(QMessageBox.Information)
@@ -3023,7 +4158,7 @@ class SettingsWindow(QDialog):
             logger.debug("渲染方式已保存")
         except Exception as e:
             logger.error(f"保存渲染方式失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
     
     def _save_color_settings(self):
         """保存字体颜色设置"""
@@ -3039,12 +4174,12 @@ class SettingsWindow(QDialog):
             # 通知主窗口更新（热更新，立即生效）
             self.config._notify_config_changed()
             
-            QMessageBox.information(self, "成功", "字体颜色设置已保存！\n设置已立即生效，无需重启程序。")
+            show_info(self, "成功", "字体颜色设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("字体颜色设置已保存（热更新）")
             
         except Exception as e:
             logger.error(f"保存字体颜色设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
 
     def _on_custom_text_return_after_warning_toggled(self, checked: bool, minutes_spin):
         """勾选「预警后限时显示速报再回自定义（beta版）」时弹出二次确认；取消则恢复未勾选。"""
@@ -3055,7 +4190,7 @@ class SettingsWindow(QDialog):
             "功能仅为 Beta 测试版本，仅供测试与评估使用，不建议在直播场景中使用；"
             "开发者不提供任何明示或默示的适用性、稳定性保证，由此产生的一切后果及相关责任均由用户自行承担！"
         )
-        msg = QMessageBox(self)
+        msg = styled_message_box(self)
         msg.setWindowTitle("请确认")
         msg.setTextFormat(Qt.RichText)
         msg.setText(
@@ -3115,6 +4250,29 @@ class SettingsWindow(QDialog):
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
             self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked() if 'always_on_top' in self.display_vars else False
+            if 'minimize_to_tray' in self.display_vars:
+                self.config.gui_config.minimize_to_tray = self.display_vars['minimize_to_tray'].isChecked()
+            if 'toast_notifications_enabled' in self.display_vars:
+                self.config.gui_config.toast_notifications_enabled = self.display_vars['toast_notifications_enabled'].isChecked()
+            self._save_audio_settings()
+            if 'min_report_magnitude' in self.display_vars:
+                self.config.message_config.min_report_magnitude = float(
+                    self.display_vars['min_report_magnitude'].value()
+                )
+            if 'geo_filter_enabled' in self.display_vars:
+                self.config.message_config.geo_filter_enabled = self.display_vars['geo_filter_enabled'].isChecked()
+            if 'geo_filter_latitude' in self.display_vars:
+                self.config.message_config.geo_filter_latitude = float(
+                    self.display_vars['geo_filter_latitude'].value()
+                )
+            if 'geo_filter_longitude' in self.display_vars:
+                self.config.message_config.geo_filter_longitude = float(
+                    self.display_vars['geo_filter_longitude'].value()
+                )
+            if 'geo_filter_radius_km' in self.display_vars:
+                self.config.message_config.geo_filter_radius_km = float(
+                    self.display_vars['geo_filter_radius_km'].value()
+                )
             self.config.gui_config.auto_update_check_on_startup = self.display_vars['auto_update_check_on_startup'].isChecked()
             self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or "").strip()
             wm_ff_widget = self.display_vars.get('watermark_font_family')
@@ -3135,6 +4293,8 @@ class SettingsWindow(QDialog):
                 self.config.gui_config.watermark_angle = "45" if pos == "diagonal" else "horizontal"
             self.config.gui_config.render_backend = new_backend
             self.config.gui_config.use_gpu_rendering = (new_backend != "cpu")
+
+            self._mark_performance_mode_custom()
 
             # 写入 message_config（颜色 + 自定义文本 + 预警/消息更新）
             self.config.message_config.report_color = self.current_report_color
@@ -3161,7 +4321,7 @@ class SettingsWindow(QDialog):
             
             need_restart = timezone_changed or render_changed
             if need_restart:
-                msg = QMessageBox(self)
+                msg = styled_message_box(self)
                 msg.setWindowTitle("成功")
                 msg.setText("外观与显示设置已保存。\n时区或渲染方式已变更，请重启软件后生效。")
                 msg.setIcon(QMessageBox.Information)
@@ -3172,11 +4332,11 @@ class SettingsWindow(QDialog):
                     logger.debug("用户选择重启，正在重启软件...")
                     self._restart_application()
             else:
-                QMessageBox.information(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
+                show_info(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("外观与显示设置已保存")
         except Exception as e:
             logger.error(f"保存外观与显示设置失败: {e}")
-            QMessageBox.critical(self, "错误", f"保存设置失败: {e}")
+            show_critical(self, "错误", f"保存设置失败: {e}")
     
     def update_weather_image(self, weather_data: Dict[str, Any]):
         """

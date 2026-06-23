@@ -264,10 +264,10 @@ def run_startup_auto_update(app, config) -> bool:
 
 def run_interactive_update_check(parent, config) -> bool:
     """设置-关于：手动检查更新。若已启动安装流程返回 True，调用方可 os._exit(0)。"""
-    from PyQt5.QtWidgets import QMessageBox
+    from gui.qt_light_theme import show_info
 
     if not getattr(sys, "frozen", False):
-        QMessageBox.information(
+        show_info(
             parent,
             "检查更新",
             "当前为源码/解释器运行模式，不支持自动下载安装。\n请使用打包后的 exe 或自行从发布页获取安装包。",
@@ -277,8 +277,10 @@ def run_interactive_update_check(parent, config) -> bool:
 
 
 def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
-    from PyQt5.QtWidgets import QApplication, QMessageBox, QProgressDialog
+    from PyQt5.QtWidgets import QApplication, QProgressDialog
     from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QMessageBox
+    from gui.qt_light_theme import show_info, show_warning, show_critical, show_question
 
     url = (getattr(config.gui_config, "auto_update_manifest_url", "") or "").strip()
     if not url:
@@ -293,7 +295,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
     manifest = _fetch_manifest(url, timeout)
     if not manifest:
         if parent is not None:
-            QMessageBox.warning(parent, "检查更新", "无法获取更新清单，请检查网络或稍后再试。")
+            show_warning(parent, "检查更新", "无法获取更新清单，请检查网络或稍后再试。")
         else:
             logger.info("启动时检查更新：无法获取清单，跳过。")
         return False
@@ -301,7 +303,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
     remote_ver = (manifest.get("latest_version") or "").strip()
     if not remote_ver:
         if parent is not None:
-            QMessageBox.warning(parent, "检查更新", "清单中缺少 latest_version 字段。")
+            show_warning(parent, "检查更新", "清单中缺少 latest_version 字段。")
         else:
             logger.info("启动时检查更新：清单缺少 latest_version，跳过。")
         return False
@@ -309,7 +311,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
     need, _ = _remote_newer(APP_VERSION, remote_ver, upgrade_only)
     if not need:
         if parent is not None:
-            QMessageBox.information(
+            show_info(
                 parent,
                 "检查更新",
                 f"当前版本 v{APP_VERSION} 已是最新（或高于服务器版本）。\n服务器最新：v{remote_ver}",
@@ -328,7 +330,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
 
     msg_parent = parent if parent is not None else None
     if force_prompt_if_newer or parent is not None:
-        r = QMessageBox.question(
+        r = show_question(
             msg_parent,
             "发现新版本",
             f"发现新版本 v{remote_ver}（当前 v{APP_VERSION}）。\n是否下载并安装？\n\n安装完成后将自动启动新版本。",
@@ -347,7 +349,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
 
     asset_url, sha256_expected, kind_label = _pick_asset(manifest, package_kind)
     if not asset_url:
-        QMessageBox.warning(
+        show_warning(
             msg_parent,
             "检查更新",
             f"清单中未找到可用的 {kind_label} 下载地址（installer / zip）。",
@@ -382,11 +384,11 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
         ok = _download_file(asset_url, local_file, timeout, progress_cb=cb)
         prog.close()
         if cancelled["v"] or not ok:
-            QMessageBox.information(msg_parent, "检查更新", "下载已取消或失败。")
+            show_info(msg_parent, "检查更新", "下载已取消或失败。")
             return False
 
         if not _verify_sha256(local_file, sha256_expected or ""):
-            QMessageBox.critical(msg_parent, "检查更新", "文件校验失败（SHA256 不一致），已中止更新。")
+            show_critical(msg_parent, "检查更新", "文件校验失败（SHA256 不一致），已中止更新。")
             return False
 
         inst_ui = "progress"
@@ -422,7 +424,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
         else:
             ui_hint = "随后将打开【安装进度】窗口，同时会显示黑色命令行窗口（内有「正在自动更新中」提示）。"
             tail = "安装结束后一般会尝试自动启动新版本；若未自动打开，请从开始菜单或安装目录手动运行。"
-        QMessageBox.information(
+        show_info(
             msg_parent,
             "准备安装更新",
             "安装包已下载并校验完成。\n\n"
@@ -435,7 +437,7 @@ def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
             qa.processEvents()
 
         if not _spawn_detached_bat(bat, show_console=True):
-            QMessageBox.critical(msg_parent, "检查更新", "无法启动安装脚本。")
+            show_critical(msg_parent, "检查更新", "无法启动安装脚本。")
             return False
 
         return True

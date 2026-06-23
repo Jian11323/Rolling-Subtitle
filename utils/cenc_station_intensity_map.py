@@ -14,6 +14,7 @@ import tempfile
 import json
 import hashlib
 import math
+import threading
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
@@ -30,6 +31,10 @@ _TEXT = (232, 236, 244, 255)
 _TEXT_DIM = (170, 178, 194, 255)
 _EPICENTER = (255, 70, 70, 255)
 _STROKE = (10, 12, 16, 255)
+
+_cn_map_rings_cache: Optional[Tuple[str, float, List[List[Tuple[float, float]]]]] = None
+_cn_map_cache_lock = threading.Lock()
+_font_cache: Dict[Tuple[int, bool], ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
 
 def _extract_outline_rings(geojson_obj: Dict[str, Any]) -> List[List[Tuple[float, float]]]:
@@ -82,20 +87,35 @@ def _bbox_intersects(
 
 
 def _load_cn_map_rings() -> List[List[Tuple[float, float]]]:
-    """读取 data/CN - Maps.geo.json 并返回可绘制 ring。"""
+    """读取 data/CN - Maps.geo.json 并返回可绘制 ring（进程内缓存，按文件 mtime 失效）。"""
+    global _cn_map_rings_cache
     map_path = get_resource_path("data/CN - Maps.geo.json")
     if not map_path.exists():
         logger.warning(f"[cenc-ir] 未找到地图文件: {map_path}")
         return []
+    path_key = str(map_path.resolve())
+    try:
+        mtime = map_path.stat().st_mtime
+    except OSError as e:
+        logger.warning(f"[cenc-ir] 无法读取地图文件状态: {e}")
+        return []
+    with _cn_map_cache_lock:
+        cached = _cn_map_rings_cache
+        if cached is not None and cached[0] == path_key and cached[1] == mtime:
+            return cached[2]
     try:
         with open(map_path, "r", encoding="utf-8") as f:
             obj = json.load(f)
         if not isinstance(obj, dict):
-            return []
-        return _extract_outline_rings(obj)
+            rings: List[List[Tuple[float, float]]] = []
+        else:
+            rings = _extract_outline_rings(obj)
     except Exception as e:
         logger.warning(f"[cenc-ir] 读取地图 GeoJSON 失败: {e}")
         return []
+    with _cn_map_cache_lock:
+        _cn_map_rings_cache = (path_key, mtime, rings)
+    return rings
 
 
 def _station_lon_lat(s: Dict[str, Any]) -> Tuple[float, float]:
@@ -127,6 +147,10 @@ def _hex_to_rgba(hex_color: str, alpha: int = 220) -> Tuple[int, int, int, int]:
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    key = (size, bold)
+    cached = _font_cache.get(key)
+    if cached is not None:
+        return cached
     candidates = []
     if bold:
         candidates.extend(
@@ -144,10 +168,14 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
     )
     for p in candidates:
         try:
-            return ImageFont.truetype(p, size)
+            font = ImageFont.truetype(p, size)
+            _font_cache[key] = font
+            return font
         except OSError:
             continue
-    return ImageFont.load_default()
+    font = ImageFont.load_default()
+    _font_cache[key] = font
+    return font
 
 
 def _intensity_color(i: float) -> Tuple[int, int, int, int]:
@@ -484,14 +512,30 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
     stations = raw.get("instrument_intensity_json") or parsed_data.get("cenc_ir_instrument_intensity_json") or []
     if not isinstance(stations, list) or not stations:
         return None
-    contour = _resolve_contour_geojson(parsed_data, raw)
-    polygons: List[Tuple[float, List[List[Tuple[float, float]]]]] = []
-    if isinstance(contour, dict):
-        try:
-            polygons = _extract_polygons(contour)
-        except Exception:
-            polygons = []
-    logger.info(f"[cenc-ir] 烈度图要素统计: contour={'yes' if isinstance(contour, dict) else 'no'}, polygons={len(polygons)}, stations={len(stations)}")
+
+    shock_time = str(parsed_data.get("shock_time") or "")
+    place = str(parsed_data.get("place_name") or "")
+    mag = _safe_float(parsed_data.get("magnitude", 0))
+    event_id = str(parsed_data.get("event_id") or "")
+    key_src = f"{event_id}|{shock_time}|{place}|{mag}|{len(stations)}"
+    digest = hashlib.md5(key_src.encode("utf-8", errors="ignore")).hexdigest()[:10]
+
+    cache_root = get_cmt_weather_cache_root()
+    write_dir = Path(cache_root) if cache_root is not None else Path(tempfile.gettempdir())
+    try:
+        write_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        write_dir = Path(tempfile.gettempdir())
+    out_path = write_dir / f"cenc_ir_map_{digest}.png"
+    if out_path.is_file():
+        return str(out_path.resolve())
+
+    has_contour = isinstance(_resolve_contour_geojson(parsed_data, raw), dict)
+    logger.info(
+        "[cenc-ir] 烈度图要素统计: contour=%s, stations=%s",
+        "yes" if has_contour else "no",
+        len(stations),
+    )
 
     epi_lon = _safe_float(parsed_data.get("longitude", raw.get("epiLon", 0)))
     epi_lat = _safe_float(parsed_data.get("latitude", raw.get("epiLat", 0)))
@@ -508,19 +552,19 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
     f_title = _font(34, bold=True)
     f_row = _font(15)
     f_row_small = _font(14)
+    f_station_num = _font(24, bold=True)
 
     org = str(parsed_data.get("organization") or "中国地震台网中心地震烈度速报")
-    shock_time = str(parsed_data.get("shock_time") or "")
-    place = str(parsed_data.get("place_name") or "")
-    mag = _safe_float(parsed_data.get("magnitude", 0))
     title = f"{shock_time} {place} M{mag:.1f} 烈度速报".strip()
     if not title:
         title = f"{org} 烈度速报"
     # 顶部胶囊标题
     title_x, title_y = 14, 10
-    tw, th = draw.textbbox((0, 0), title, font=f_title)[2:]
+    title_bb = draw.textbbox((0, 0), title, font=f_title)
+    title_w = max(1, title_bb[2] - title_bb[0])
+    title_h = max(1, title_bb[3] - title_bb[1])
     draw.rounded_rectangle(
-        (title_x - 8, title_y - 4, title_x + tw + 8, title_y + th + 4),
+        (title_x - 8, title_y - 4, title_x + title_w + 8, title_y + title_h + 4),
         radius=8,
         fill=(32, 34, 42, 235),
         outline=(230, 232, 236, 220),
@@ -546,7 +590,6 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
 
     # 台站点（叠加在地图上）：按烈度颜色显示圆点 + 烈度数字（参考 PySide6 风格）
     max_est = max((_safe_float(s.get("estimateInt", s.get("INT", 0))) for s in stations), default=0.0)
-    f_station_num = _font(24, bold=True)
     for s in sorted(stations, key=lambda x: _safe_float(x.get("estimateInt", x.get("INT", 0))), reverse=True):
         lon, lat = _station_lon_lat(s)
         est = _safe_float(s.get("estimateInt", s.get("INT", 0)))
@@ -577,7 +620,7 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
 
     foot = f"台站数: {len(stations)} | 最大估计烈度: {max_est:.1f}"
     # 左上角显示，位于时间标题下方
-    foot_y = max(map_rect[1] + 6, title_y + th + 18)
+    foot_y = max(map_rect[1] + 6, title_y + title_h + 18)
     fb = draw.textbbox((0, 0), foot, font=f_row)
     fw = max(1, fb[2] - fb[0])
     fh = max(1, fb[3] - fb[1])
@@ -592,7 +635,7 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
 
     # 标题与统计信息置顶重绘，避免被地图线条/台站标记干扰
     draw.rounded_rectangle(
-        (title_x - 8, title_y - 4, title_x + tw + 8, title_y + th + 4),
+        (title_x - 8, title_y - 4, title_x + title_w + 8, title_y + title_h + 4),
         radius=8,
         fill=(32, 34, 42, 235),
         outline=(230, 232, 236, 220),
@@ -608,17 +651,6 @@ def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str
     )
     draw.text((18, foot_y), foot, fill=_TEXT_DIM, font=f_row)
 
-    cache_root = get_cmt_weather_cache_root()
-    write_dir = Path(cache_root) if cache_root is not None else Path(tempfile.gettempdir())
-    try:
-        write_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        write_dir = Path(tempfile.gettempdir())
-
-    event_id = str(parsed_data.get("event_id") or "")
-    key_src = f"{event_id}|{shock_time}|{place}|{mag}|{len(stations)}"
-    digest = hashlib.md5(key_src.encode("utf-8", errors="ignore")).hexdigest()[:10]
-    out_path = write_dir / f"cenc_ir_map_{digest}.png"
     try:
         img.save(out_path, format="PNG")
         return str(out_path.resolve())

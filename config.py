@@ -40,6 +40,8 @@ GEONET_HTTP_URL = "https://api.geonet.org.nz/quake?MMI=-1"
 INGV_HTTP_URL = "https://api.terraquakeapi.com/v1/earthquakes/recent?limit=5"
 EARLYEST_HTTP_URL = "http://early-est.rm.ingv.it/hypomessage.html"
 JMA_ATOM_LONG_URL = "https://www.data.jma.go.jp/developer/xml/feed/eqvol_l.xml"
+PTWC_CAP_URL = "https://www.tsunami.gov/events/xml/PHEBCAP.xml"
+PTWC_CAP_URL_LEGACY = "https://www.tsunami.gov/events/xml/PAAQ42.xml"
 
 NEW_HTTP_SOURCE_KEYS: List[str] = [
     BMKG_HTTP_URL,
@@ -47,6 +49,7 @@ NEW_HTTP_SOURCE_KEYS: List[str] = [
     INGV_HTTP_URL,
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
+    PTWC_CAP_URL,
 ]
 
 # 各 HTTP 数据源默认轮询间隔（秒）
@@ -56,8 +59,9 @@ DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
     INGV_HTTP_URL: 30,
     EARLYEST_HTTP_URL: 5,
     JMA_ATOM_LONG_URL: 1800,
-    "https://api.fanstudio.tech/we/typhoon.php": 5,
-    "https://api.fanstudio.tech/we/aqi.php": 5,
+    PTWC_CAP_URL: 60,
+    "https://api.fanstudio.tech/we/typhoon.php": 600,
+    "https://api.fanstudio.tech/we/aqi.php": 1800,
     "https://api.p2pquake.net/v2/history?codes=551&limit=3": 2,
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1": 2,
 }
@@ -77,18 +81,17 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.4.12"
+APP_VERSION = "2.6.1"
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.4.12
+CHANGELOG_TEXT = """版本 2.6.1
 
-1、新增 BMKG、GeoNet、INGV、Early-est、JMA-Atom 数据源
-2、支持为每个 HTTP 数据源单独配置 Get 轮询间隔
-3、增加百度翻译，支持地名修正和百度翻译二选一"""
+1、修复窗口局部配色问题
+2、修复预警系统通知时 PowerShell 窗口闪一下的问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -135,6 +138,9 @@ class GUIConfig:
     auto_update_package_kind: str = "installer"  # installer | zip（zip 为便携目录结构，与一键打包 onedir 一致）
     # 启动时「发现新版本」弹窗用户点否后记录的服务器版本，避免同版本每次启动反复询问
     last_dismissed_update_offer_version: str = ""
+    minimize_to_tray: bool = False
+    toast_notifications_enabled: bool = False
+    performance_mode: str = "standard"  # low | standard | high | custom
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -155,6 +161,10 @@ class GUIConfig:
                 self.window_x, self.window_y = -1, -1
             assert 1 <= self.target_fps <= 240, "目标帧率必须在1-240之间"
             assert self.render_backend in ("cpu", "opengl"), "render_backend 必须为 cpu 或 opengl"
+            pm = (getattr(self, "performance_mode", "standard") or "standard").strip().lower()
+            if pm not in ("low", "standard", "high", "custom"):
+                pm = "standard"
+            self.performance_mode = pm
             if getattr(self, 'watermark_angle', 'horizontal') not in ("horizontal", "45"):
                 self.watermark_angle = "horizontal"
             try:
@@ -191,7 +201,7 @@ class MessageConfig:
     """消息处理配置"""
     max_message_length: int = 0
     display_duration: int = 0
-    # 预警无活动时长（秒）：当前未使用，仅保留配置兼容；与“发震时间有效期/最少展示时长”无直接对应，默认 10 分钟
+    # 预警无活动时长（秒）：自最后一次收到该事件更新报起，超过此时长且无更新则视为过期（默认 10 分钟）
     max_warning_inactivity_time: int = 600
     # 预警按发震时间的有效期（秒）：超过此时长的预警入队时丢弃、展示时移除，默认 5 分钟
     warning_shock_validity_seconds: int = 300
@@ -271,6 +281,15 @@ class MessageConfig:
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報）；HTTP 聚合拉取逻辑不变
     p2pquake_parse_551: bool = True
     p2pquake_parse_552: bool = True
+    # 速报震级过滤（0 表示不限制）
+    min_report_magnitude: float = 0.0
+    # 关注区域过滤（以经纬度为圆心、半径 km 内才显示）
+    geo_filter_enabled: bool = False
+    geo_filter_latitude: float = 39.9042
+    geo_filter_longitude: float = 116.4074
+    geo_filter_radius_km: float = 1000.0
+    # 事件历史环形缓冲容量（仅本地查看/导出，不对外推送）
+    event_history_max_entries: int = 500
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -293,6 +312,8 @@ class MessageConfig:
             self.disable_warning_expiry_for_test = bool(
                 getattr(self, "disable_warning_expiry_for_test", False)
             )
+            eh = int(getattr(self, "event_history_max_entries", 500) or 500)
+            self.event_history_max_entries = max(50, min(5000, eh))
             return True
         except AssertionError as e:
             logger.error(f"消息配置验证失败: {e}")
@@ -315,6 +336,37 @@ class AlertConfig:
     flash_target_screen: int = -1
     flash_color: str = "#FF0000"
     flash_max_alpha: int = 180
+    sound_enabled: bool = False
+    sound_path: str = ""
+    sound_volume: int = 100
+    sound_warnings_only: bool = True
+    felt_sound_enabled: bool = False
+    felt_sound_path: str = ""
+    felt_sound_repeat: int = 1
+    critical_sound_enabled: bool = False
+    critical_sound_path: str = ""
+    critical_sound_repeat: int = 1
+    # 已废弃：速报不再使用预设 WAV，保留字段仅为兼容旧配置
+    ciev_sound_enabled: bool = False
+    ciev_sound_path: str = ""
+    ciev_sound_repeat: int = 1
+    alert_feedback_mode: str = "sound"
+    felt_tts_enabled: bool = False
+    critical_tts_enabled: bool = False
+    felt_tts_repeat: int = 1
+    critical_tts_repeat: int = 1
+    report_tts_enabled: bool = True
+    report_tts_repeat: int = 1
+    weather_tts_enabled: bool = True
+    weather_tts_repeat: int = 1
+    tsunami_tts_enabled: bool = True
+    tsunami_tts_repeat: int = 1
+    tts_playback_mode: str = "supplement"
+    tts_rate: int = 150
+    tts_voice: str = ""
+    tts_include_safety_hint: bool = True
+    tts_repeat_policy: str = "smart"
+    tts_cooldown_seconds: int = 60
 
     def validate(self) -> bool:
         try:
@@ -336,6 +388,69 @@ class AlertConfig:
                 self.flash_max_alpha = 30
             if self.flash_max_alpha > 255:
                 self.flash_max_alpha = 255
+            self.felt_sound_path = (self.felt_sound_path or "").strip()
+            self.critical_sound_path = (self.critical_sound_path or "").strip()
+            self.ciev_sound_path = (self.ciev_sound_path or "").strip()
+            try:
+                self.felt_sound_repeat = int(self.felt_sound_repeat)
+            except (TypeError, ValueError):
+                self.felt_sound_repeat = 1
+            try:
+                self.critical_sound_repeat = int(self.critical_sound_repeat)
+            except (TypeError, ValueError):
+                self.critical_sound_repeat = 1
+            try:
+                self.ciev_sound_repeat = int(self.ciev_sound_repeat)
+            except (TypeError, ValueError):
+                self.ciev_sound_repeat = 1
+            self.felt_sound_repeat = max(1, min(10, self.felt_sound_repeat))
+            self.critical_sound_repeat = max(1, min(10, self.critical_sound_repeat))
+            self.ciev_sound_repeat = max(1, min(10, self.ciev_sound_repeat))
+            self.alert_feedback_mode = (self.alert_feedback_mode or "sound").strip().lower()
+            if self.alert_feedback_mode not in ("sound", "tts"):
+                self.alert_feedback_mode = "sound"
+            try:
+                self.felt_tts_repeat = int(self.felt_tts_repeat)
+            except (TypeError, ValueError):
+                self.felt_tts_repeat = 1
+            try:
+                self.critical_tts_repeat = int(self.critical_tts_repeat)
+            except (TypeError, ValueError):
+                self.critical_tts_repeat = 1
+            try:
+                self.report_tts_repeat = int(self.report_tts_repeat)
+            except (TypeError, ValueError):
+                self.report_tts_repeat = 1
+            try:
+                self.weather_tts_repeat = int(self.weather_tts_repeat)
+            except (TypeError, ValueError):
+                self.weather_tts_repeat = 1
+            try:
+                self.tsunami_tts_repeat = int(self.tsunami_tts_repeat)
+            except (TypeError, ValueError):
+                self.tsunami_tts_repeat = 1
+            self.felt_tts_repeat = max(1, min(10, self.felt_tts_repeat))
+            self.critical_tts_repeat = max(1, min(10, self.critical_tts_repeat))
+            self.report_tts_repeat = max(1, min(10, self.report_tts_repeat))
+            self.weather_tts_repeat = max(1, min(10, self.weather_tts_repeat))
+            self.tsunami_tts_repeat = max(1, min(10, self.tsunami_tts_repeat))
+            self.tts_playback_mode = (self.tts_playback_mode or "supplement").strip().lower()
+            if self.tts_playback_mode not in ("supplement", "replace"):
+                self.tts_playback_mode = "supplement"
+            self.tts_voice = (self.tts_voice or "").strip()
+            self.tts_repeat_policy = (self.tts_repeat_policy or "smart").strip().lower()
+            if self.tts_repeat_policy not in ("smart", "first_only", "always"):
+                self.tts_repeat_policy = "smart"
+            try:
+                self.tts_rate = int(self.tts_rate)
+            except (TypeError, ValueError):
+                self.tts_rate = 150
+            self.tts_rate = max(80, min(300, self.tts_rate))
+            try:
+                self.tts_cooldown_seconds = int(self.tts_cooldown_seconds)
+            except (TypeError, ValueError):
+                self.tts_cooldown_seconds = 60
+            self.tts_cooldown_seconds = max(0, min(600, self.tts_cooldown_seconds))
             return True
         except Exception as e:
             logger.error(f"告警配置验证失败: {e}")
@@ -530,6 +645,11 @@ class Config:
                 'last_dismissed_update_offer_version': getattr(
                     self.gui_config, 'last_dismissed_update_offer_version', ""
                 ),
+                'minimize_to_tray': getattr(self.gui_config, 'minimize_to_tray', False),
+                'toast_notifications_enabled': getattr(
+                    self.gui_config, 'toast_notifications_enabled', False
+                ),
+                'performance_mode': getattr(self.gui_config, 'performance_mode', 'standard'),
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -560,7 +680,7 @@ class Config:
                 'max_report_inactivity_time': self.message_config.max_report_inactivity_time,
                 'max_other_inactivity_time': self.message_config.max_other_inactivity_time,
                 'message_queue_maxsize': getattr(self.message_config, 'message_queue_maxsize', 300),
-                'message_buffer_max_size': getattr(self.message_config, 'message_buffer_max_size', 50),
+                'message_buffer_max_size': getattr(self.message_config, 'message_buffer_max_size', 100),
                 'no_activity_message': self.message_config.no_activity_message,
                 'custom_text': self.message_config.custom_text,
                 'use_custom_text': self.message_config.use_custom_text,
@@ -615,6 +735,14 @@ class Config:
                 'fanstudio_parse_fssn_cmt': getattr(self.message_config, 'fanstudio_parse_fssn_cmt', True),
                 'fanstudio_parse_weatheralarm': getattr(self.message_config, 'fanstudio_parse_weatheralarm', True),
                 'fanstudio_parse_tsunami': getattr(self.message_config, 'fanstudio_parse_tsunami', True),
+                'min_report_magnitude': getattr(self.message_config, 'min_report_magnitude', 0.0),
+                'geo_filter_enabled': getattr(self.message_config, 'geo_filter_enabled', False),
+                'geo_filter_latitude': getattr(self.message_config, 'geo_filter_latitude', 39.9042),
+                'geo_filter_longitude': getattr(self.message_config, 'geo_filter_longitude', 116.4074),
+                'geo_filter_radius_km': getattr(self.message_config, 'geo_filter_radius_km', 1000.0),
+                'event_history_max_entries': getattr(
+                    self.message_config, 'event_history_max_entries', 500
+                ),
             },
             'ALERT_CONFIG': {
                 'enabled': self.alert_config.enabled,
@@ -624,6 +752,36 @@ class Config:
                 'flash_target_screen': self.alert_config.flash_target_screen,
                 'flash_color': self.alert_config.flash_color,
                 'flash_max_alpha': self.alert_config.flash_max_alpha,
+                'sound_enabled': getattr(self.alert_config, 'sound_enabled', False),
+                'sound_path': getattr(self.alert_config, 'sound_path', ''),
+                'sound_volume': getattr(self.alert_config, 'sound_volume', 100),
+                'sound_warnings_only': getattr(self.alert_config, 'sound_warnings_only', True),
+                'felt_sound_enabled': getattr(self.alert_config, 'felt_sound_enabled', False),
+                'felt_sound_path': getattr(self.alert_config, 'felt_sound_path', ''),
+                'felt_sound_repeat': getattr(self.alert_config, 'felt_sound_repeat', 1),
+                'critical_sound_enabled': getattr(self.alert_config, 'critical_sound_enabled', False),
+                'critical_sound_path': getattr(self.alert_config, 'critical_sound_path', ''),
+                'critical_sound_repeat': getattr(self.alert_config, 'critical_sound_repeat', 1),
+                'ciev_sound_enabled': getattr(self.alert_config, 'ciev_sound_enabled', False),
+                'ciev_sound_path': getattr(self.alert_config, 'ciev_sound_path', ''),
+                'ciev_sound_repeat': getattr(self.alert_config, 'ciev_sound_repeat', 1),
+                'alert_feedback_mode': getattr(self.alert_config, 'alert_feedback_mode', 'sound'),
+                'felt_tts_enabled': getattr(self.alert_config, 'felt_tts_enabled', False),
+                'critical_tts_enabled': getattr(self.alert_config, 'critical_tts_enabled', False),
+                'felt_tts_repeat': getattr(self.alert_config, 'felt_tts_repeat', 1),
+                'critical_tts_repeat': getattr(self.alert_config, 'critical_tts_repeat', 1),
+                'report_tts_enabled': getattr(self.alert_config, 'report_tts_enabled', True),
+                'report_tts_repeat': getattr(self.alert_config, 'report_tts_repeat', 1),
+                'weather_tts_enabled': getattr(self.alert_config, 'weather_tts_enabled', True),
+                'weather_tts_repeat': getattr(self.alert_config, 'weather_tts_repeat', 1),
+                'tsunami_tts_enabled': getattr(self.alert_config, 'tsunami_tts_enabled', True),
+                'tsunami_tts_repeat': getattr(self.alert_config, 'tsunami_tts_repeat', 1),
+                'tts_playback_mode': getattr(self.alert_config, 'tts_playback_mode', 'supplement'),
+                'tts_rate': getattr(self.alert_config, 'tts_rate', 150),
+                'tts_voice': getattr(self.alert_config, 'tts_voice', ''),
+                'tts_include_safety_hint': getattr(self.alert_config, 'tts_include_safety_hint', True),
+                'tts_repeat_policy': getattr(self.alert_config, 'tts_repeat_policy', 'smart'),
+                'tts_cooldown_seconds': getattr(self.alert_config, 'tts_cooldown_seconds', 60),
             },
             'WS_CONFIG': {
                 'reconnect_interval': self.ws_config.reconnect_interval,
@@ -750,9 +908,28 @@ class Config:
 
     def _ensure_new_http_source_defaults(self) -> None:
         """补全五路新 HTTP 数据源开关缺项，默认关闭。"""
+        self._migrate_legacy_ptwc_url()
         for url in NEW_HTTP_SOURCE_KEYS:
             if url not in self.enabled_sources:
                 self.enabled_sources[url] = False
+
+    def _migrate_legacy_ptwc_url(self) -> None:
+        """将已失效的 PTWC CAP 地址 PAAQ42.xml 迁移为官方 PHEBCAP.xml。"""
+        if PTWC_CAP_URL_LEGACY not in self.enabled_sources:
+            if PTWC_CAP_URL_LEGACY in self.http_poll_intervals:
+                self.http_poll_intervals[PTWC_CAP_URL] = self.http_poll_intervals.pop(PTWC_CAP_URL_LEGACY)
+            return
+        enabled = self.enabled_sources.pop(PTWC_CAP_URL_LEGACY)
+        if PTWC_CAP_URL not in self.enabled_sources:
+            self.enabled_sources[PTWC_CAP_URL] = enabled
+        elif enabled:
+            self.enabled_sources[PTWC_CAP_URL] = True
+        if PTWC_CAP_URL_LEGACY in self.http_poll_intervals:
+            self.http_poll_intervals.setdefault(
+                PTWC_CAP_URL,
+                self.http_poll_intervals.pop(PTWC_CAP_URL_LEGACY),
+            )
+        logger.info(f"已迁移 PTWC CAP 地址: {PTWC_CAP_URL_LEGACY} -> {PTWC_CAP_URL}")
 
     def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
         """仅对 existing 做缺项补全：只补 full 中有而 existing 中没有的键，不删除 existing 中任何键。"""
@@ -793,6 +970,9 @@ class Config:
                 if top_key in config_data:
                     del config_data[top_key]
                     changed = True
+            if "INTEGRATION_CONFIG" in config_data:
+                del config_data["INTEGRATION_CONFIG"]
+                changed = True
 
             # 2) 删除 MESSAGE_CONFIG 中已废弃的 Jian 子源开关
             msg_cfg = config_data.get("MESSAGE_CONFIG")
@@ -955,6 +1135,8 @@ class Config:
                 }
                 for key, value in alert_data.items():
                     setattr(self.alert_config, key, value)
+                self._migrate_tiered_sound_fields(alert_section)
+                self._migrate_alert_feedback_mode(alert_section)
             else:
                 self._migrate_legacy_alert_fields(config_data)
             if not self.alert_config.validate():
@@ -995,7 +1177,7 @@ class Config:
                         setattr(self.log_config, key, value)
                 if not self.log_config.validate():
                     success = False
-            
+
             # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
             raw_sources = config_data.get('ENABLED_SOURCES', {})
             base_domain = "fanstudio.tech"
@@ -1159,6 +1341,39 @@ class Config:
         finally:
             self._save_lock.release()
     
+    def _migrate_tiered_sound_fields(self, alert_section: Dict[str, Any]) -> None:
+        """从旧版单层 sound_enabled/sound_path 迁移到分级预警声音字段。"""
+        if not isinstance(alert_section, dict):
+            return
+        has_new = (
+            'felt_sound_enabled' in alert_section
+            or 'critical_sound_enabled' in alert_section
+        )
+        if has_new:
+            return
+        old_enabled = bool(alert_section.get('sound_enabled', False))
+        old_path = (alert_section.get('sound_path') or '').strip()
+        self.alert_config.felt_sound_enabled = old_enabled
+        self.alert_config.critical_sound_enabled = old_enabled
+        if old_path:
+            self.alert_config.felt_sound_path = old_path
+
+    def _migrate_alert_feedback_mode(self, alert_section: Dict[str, Any]) -> None:
+        """从旧版 tts_playback_mode / TTS 开关迁移到 alert_feedback_mode。"""
+        if not isinstance(alert_section, dict):
+            return
+        if "alert_feedback_mode" in alert_section:
+            return
+        legacy = str(alert_section.get("tts_playback_mode") or "").strip().lower()
+        tts_on = bool(
+            alert_section.get("felt_tts_enabled")
+            or alert_section.get("critical_tts_enabled")
+        )
+        if legacy == "replace" or tts_on:
+            self.alert_config.alert_feedback_mode = "tts"
+        else:
+            self.alert_config.alert_feedback_mode = "sound"
+
     def _migrate_legacy_alert_fields(self, config_data: Dict[str, Any]) -> None:
         """
         从旧版 GUI_CONFIG / MESSAGE_CONFIG 中迁移告警相关字段到新的 ``AlertConfig``。
@@ -1235,6 +1450,20 @@ class Config:
         self.ws_urls = self._build_ws_urls_ordered()
         logger.info(f"更新数据源配置，当前启用 {len(self.ws_urls)} 个WebSocket数据源: {self.ws_urls}")
         self._notify_config_changed()
+
+    def apply_performance_preset(self, mode: str) -> Dict[str, Any]:
+        """应用低配/标准/高配性能预设，返回是否需重启等信息。"""
+        from utils.performance_presets import apply_performance_preset
+
+        result = apply_performance_preset(self, mode)
+        self._notify_config_changed()
+        logger.info(
+            "已应用性能模式 %s（render_changed=%s, sources_changed=%s）",
+            mode,
+            result.get("render_backend_changed"),
+            result.get("sources_changed"),
+        )
+        return result
     
     def _update_urls_for_server_selection(self):
         """
@@ -1304,6 +1533,12 @@ class Config:
             "wss://ws-api.wolfx.jp/all_eew": "wolfx_all_eew",
             "wss://ws-api.wolfx.jp/cwa_eew": "wolfx_cwa_eew",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
+            PTWC_CAP_URL: "ptwc",
+            BMKG_HTTP_URL: "bmkg",
+            GEONET_HTTP_URL: "geonet",
+            INGV_HTTP_URL: "ingv",
+            EARLYEST_HTTP_URL: "early_est",
+            JMA_ATOM_LONG_URL: "jma_volcano",
         }
         return url_to_name.get(normalized_url, url)
     
@@ -1354,6 +1589,7 @@ class Config:
             "ingv": "意大利国家地球物理与火山学研究所",
             "early_est": "Early-est",
             "jma_volcano": "日本气象厅火山情报",
+            "ptwc": "太平洋海啸预警中心 (PTWC)",
         }
         
         return organization_name_mapping.get(source_name, source_name)

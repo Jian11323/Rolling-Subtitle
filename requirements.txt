@@ -21,5 +21,11 @@ tzdata>=2024.1
 # HTML 解析（Early-est 预警、海啸 htmlUrl 备注等）
 beautifulsoup4>=4.11.0
 
+# 离线 TTS（Windows SAPI）
+pyttsx3>=2.90
+
+# 可选：Windows 系统通知（未安装时使用 PowerShell Toast）
+# win10toast>=0.9
+
 # 可选：如果需要打包成exe，可以使用以下工具
 # pyinstaller>=5.0

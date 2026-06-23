@@ -14,6 +14,7 @@ from PyQt5.QtGui import QColor
 from typing import Optional
 
 from utils.logger import get_logger
+from gui.qt_light_theme import apply_light_palette, light_dialog_stylesheet
 
 logger = get_logger()
 
@@ -58,6 +59,8 @@ class Color48Picker(QDialog):
         self.setWindowTitle("选择颜色")
         self.setModal(True)
         self.setMinimumSize(400, 350)
+        apply_light_palette(self, "#FFFFFF")
+        self.setStyleSheet(light_dialog_stylesheet("#FFFFFF"))
         
         # 主布局
         main_layout = QVBoxLayout(self)
