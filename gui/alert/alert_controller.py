@@ -84,6 +84,7 @@ _SENTENCE_END_CHARS = frozenset("。！？.!?…」）)'\"】］")
 
 
 def _ensure_sentence_ending(s: str) -> str:
+    """若预警正文末尾无句读，补全句号以便拼接提示语。"""
     s = (s or "").strip()
     if not s:
         return s
@@ -175,6 +176,7 @@ class AlertController(QObject):
         parent: Optional[QObject] = None,
         edge_flash: Optional[Any] = None,
     ):
+        """绑定滚动字幕与配置，初始化提示期定时器与跨线程信号。"""
         super().__init__(parent)
         self._scrolling_text = scrolling_text
         self._config = config
@@ -193,7 +195,8 @@ class AlertController(QObject):
         self._hint_timer.timeout.connect(self._enter_final_phase)
 
         # 跨线程 trigger：BlockingQueued 保证在消息入队/切屏前完成，避免 QTimer 在非主线程启动
-        self._pending_cross_thread_trigger: Optional[Tuple[Any, Any, str, str]] = None
+        # 元组末位为 simulate 标志（设置页「模拟预警」可跳过 enabled 门槛）
+        self._pending_cross_thread_trigger: Optional[Tuple[Any, Any, str, str, bool]] = None
         self._cross_thread_trigger_result: bool = False
 
         self._cancel_requested.connect(self._cancel_impl, Qt.QueuedConnection)
@@ -219,6 +222,7 @@ class AlertController(QObject):
         return True
 
     def _main_app_thread(self) -> Optional[QThread]:
+        """获取 QApplication 主线程，用于跨线程调度。"""
         app = QApplication.instance() or QCoreApplication.instance()
         if app is None:
             return None
@@ -230,6 +234,8 @@ class AlertController(QObject):
         intensity_result: Any,
         formatted_text: str,
         formatted_color: str = "#FF0000",
+        *,
+        simulate: bool = False,
     ) -> bool:
         """
         基于解析结果与 ``AlertConfig`` 决定是否触发；返回 True 表示已启动序列。
@@ -238,6 +244,8 @@ class AlertController(QObject):
         （否则 ``QTimer.start`` 会报错且左侧条不会闪烁）。
 
         ``intensity_result`` 已废弃，请传 ``None``；阈值与提示仅依据 ``parsed_data`` 报文。
+
+        ``simulate=True`` 时跳过 ``alert_config.enabled`` 检查（仅供设置页模拟预警）。
 
         调用方应在 trigger 返回 False 时按正常流程展示 ``formatted_text`` 与警告色。
         """
@@ -248,6 +256,7 @@ class AlertController(QObject):
                 intensity_result,
                 formatted_text or "",
                 formatted_color or "#FF0000",
+                bool(simulate),
             )
             self._cross_thread_trigger_result = False
             try:
@@ -258,7 +267,7 @@ class AlertController(QObject):
             return bool(self._cross_thread_trigger_result)
 
         return self._trigger_impl(
-            parsed_data, intensity_result, formatted_text, formatted_color
+            parsed_data, intensity_result, formatted_text, formatted_color, simulate=simulate
         )
 
     @pyqtSlot()
@@ -269,8 +278,10 @@ class AlertController(QObject):
         if t is None:
             self._cross_thread_trigger_result = False
             return
-        pd, ir, ft, fc = t
-        self._cross_thread_trigger_result = self._trigger_impl(pd, ir, ft, fc)
+        pd, ir, ft, fc, sim = t
+        self._cross_thread_trigger_result = self._trigger_impl(
+            pd, ir, ft, fc, simulate=sim
+        )
 
     def _trigger_impl(
         self,
@@ -278,10 +289,15 @@ class AlertController(QObject):
         intensity_result: Any,
         formatted_text: str,
         formatted_color: str = "#FF0000",
+        *,
+        simulate: bool = False,
     ) -> bool:
+        """在主线程执行 trigger 核心逻辑：等级评估、抢占与进入提示期。"""
         try:
             ac = getattr(self._config, "alert_config", None)
-            if ac is None or not getattr(ac, "enabled", False):
+            if ac is None:
+                return False
+            if not simulate and not getattr(ac, "enabled", False):
                 return False
 
             level = self._evaluate_level(parsed_data, intensity_result, ac)
@@ -294,7 +310,7 @@ class AlertController(QObject):
                 logger.debug(
                     f"AlertController: 同事件重复触发，忽略 event_id={event_id}"
                 )
-                return False
+                return False  # 同一事件重复投递时保持当前序列不变
 
             if self._state != AlertState.IDLE:
                 cur_w = _LEVEL_WEIGHT.get(self._current_level, 0)
@@ -378,6 +394,7 @@ class AlertController(QObject):
         intensity_result: Any,
         alert_config: Any,
     ) -> str:
+        """依据震级与估算烈度返回告警等级：none / alert / flash。"""
         _ = intensity_result
         pd = parsed_data or {}
         try:
@@ -404,6 +421,7 @@ class AlertController(QObject):
         return "alert"
 
     def _enter_hint_phase(self, parsed_data: Dict[str, Any]) -> None:
+        """进入提示期：展示正文+安全提示分段，启动左侧标识闪烁与兜底定时器。"""
         self._state = AlertState.HINT
         ac = self._config.alert_config
 
@@ -454,6 +472,7 @@ class AlertController(QObject):
         self._hint_timer.start()
 
     def _enter_final_phase(self) -> None:
+        """提示期结束：切回纯预警条文并发出 sequence_finished 信号。"""
         if self._state != AlertState.HINT:
             return
         self._stop_timers()
@@ -509,6 +528,7 @@ class AlertController(QObject):
             logger.debug(f"AlertController 更新滚动文本失败: {e}")
 
     def _start_flash(self, ac: Any) -> None:
+        """启动字幕条左侧「地震预警」标识闪烁。"""
         try:
             if self._scrolling_text is not None:
                 badge_fn = getattr(
@@ -524,6 +544,7 @@ class AlertController(QObject):
             logger.debug(f"AlertController 启动闪烁失败: {e}")
 
     def _stop_flash(self) -> None:
+        """停止左侧标识与整栏红闪（若曾启用）。"""
         try:
             if self._scrolling_text is not None:
                 bfn = getattr(
@@ -538,6 +559,7 @@ class AlertController(QObject):
             pass
 
     def _stop_timers(self) -> None:
+        """停止提示期兜底定时器。"""
         try:
             if self._hint_timer.isActive():
                 self._hint_timer.stop()
@@ -545,6 +567,7 @@ class AlertController(QObject):
             pass
 
     def _reset_state(self) -> None:
+        """重置状态机为 IDLE 并清空当前事件上下文。"""
         self._state = AlertState.IDLE
         self._current_event_id = ""
         self._current_level = "none"

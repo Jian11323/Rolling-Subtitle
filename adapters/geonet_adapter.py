@@ -14,6 +14,7 @@ class GeoNetAdapter(BaseAdapter):
     response_format = "json"
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 GeoNet GeoJSON，取第一条非 deleted 事件。"""
         if not isinstance(raw_data, dict):
             return None
         features = raw_data.get("features")
@@ -24,13 +25,14 @@ class GeoNetAdapter(BaseAdapter):
                 continue
             props = feature.get("properties") or {}
             if (props.get("quality") or "").strip().lower() == "deleted":
-                continue
+                continue  # 跳过已删除事件
             parsed = self._parse_feature(feature)
             if parsed:
                 return parsed
         return None
 
     def _parse_feature(self, feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """将 GeoJSON feature 解析为标准化速报字典。"""
         props = feature.get("properties") or {}
         geom = feature.get("geometry") or {}
         coords = geom.get("coordinates") or []
@@ -42,7 +44,7 @@ class GeoNetAdapter(BaseAdapter):
         lon = lat = 0.0
         if isinstance(coords, (list, tuple)) and len(coords) >= 2:
             try:
-                lon = float(coords[0])
+                lon = float(coords[0])  # GeoJSON 坐标顺序为 [lon, lat]
                 lat = float(coords[1])
             except (TypeError, ValueError):
                 pass
@@ -64,6 +66,7 @@ class GeoNetAdapter(BaseAdapter):
         }
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """安全转换为浮点数。"""
         try:
             if value is None:
                 return default
@@ -72,4 +75,5 @@ class GeoNetAdapter(BaseAdapter):
             return default
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（GeoNet 默认为速报）。"""
         return data.get("type", "report")

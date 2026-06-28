@@ -20,6 +20,7 @@ PERFORMANCE_MODE_STANDARD = "standard"
 PERFORMANCE_MODE_HIGH = "high"
 PERFORMANCE_MODE_CUSTOM = "custom"
 
+# 可选性能模式标识（custom 表示用户手动改动后不再跟随预设）
 PERFORMANCE_MODES: Tuple[str, ...] = (
     PERFORMANCE_MODE_LOW,
     PERFORMANCE_MODE_STANDARD,
@@ -39,6 +40,7 @@ FANSTUDIO_WEATHER_URL = "wss://ws.fanstudio.tech/weatheralarm"
 WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
 WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"
 CENC_IR_URL = "wss://ws.fanstudio.tech/cenc-ir"
+# Fan Studio HTTP 辅助数据源
 TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
 AQI_HTTP = "https://api.fanstudio.tech/we/aqi.php"
 
@@ -49,7 +51,7 @@ def _base_enabled_sources() -> Dict[str, bool]:
         FANSTUDIO_ALL_URL: True,
         FANSTUDIO_WEATHER_URL: True,
     }
-    for url in P2PQUAKE_HTTP_SOURCE_KEYS:
+    for url in P2PQUAKE_HTTP_SOURCE_KEYS:  # 默认关闭 P2PQuake HTTP 源
         sources[url] = False
     sources[TYPHOON_HTTP] = True
     sources[AQI_HTTP] = True
@@ -57,12 +59,13 @@ def _base_enabled_sources() -> Dict[str, bool]:
     sources[WOLFX_CWA_EEW_URL] = False
     sources[P2PQUAKE_WSS_URL] = False
     sources[CENC_IR_URL] = True
-    for url in NEW_HTTP_SOURCE_KEYS:
+    for url in NEW_HTTP_SOURCE_KEYS:  # 默认关闭国际 HTTP 源
         sources[url] = False
     return sources
 
 
 def _low_enabled_sources() -> Dict[str, bool]:
+    """低配模式：关闭次要 HTTP/WSS 数据源以减轻负载。"""
     sources = _base_enabled_sources()
     sources[FANSTUDIO_WEATHER_URL] = False
     sources[TYPHOON_HTTP] = False
@@ -78,8 +81,9 @@ def _low_enabled_sources() -> Dict[str, bool]:
 
 
 def _high_enabled_sources() -> Dict[str, bool]:
+    """高配模式：启用全部可选 HTTP/WSS 数据源。"""
     sources = _base_enabled_sources()
-    sources[WOLFX_CWA_EEW_URL] = True
+    sources[WOLFX_CWA_EEW_URL] = True  # 高配启用台湾 CWA 独立 WebSocket
     sources[P2PQUAKE_WSS_URL] = True
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = True
@@ -89,6 +93,7 @@ def _high_enabled_sources() -> Dict[str, bool]:
 
 
 def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
+    """按倍率缩放 HTTP 轮询间隔（低配模式拉长间隔）。"""
     scaled: Dict[str, int] = {}
     for url, default_sec in DEFAULT_HTTP_POLL_INTERVALS.items():
         scaled[url] = max(1, int(round(default_sec * factor)))
@@ -96,6 +101,7 @@ def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
 
 
 def _message_fields_low() -> Dict[str, Any]:
+    """低配模式消息相关配置覆盖项。"""
     return {
         "event_history_max_entries": 100,
         "message_queue_maxsize": 100,
@@ -140,6 +146,7 @@ def _message_fields_low() -> Dict[str, Any]:
 
 
 def _message_fields_high() -> Dict[str, Any]:
+    """高配模式消息相关配置覆盖项。"""
     return {
         "event_history_max_entries": 1000,
         "message_queue_maxsize": 300,
@@ -184,6 +191,7 @@ def _message_fields_high() -> Dict[str, Any]:
 
 
 def _gui_fields_low() -> Dict[str, Any]:
+    """低配模式 GUI 相关配置覆盖项。"""
     return {
         "render_backend": "cpu",
         "use_gpu_rendering": False,
@@ -196,6 +204,7 @@ def _gui_fields_low() -> Dict[str, Any]:
 
 
 def _gui_fields_high() -> Dict[str, Any]:
+    """高配模式 GUI 相关配置覆盖项。"""
     return {
         "render_backend": "opengl",
         "use_gpu_rendering": True,
@@ -208,6 +217,7 @@ def _gui_fields_high() -> Dict[str, Any]:
 
 
 def _alert_fields_low() -> Dict[str, Any]:
+    """低配模式告警反馈配置覆盖项（默认关闭声音/TTS）。"""
     return {
         "enabled": False,
         "alert_feedback_mode": "sound",
@@ -222,6 +232,7 @@ def _alert_fields_low() -> Dict[str, Any]:
 
 
 def _alert_fields_high() -> Dict[str, Any]:
+    """高配模式告警反馈配置覆盖项。"""
     return {
         "enabled": True,
         "alert_feedback_mode": "sound",
@@ -234,6 +245,7 @@ def _alert_fields_high() -> Dict[str, Any]:
 
 
 def _translation_fields_low() -> Dict[str, Any]:
+    """低配模式翻译/地名修正配置覆盖项。"""
     return {
         "enabled": False,
         "use_place_name_fix": True,
@@ -241,6 +253,7 @@ def _translation_fields_low() -> Dict[str, Any]:
 
 
 def _translation_fields_high() -> Dict[str, Any]:
+    """高配模式翻译/地名修正配置覆盖项。"""
     return {
         "enabled": False,
         "use_place_name_fix": True,
@@ -288,6 +301,7 @@ def get_preset_payload(mode: str) -> Dict[str, Any]:
 
 
 def _data_source_snapshot(config) -> tuple:
+    """采集当前数据源开关与解析标志的快照，用于检测预设应用后是否需重启。"""
     mc = config.message_config
     flags = (
         getattr(mc, "use_custom_text", False),

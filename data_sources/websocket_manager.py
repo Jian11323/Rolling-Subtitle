@@ -19,31 +19,89 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
+from config import Config  # 读取全局配置与开关
 from adapters import (
-    FanStudioAdapter,
-    P2PQuakeWebSocketAdapter,
-    CustomAdapter,
-    P2PQuakeAdapter,
-    P2PQuakeTsunamiAdapter,
-    WolfxAdapter,
+    FanStudioAdapter,  # Fan Studio WebSocket 适配器
+    P2PQuakeWebSocketAdapter,  # P2PQuake WSS 适配器
+    CustomAdapter,  # 自定义 WebSocket 适配器
+    P2PQuakeAdapter,  # P2PQuake 551 地震情报适配器
+    P2PQuakeTsunamiAdapter,  # P2PQuake 552 海啸预报适配器
+    WolfxAdapter,  # Wolfx 聚合预警适配器
 )
 from utils.logger import get_logger
+from utils.message_processor import warning_shock_validity_remaining_seconds
 
 logger = get_logger()
 
 # P2PQuake HTTP 聚合接口：同时包含 551 地震情报与 552 津波预报
-P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"
-P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
-FANSTUDIO_ALL_URLS = ("wss://ws.fanstudio.tech/all")
-CENC_IR_WSS_URL = "wss://ws.fanstudio.tech/cenc-ir"
-WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
-WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"
-HEARTBEAT_TIMEOUT_SECONDS = {
+P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"  # 启动前聚合拉取
+P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
+FANSTUDIO_ALL_URLS = ("wss://ws.fanstudio.tech/all")  # Fan Studio all 通道
+CENC_IR_WSS_URL = "wss://ws.fanstudio.tech/cenc-ir"  # 烈度速报独立通道
+WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"  # Wolfx 聚合预警通道
+WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"  # Wolfx CWA 独立通道
+HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "fanstudio": 45,
     "wolfx": 90,
     "p2pquake": 120,
 }
+
+
+def _parsed_warning_still_valid(parsed_data: Dict[str, Any]) -> bool:
+    """入口侧发震时间窗口校验（WebSocket 回调前丢弃过期预警）。"""
+    if parsed_data.get("type") != "warning":
+        return True
+    rem = warning_shock_validity_remaining_seconds(parsed_data, Config().message_config)
+    if rem is None:
+        return True
+    return rem > 0
+
+
+def _invalid_status_http_code(exc: Exception) -> Optional[int]:
+    """从 WebSocket 连接异常中提取 HTTP 状态码（用于重连退避策略）。"""
+    code = getattr(exc, "status_code", None)
+    if code is not None:
+        try:
+            return int(code)
+        except (TypeError, ValueError):
+            pass
+    m = re.search(r"HTTP (\d+)", str(exc))
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return None
+
+
+def _reconnect_wait_seconds(http_code: Optional[int], attempt: int) -> Optional[int]:
+    """按 HTTP 状态码计算额外重连等待秒数；429/503/521 使用更长间隔。"""
+    if http_code == 429:
+        return min(300, 60 + attempt * 30)
+    if http_code in (503, 521):
+        return min(120, 30 + attempt * 15)
+    return None
+
+
+def _dispatch_parsed_message(
+    manager: "WebSocketManager",
+    parsed_data: Dict[str, Any],
+    actual_source: str,
+    ws_source_name: str,
+) -> None:
+    """校验预警有效期后，将解析结果通过回调下发至 GUI 层。"""
+    if not _parsed_warning_still_valid(parsed_data):
+        logger.debug(
+            "[%s] 预警已过期，WebSocket 层丢弃: event_id=%s place=%s",
+            actual_source,
+            parsed_data.get("event_id"),
+            parsed_data.get("place_name"),
+        )
+        return
+    msg_type = parsed_data.get("type", "unknown")
+    logger.info(f"[{actual_source}] {msg_type}消息")
+    manager.message_callback(actual_source, parsed_data)
+
 # all_eew 聚合端：建连后查询各子源（不含 CWA；CWA 有独立 wss …/cwa_eew 端点）
 WOLFX_ALL_EEW_QUERY_COMMANDS = (
     "query_sceew",
@@ -83,18 +141,17 @@ class WebSocketManager:
         self.enabled_sources: Dict[str, bool] = {}  # 数据源启用状态
         self._send_queues: Dict[str, Queue] = {}  # 每个URL的消息发送队列
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # 连接任务字典
-        self._health_status: Dict[str, Dict[str, Any]] = {}
-        self._wolfx_all_eew_bootstrap_done: Optional[asyncio.Event] = None
-        self._running = True
-        
-        # 加载配置
+        self._health_status: Dict[str, Dict[str, Any]] = {}  # 心跳/健康状态快照
+        self._wolfx_all_eew_bootstrap_done: Optional[asyncio.Event] = None  # Wolfx 启动放行事件
+        self._running = True  # 全局运行标志
+        self._connect_error_log: Dict[str, tuple] = {}  # 连接错误降噪记录
         config = Config()
-        self.max_reconnect_attempts = config.ws_config.max_reconnect_attempts
-        self.reconnect_interval = config.ws_config.reconnect_interval
-        self.ping_interval = config.ws_config.ping_interval
-        self.ping_timeout = config.ws_config.ping_timeout
-        self.close_timeout = config.ws_config.close_timeout
-        self.open_timeout = config.ws_config.connection_timeout
+        self.max_reconnect_attempts = config.ws_config.max_reconnect_attempts  # 最大重连次数
+        self.reconnect_interval = config.ws_config.reconnect_interval  # 基础重连间隔
+        self.ping_interval = config.ws_config.ping_interval  # WebSocket ping 周期
+        self.ping_timeout = config.ws_config.ping_timeout  # ping 超时阈值
+        self.close_timeout = config.ws_config.close_timeout  # 关闭等待超时
+        self.open_timeout = config.ws_config.connection_timeout  # 握手连接超时
 
     def _get_source_kind(self, url: str) -> str:
         """按 URL 识别数据源类型（用于心跳策略）"""
@@ -108,6 +165,7 @@ class WebSocketManager:
         return "other"
 
     def _ensure_health_entry(self, url: str, source_name: str = "") -> Dict[str, Any]:
+        """获取或初始化指定 URL 的健康状态条目（心跳、超时计数等）。"""
         entry = self._health_status.get(url)
         if entry is None:
             kind = self._get_source_kind(url)
@@ -131,10 +189,12 @@ class WebSocketManager:
         return entry
 
     def _mark_message_received(self, url: str, source_name: str):
+        """记录收到任意业务或控制消息的时间戳。"""
         entry = self._ensure_health_entry(url, source_name)
         entry["last_message_ts"] = time.time()
 
     def _mark_heartbeat_received(self, url: str, source_name: str):
+        """记录心跳到达时间并将心跳状态置为正常。"""
         now = time.time()
         entry = self._ensure_health_entry(url, source_name)
         entry["last_heartbeat_ts"] = now
@@ -142,10 +202,12 @@ class WebSocketManager:
         entry["heartbeat_state"] = "ok"
 
     def _mark_ping_received(self, url: str, source_name: str):
+        """记录收到 ping 控制帧的时间戳。"""
         entry = self._ensure_health_entry(url, source_name)
         entry["last_ping_ts"] = time.time()
 
     def _mark_pong_received(self, url: str, source_name: str):
+        """记录收到 pong 响应并将心跳状态置为正常。"""
         now = time.time()
         entry = self._ensure_health_entry(url, source_name)
         entry["last_pong_ts"] = now
@@ -196,7 +258,7 @@ class WebSocketManager:
             适配器实例
         """
         # Wolfx 聚合预警源
-        if 'ws-api.wolfx.jp' in url:
+        if 'ws-api.wolfx.jp' in url:  # 识别 Wolfx 独立/聚合通道
             normalized = url.rstrip('/').lower()
             if normalized.endswith('/all_eew'):
                 adapter = WolfxAdapter('wolfx_all_eew', url)
@@ -381,9 +443,7 @@ class WebSocketManager:
                     if parsed_data:
                         parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
-                        msg_type = parsed_data.get('type', 'unknown')
-                        logger.info(f"[{actual_source}] {msg_type}消息")
-                        self.message_callback(actual_source, parsed_data)
+                        _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
             else:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = await asyncio.to_thread(adapter.parse, data)
@@ -406,9 +466,7 @@ class WebSocketManager:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     else:
                         actual_source = source_name
-                    msg_type = parsed_data.get('type', 'unknown')
-                    logger.info(f"[{actual_source}] {msg_type}消息")
-                    self.message_callback(actual_source, parsed_data)
+                    _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
                 else:
                     logger.debug(f"[{source_name}] 数据无效或被过滤")
         except Exception as e:
@@ -442,6 +500,7 @@ class WebSocketManager:
 
     @staticmethod
     def _wolfx_normalize_recv_text(message: Any) -> str:
+        """将 Wolfx 收到的 WebSocket 帧统一转为 UTF-8 字符串。"""
         if isinstance(message, bytes):
             try:
                 return message.decode("utf-8")
@@ -537,6 +596,7 @@ class WebSocketManager:
         adapter = self.get_adapter(url)
         
         while self._running:
+            pending_reconnect_wait: Optional[int] = None
             # 检查是否启用
             if not self.enabled_sources.get(url, True):
                 self.connection_states[url] = "unconnected"
@@ -634,7 +694,24 @@ class WebSocketManager:
                 logger.warning(f"[{source_name}] 网络错误: {e}，将按重连间隔重试")
                 self._cleanup_connection(url, source_name)
             except Exception as e:
-                logger.error(f"[{source_name}] 连接错误: {e}", exc_info=True)
+                err_summary = f"{type(e).__name__}: {str(e)[:120]}"
+                now = time.time()
+                last = self._connect_error_log.get(url)
+                if isinstance(e, websockets.exceptions.InvalidStatus):
+                    pending_reconnect_wait = _reconnect_wait_seconds(
+                        _invalid_status_http_code(e),
+                        self.reconnect_attempts[url] + 1,
+                    )
+                if last and now - last[0] < 60 and last[1] == err_summary:
+                    logger.debug(f"[{source_name}] 连接错误（已降噪）: {e}")
+                else:
+                    if isinstance(e, websockets.exceptions.InvalidStatus):
+                        logger.warning(
+                            f"[{source_name}] 连接错误: {e}，将按重连间隔重试"
+                        )
+                    else:
+                        logger.error(f"[{source_name}] 连接错误: {e}")
+                    self._connect_error_log[url] = (now, err_summary)
                 self._cleanup_connection(url, source_name)
             
             # 重连逻辑
@@ -643,8 +720,11 @@ class WebSocketManager:
             if not await self._should_reconnect(url, source_name):
                 continue
             
-            # 等待后重连（指数退避）
-            wait_time = min(self.reconnect_attempts[url] * 2, 30)
+            # 等待后重连（指数退避；429/5xx 使用更长间隔）
+            if pending_reconnect_wait is not None:
+                wait_time = pending_reconnect_wait
+            else:
+                wait_time = min(self.reconnect_attempts[url] * 2, 30)
             attempt = self.reconnect_attempts[url]
             logger.debug(f"[{source_name}] {wait_time}秒后重连(第{attempt}次)")
             if not self._running:
@@ -779,7 +859,9 @@ class WebSocketManager:
             logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸情报（聚合 551/552）")
 
             async def _fetch_history():
+                """异步拉取 P2PQuake 历史 HTTP 接口并逐条解析推送。"""
                 def _request():
+                    """在线程池中执行同步 HTTP GET 请求。"""
                     try:
                         resp = requests.get(
                             P2PQUAKE_HISTORY_URL,
@@ -851,6 +933,7 @@ class WebSocketManager:
         order = {WOLFX_ALL_EEW_URL: 0, WOLFX_CWA_EEW_URL: 1}
 
         def _key(u: str) -> tuple[int, str]:
+            """Wolfx 启动排序键：all_eew 优先于 cwa_eew。"""
             n = (u or "").strip().lower().rstrip("/")
             return (order.get(n, 50), u or "")
 
@@ -885,7 +968,7 @@ class WebSocketManager:
         for url in config.ws_urls:
             if config.enabled_sources.get(url, True):
                 enabled_urls.append(url)
-                self.enabled_sources[url] = True
+                self.enabled_sources[url] = True  # 同步到连接管理器内部状态
         # 自定义数据源（WS/WSS）：URL 非空即启用
         custom_url = (config.custom_data_source_url or "").strip()
         if custom_url and (custom_url.startswith('ws://') or custom_url.startswith('wss://')):

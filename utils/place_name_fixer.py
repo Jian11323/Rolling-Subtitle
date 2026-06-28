@@ -29,8 +29,9 @@ class PlaceNameFixer:
         Args:
             fix_file_path: fe_fix_region_data.json 文件路径，如果为 None 则使用默认路径
         """
-        if fix_file_path is None:
+        if fix_file_path is None:  # 未指定路径时自动查找打包/源码目录
             try:
+                # PyInstaller 打包后的资源根目录
                 base_path = Path(sys._MEIPASS)  # type: ignore
             except (AttributeError, TypeError):
                 try:
@@ -40,7 +41,7 @@ class PlaceNameFixer:
             resolved: Optional[Path] = None
             for dirname in _REGION_DIR_NAMES:
                 candidate = base_path / dirname / _FE_FIX_JSON
-                if candidate.exists():
+                if candidate.exists():  # 找到首个存在的区域数据文件
                     resolved = candidate
                     break
             if resolved is None:
@@ -55,6 +56,7 @@ class PlaceNameFixer:
             source_type="fe-fix",
         )
 
+        # 支持按经纬度 bbox 修正地名的数据源类型
         self.supported_sources = {
             "usgs", "emsc", "bcsf", "gfz", "usp", "kma",
             "bmkg", "geonet", "ingv", "early_est",
@@ -83,10 +85,10 @@ class PlaceNameFixer:
         Returns:
             修正后的地名，如果无法修正则返回原始地名
         """
-        if source_type.lower() not in self.supported_sources:
+        if source_type.lower() not in self.supported_sources:  # 不在白名单内不修正
             return place_name
 
-        if not self._region_fixer.is_supported():
+        if not self._region_fixer.is_supported():  # 区域数据未加载成功
             return place_name
 
         return self._region_fixer.fix_place_name(place_name, latitude, longitude)

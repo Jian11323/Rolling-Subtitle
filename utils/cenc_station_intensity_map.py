@@ -32,6 +32,7 @@ _TEXT_DIM = (170, 178, 194, 255)
 _EPICENTER = (255, 70, 70, 255)
 _STROKE = (10, 12, 16, 255)
 
+# 中国行政区轮廓缓存（路径, mtime, rings）
 _cn_map_rings_cache: Optional[Tuple[str, float, List[List[Tuple[float, float]]]]] = None
 _cn_map_cache_lock = threading.Lock()
 _font_cache: Dict[Tuple[int, bool], ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
@@ -78,6 +79,7 @@ def _bbox_intersects(
     ring: List[Tuple[float, float]],
     bbox: Tuple[float, float, float, float],
 ) -> bool:
+    """判断 ring 的包围盒是否与给定 bbox 相交。"""
     xmin, xmax, ymin, ymax = bbox
     rx = [p[0] for p in ring]
     ry = [p[1] for p in ring]
@@ -130,10 +132,12 @@ def _station_lon_lat(s: Dict[str, Any]) -> Tuple[float, float]:
 
 
 def _station_name(s: Dict[str, Any]) -> str:
+    """兼容不同字段名提取台站显示名称。"""
     return str(s.get("stName", s.get("stationName", s.get("stID", "--"))))
 
 
 def _hex_to_rgba(hex_color: str, alpha: int = 220) -> Tuple[int, int, int, int]:
+    """将 #RRGGBB 十六进制颜色转为 RGBA 元组。"""
     hc = (hex_color or "").strip().lstrip("#")
     if len(hc) != 6:
         return (151, 199, 230, alpha)
@@ -147,6 +151,7 @@ def _hex_to_rgba(hex_color: str, alpha: int = 220) -> Tuple[int, int, int, int]:
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """加载 Windows 中文字体；失败时回退到 Pillow 默认字体。"""
     key = (size, bold)
     cached = _font_cache.get(key)
     if cached is not None:
@@ -179,6 +184,7 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.I
 
 
 def _intensity_color(i: float) -> Tuple[int, int, int, int]:
+    """按烈度 1–12 级返回对应 RGBA 颜色（对齐 PySide6 离散色表）。"""
     # 对齐 PySide6：INT 1-12 离散色
     intensity_hex_by_level = {
         1: "#97C7E6",
@@ -253,6 +259,7 @@ def _collect_polygon_units(geometry: Dict[str, Any]) -> List[List[List[Tuple[flo
 
 
 def _extract_polygons(contour_geojson: Dict[str, Any]) -> List[Tuple[float, List[List[Tuple[float, float]]]]]:
+    """从等震线 GeoJSON 提取 (烈度值, 多边形 ring 列表) 对。"""
     items: List[Tuple[float, List[List[Tuple[float, float]]]]] = []
     # FeatureCollection / Feature / Geometry 统一入口
     features: List[Dict[str, Any]] = []
@@ -290,6 +297,7 @@ def _bbox_from_data(
     epi_lon: float,
     epi_lat: float,
 ) -> Tuple[float, float, float, float]:
+    """根据台站、等震线与震中计算地图视窗 bbox（含 12% 边距）。"""
     xs = [epi_lon]
     ys = [epi_lat]
     for s in stations:
@@ -315,6 +323,7 @@ def _bbox_from_data(
 
 
 def _project(x: float, y: float, bbox: Tuple[float, float, float, float], rect: Tuple[int, int, int, int]) -> Tuple[float, float]:
+    """将经纬度坐标投影到画布像素坐标（Y 轴向上为北）。"""
     xmin, xmax, ymin, ymax = bbox
     l, t, r, b = rect
     w = max(1.0, xmax - xmin)
@@ -341,6 +350,7 @@ def _bbox_around_epicenter_150km(epi_lon: float, epi_lat: float) -> Tuple[float,
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
+    """安全转换为浮点数，失败时返回默认值。"""
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -506,6 +516,11 @@ def _draw_station_intensity_fallback(
 
 
 def render_cenc_station_map_to_file(parsed_data: Dict[str, Any]) -> Optional[str]:
+    """
+    渲染 CENC 烈度速报静态图并写入缓存目录。
+
+    返回 PNG 绝对路径；无台站数据或保存失败时返回 None。
+    """
     raw = parsed_data.get("raw_data") or {}
     if not isinstance(raw, dict):
         raw = {}

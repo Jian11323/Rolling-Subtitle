@@ -41,7 +41,7 @@ from utils.message_processor import MessageProcessor
 from utils.logger import get_logger
 from utils import timezone_utils
 from utils.geo_utils import should_accept_message
-from utils.audio_alert import play_alert_sound
+from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import show_event_notification
 from utils.event_dedup import find_duplicate_index, merge_sources
@@ -54,6 +54,33 @@ from .qt_light_theme import apply_light_palette, light_dialog_stylesheet, LIGHT_
 
 logger = get_logger()
 
+# 过期预警入口日志降噪：同一 event 10 分钟内只 WARN 一次
+_EXPIRED_WARNING_LOG: Dict[str, float] = {}
+_EXPIRED_WARNING_LOG_TTL_SEC = 600
+
+
+def _log_expired_warning_ignored(source_name: str, parsed_data: Dict[str, Any]) -> None:
+    """记录被丢弃的过期预警（带降噪，避免同事件重复刷屏）。"""
+    event_id = str(parsed_data.get("event_id") or "").strip()
+    source_type = str(parsed_data.get("source_type") or "").strip()
+    place_name = parsed_data.get("place_name")
+    key = f"{source_type}|{event_id}" if event_id else f"{source_name}|{source_type}|{place_name}"
+    msg = (
+        f"预警消息已过期（on_message_received 阶段），忽略: "
+        f"source={source_name}, source_type={source_type}, "
+        f"place_name={place_name}, event_id={event_id}"
+    )
+    now = time.time()
+    if parsed_data.get("_suppress_tts"):
+        logger.debug(msg)
+        return
+    last = _EXPIRED_WARNING_LOG.get(key)
+    if last is not None and now - last < _EXPIRED_WARNING_LOG_TTL_SEC:
+        logger.debug(msg)
+        return
+    logger.warning(msg)
+    _EXPIRED_WARNING_LOG[key] = now
+
 
 class MainWindow(QMainWindow):
     """地震预警及情报实况栏主窗口"""
@@ -64,6 +91,12 @@ class MainWindow(QMainWindow):
     message_received_signal = pyqtSignal(str, object)
     
     def __init__(self, config=None):
+        """
+        初始化主窗口：消息队列/缓冲区、滚动字幕、数据源与系统托盘等。
+
+        Args:
+            config: 配置对象，默认从 Config() 加载
+        """
         super().__init__()
         self.config = config if config is not None else Config()
         self.message_processor = MessageProcessor()
@@ -262,7 +295,7 @@ class MainWindow(QMainWindow):
             layout.setContentsMargins(0, 0, 0, 0)
             
             # 创建滚动文本组件（按 render_backend 选择 CPU / OpenGL）
-            backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
+            backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")  # 优先读显式配置，再回退到 GPU 开关
             scroll_widget = None  # 布局中用于右键菜单的控件
             if backend == "opengl":
                 self.scrolling_text = ScrollingText(self.config)
@@ -507,15 +540,18 @@ class MainWindow(QMainWindow):
             logger.debug(f"系统托盘初始化失败: {e}")
 
     def _show_from_tray(self):
+        """从系统托盘恢复并激活主窗口。"""
         self.showNormal()
         self.raise_()
         self.activateWindow()
 
     def _on_tray_activated(self, reason):
+        """托盘图标激活：双击时显示主窗口。"""
         if reason == QSystemTrayIcon.DoubleClick:
             self._show_from_tray()
 
     def _quit_application(self):
+        """从托盘菜单退出应用程序。"""
         self._force_quit = True
         QApplication.instance().quit()
     
@@ -538,7 +574,7 @@ class MainWindow(QMainWindow):
     def _update_settings_weather_image(self, weather_data: Dict[str, Any]):
         """更新设置窗口的气象预警图片（在主线程中执行）"""
         try:
-            if self.settings_window and self.settings_window.isVisible():
+            if self.settings_window and self.settings_window.isVisible():  # 仅在设置窗口可见时刷新气象图
                 self.settings_window.update_weather_image(weather_data)
         except Exception as e:
             logger.error(f"更新设置窗口气象预警图片失败: {e}")
@@ -731,6 +767,7 @@ class MainWindow(QMainWindow):
     def _open_settings(self):
         """打开设置窗口（尽量复用预创建实例，减少每次打开的卡顿）"""
         def _do_open_settings():
+            """在下一事件循环中打开或复用设置窗口。"""
             try:
                 from .settings_window import SettingsWindow
                 if self.settings_window is None:
@@ -748,6 +785,7 @@ class MainWindow(QMainWindow):
     def _open_history_window(self):
         """打开事件历史窗口（复用实例，减少重复创建开销）"""
         def _do_open_history():
+            """在下一事件循环中打开或复用事件历史窗口。"""
             try:
                 from .history_window import HistoryWindow
                 if self.history_window is None:
@@ -933,9 +971,11 @@ class MainWindow(QMainWindow):
         return self._event_history_store.get_entries_snapshot()
 
     def export_event_history_csv(self, path: str) -> bool:
+        """导出事件历史为 CSV 文件。"""
         return self._event_history_store.export_csv(path)
 
     def export_event_history_json(self, path: str) -> bool:
+        """导出事件历史为 JSON 文件。"""
         return self._event_history_store.export_json(path)
 
     def clear_event_history(self):
@@ -1204,7 +1244,7 @@ class MainWindow(QMainWindow):
                         logger.warning(f"速报消息更新失败: {next_msg.source} - {next_msg.text}")
             
             # 如果当前显示的是预警，但预警缓冲区已空，根据配置切换到速报或仅自定义文本
-            if self._display_type_is_warning_or_test(self.current_display_type) and self.warning_buffer.size() == 0:
+            if self._display_type_is_warning_or_test(self.current_display_type) and self.warning_buffer.size() == 0:  # 预警播完后若已无有效预警，立即回到速报/自定义
                 if self.report_buffer.size() > 0 and not self._switching_to_report:
                     use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
                     enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
@@ -1581,15 +1621,16 @@ class MainWindow(QMainWindow):
         place_name: str = "测试地点",
         magnitude: float = 5.0,
         epi_intensity: float = 7.0,
-    ) -> None:
+    ) -> bool:
         """
         模拟触发预警告警序列（供设置「模拟预警」使用）。
         使用固定震中坐标与给定 epiIntensity，不污染消息缓冲区。
+        返回 True 表示已成功启动告警序列。
         """
         try:
             if self.alert_controller is None:
                 logger.warning("AlertController 未初始化，无法模拟告警")
-                return
+                return False
             ei = float(epi_intensity)
             lv = int(round(min(12.0, max(1.0, ei))))
             parsed = {
@@ -1603,13 +1644,54 @@ class MainWindow(QMainWindow):
                 "event_id": f"test-{int(time.time() * 1000)}",
                 "epiIntensity": ei,
                 "shock_time": timezone_utils.now_display_str(),
+                "_simulate": True,
             }
             text = f"【模拟】{place_name}附近发生{magnitude:.1f}级地震（预估最大烈度 {lv}）"
             color = self.config.message_config.warning_color
-            if self.alert_controller.trigger(parsed, None, text, color):
+
+            ac = self.config.alert_config
+            feedback_mode = str(getattr(ac, "alert_feedback_mode", "sound") or "sound").strip().lower()
+            if feedback_mode == "tts":
+                trigger_alert_feedback(
+                    self.config,
+                    "warning",
+                    parsed,
+                    display_text=text,
+                )
+            else:
+                play_alert_sound(
+                    self.config,
+                    "warning",
+                    parsed_data=parsed,
+                    force=True,
+                )
+
+            if self.alert_controller.trigger(parsed, None, text, color, simulate=True):
                 self.current_display_type = "test"
+                logger.info(
+                    "模拟预警已触发: place=%s mag=%.1f epi=%.1f",
+                    place_name,
+                    magnitude,
+                    ei,
+                )
+                return True
+
+            ac_enabled = bool(getattr(ac, "enabled", False))
+            min_mag = float(getattr(ac, "min_magnitude", 3.0) or 0.0)
+            if magnitude < min_mag:
+                logger.warning(
+                    "模拟预警未触发: 震级 %.1f 低于最低阈值 %.1f",
+                    magnitude,
+                    min_mag,
+                )
+            elif not ac_enabled:
+                logger.info("模拟预警: 告警序列未启用，已尝试播放音频反馈")
+            else:
+                logger.warning("模拟预警未触发: 不满足烈度/震级条件或序列被占用")
+            return False
         except Exception as e:
             logger.error(f"模拟告警触发失败: {e}")
+            return False
 
     def _should_process_data_source_message(self, source_name: str, parsed_data: Dict[str, Any]) -> bool:
         """
@@ -1789,11 +1871,7 @@ class MainWindow(QMainWindow):
                 # - Wolfx JMA 使用 warning_shock_validity_seconds_nied
                 # - Wolfx 四川使用 warning_shock_validity_seconds_early_est
                 if not self.message_processor._is_warning_valid(parsed_data):
-                    logger.warning(
-                        f"预警消息已过期（on_message_received 阶段），忽略: "
-                        f"source={source_name}, source_type={parsed_data.get('source_type')}, "
-                        f"place_name={parsed_data.get('place_name')}, event_id={parsed_data.get('event_id')}"
-                    )
+                    _log_expired_warning_ignored(source_name, parsed_data)
                     return
             
             message = self.message_processor.format_message(parsed_data)
@@ -1820,12 +1898,16 @@ class MainWindow(QMainWindow):
                         parsed_data,
                         display_text=message,
                     )
-            else:
+            elif message_type == "warning":
                 play_alert_sound(
                     self.config,
                     message_type,
-                    parsed_data=parsed_data if message_type == "warning" else None,
+                    parsed_data=parsed_data,
                 )
+            if message_type == "warning":
+                play_jma_eew_alert_sound(self.config, parsed_data=parsed_data)
+            elif message_type == "report" and (parsed_data.get("source_type") or "").strip().lower() == "p2pquake":
+                play_nhk_news_bell(self.config, parsed_data=parsed_data)
             if message_type == "warning":
                 show_event_notification(
                     self.config,
@@ -1945,6 +2027,7 @@ class MainWindow(QMainWindow):
             return
 
         def render_worker():
+            """后台线程：生成沙滩球或烈度图并回主线程更新消息项。"""
             image_path = None
             pd = msg_item.parsed_data
             try:
@@ -1965,6 +2048,7 @@ class MainWindow(QMainWindow):
                 logger.warning(f"异步生成速报配图失败 ({msg_item.source}): {e}")
             if image_path:
                 def apply_update():
+                    """回主线程：将生成的配图路径写入当前消息项。"""
                     msg_item.image_after_text = True
                     self._update_message_image_path(msg_item, image_path)
                     logger.info(f"✓ 速报配图已异步生成: {image_path}")
@@ -1979,6 +2063,7 @@ class MainWindow(QMainWindow):
     def _start_message_processing(self):
         """启动消息处理循环"""
         def process_messages():
+            """定时从队列批量取消息并分类写入缓冲区、驱动字幕切换。"""
             if not self.running:
                 return
             
@@ -2130,6 +2215,7 @@ class MainWindow(QMainWindow):
                             if msg.message_type == 'weather' and not msg.image_path and msg.parsed_data:
                                 # 在后台线程中异步获取图片路径
                                 def get_image_path_async(msg_item=msg):
+                                    """后台线程：解析气象预警图片 URL 并回主线程更新。"""
                                     try:
                                         image_path = self.message_processor.get_weather_image_path(msg_item.parsed_data)
                                         if image_path:
@@ -2155,6 +2241,15 @@ class MainWindow(QMainWindow):
                         multi_message_sources = {'fanstudio_aqi'}
                         single_source_messages = [msg for msg in all_messages if msg.source not in multi_message_sources]
                         multi_source_messages = [msg for msg in all_messages if msg.source in multi_message_sources]
+                        if multi_source_messages:
+                            latest_aqi_tp = max(
+                                (m.shock_time or "" for m in multi_source_messages if m.source == "fanstudio_aqi"),
+                                default="",
+                            )
+                            if latest_aqi_tp:
+                                self.report_buffer.purge_fanstudio_aqi_stale(
+                                    "fanstudio_aqi", latest_aqi_tp
+                                )
                         single_results = self.report_buffer.batch_replace_by_source(single_source_messages) if single_source_messages else []
                         multi_results = self.report_buffer.batch_replace_or_add(multi_source_messages) if multi_source_messages else []
                         
@@ -2254,6 +2349,7 @@ class MainWindow(QMainWindow):
             
             # 在单独线程中运行WebSocket连接
             def ws_thread():
+                """独立线程中运行 asyncio 事件循环，管理全部 WebSocket 连接。"""
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 self._ws_loop = loop

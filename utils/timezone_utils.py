@@ -14,8 +14,9 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo  # type: ignore
 
-# 延迟导入 config 避免循环依赖
+# 延迟导入 config，避免循环依赖
 def _get_config():
+    """延迟加载 Config 单例，避免模块导入时的循环依赖。"""
     from config import Config
     return Config()
 
@@ -24,7 +25,7 @@ def get_display_zone():
     """返回当前配置的显示时区 ZoneInfo，异常时退回 Asia/Shanghai。"""
     try:
         tz_name = _get_config().gui_config.timezone
-        if not tz_name:
+        if not tz_name:  # 未配置时默认上海时区
             return ZoneInfo("Asia/Shanghai")
         return ZoneInfo(tz_name)
     except Exception:
@@ -43,7 +44,7 @@ def utc_to_display(utc_time_str: str) -> str:
             dt = datetime.fromisoformat(s)
         except ValueError:
             return utc_time_str
-        if dt.tzinfo is None:
+        if dt.tzinfo is None:  # 无时区信息则视为 UTC
             dt = dt.replace(tzinfo=timezone.utc)
         display_dt = dt.astimezone(get_display_zone())
         return display_dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -126,7 +127,7 @@ def timestamp_to_display(ts: int) -> str:
         if ts is None:
             return ""
         t = int(ts)
-        if t > 10000000000:
+        if t > 10000000000:  # 毫秒时间戳转为秒
             t = t // 1000
         dt = datetime.fromtimestamp(t, tz=timezone.utc)
         display_dt = dt.astimezone(get_display_zone())
@@ -184,7 +185,7 @@ def flexible_time_to_display(time_str: str) -> str:
     气象预警等混合格式：优先解析带时区偏移的 ISO8601（含 Z），否则按北京时间朴素串解析。
     """
     s = (time_str or "").strip()
-    if not s:
+    if not s:  # 空字符串直接返回
         return ""
     s_iso = s.replace("Z", "+00:00").replace("z", "+00:00")
     if "T" in s_iso:

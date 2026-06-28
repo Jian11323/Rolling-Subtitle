@@ -105,13 +105,13 @@ class Color48Picker(QDialog):
         grid_layout.setSpacing(5)
         
         # 创建颜色按钮（8列）
-        cols = 8
+        cols = 8  # 48 色按 8 列排布，便于快速浏览
         for i, color in enumerate(self.COLORS_48):
             row = i // cols
             col = i % cols
             
             color_btn = QPushButton()
-            color_btn.setFixedSize(40, 40)
+            color_btn.setFixedSize(40, 40)  # 方块按钮，便于快速点选
             color_btn.setStyleSheet(
                 f"background-color: {color}; "
                 "border: 2px solid #CCCCCC; "

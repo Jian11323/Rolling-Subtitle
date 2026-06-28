@@ -15,11 +15,11 @@ def show_event_notification(config: Any, title: str, body: str) -> None:
     """异步显示系统通知。"""
     gc = getattr(config, "gui_config", None)
     if gc is None or not getattr(gc, "toast_notifications_enabled", False):
-        return
+        return  # 未启用系统通知
     title = (title or "地震情报").strip()[:120]
     body = (body or "").strip()[:500]
     if not body:
-        return
+        return  # 无正文不弹通知
 
     def _run() -> None:
         try:
@@ -27,7 +27,7 @@ def show_event_notification(config: Any, title: str, body: str) -> None:
                 try:
                     from win10toast import ToastNotifier
                     ToastNotifier().show_toast(title, body, duration=8, threaded=True)
-                    return
+                    return  # win10toast 成功则结束
                 except Exception:
                     pass
                 try:
@@ -60,11 +60,11 @@ def show_event_notification(config: Any, title: str, body: str) -> None:
             try:
                 from PyQt5.QtWidgets import QSystemTrayIcon
                 from PyQt5.QtGui import QIcon
-                # 无托盘实例时跳过
+                # 无托盘实例时跳过（此处仅探测 Qt 是否可用）
                 _ = QSystemTrayIcon
             except Exception:
                 pass
         except Exception as e:
             logger.debug(f"系统通知失败: {e}")
 
-    threading.Thread(target=_run, daemon=True, name="DesktopNotify").start()
+    threading.Thread(target=_run, daemon=True, name="DesktopNotify").start()  # 异步避免阻塞主线程

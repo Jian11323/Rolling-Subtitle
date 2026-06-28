@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from .base_adapter import BaseAdapter
 from utils import timezone_utils
 
-CAP_NS = {"cap": "urn:oasis:names:tc:emergency:cap:1.2"}
+CAP_NS = {"cap": "urn:oasis:names:tc:emergency:cap:1.2"}  # CAP 1.2 XML 命名空间
 
 
 class PtwcAdapter(BaseAdapter):
@@ -18,6 +18,7 @@ class PtwcAdapter(BaseAdapter):
     response_format = "xml"
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 PTWC CAP 1.2 XML 原始数据，返回标准化事件字典。"""
         if raw_data is None:
             return None
         if isinstance(raw_data, bytes):
@@ -44,6 +45,7 @@ class PtwcAdapter(BaseAdapter):
         return self._parse_alert(alert)
 
     def _cap_text(self, parent: ET.Element, tag: str) -> str:
+        """从 CAP 元素中提取指定标签的文本（兼容命名空间）。"""
         for el in parent.iter():
             if el.tag.endswith(tag):
                 return (el.text or "").strip()
@@ -53,12 +55,14 @@ class PtwcAdapter(BaseAdapter):
         return ""
 
     def _cap_info_list(self, alert: ET.Element) -> List[ET.Element]:
+        """获取 alert 下所有 info 节点。"""
         infos = alert.findall("cap:info", CAP_NS)
         if not infos:
             infos = [el for el in alert if el.tag.endswith("info")]
         return infos
 
     def _cap_parameters(self, info: ET.Element) -> Dict[str, str]:
+        """提取 info 内 parameter 键值对（如震级、深度、坐标）。"""
         params: Dict[str, str] = {}
         for el in info.iter():
             if not el.tag.endswith("parameter"):
@@ -80,6 +84,7 @@ class PtwcAdapter(BaseAdapter):
         lon: float,
         mag_type: str,
     ) -> tuple:
+        """从 CAP parameter 字段填充地点、震级、深度与坐标。"""
         if params.get("EventLocationName"):
             place_name = params["EventLocationName"]
         if params.get("EventPreliminaryMagnitude"):
@@ -109,6 +114,7 @@ class PtwcAdapter(BaseAdapter):
         lon: float,
         mag_type: str,
     ) -> tuple:
+        """从 area/parameter 旧式结构补充震情字段。"""
         for area in info:
             if not area.tag.endswith("area"):
                 continue
@@ -145,6 +151,7 @@ class PtwcAdapter(BaseAdapter):
         lon: float,
         mag_type: str,
     ) -> tuple:
+        """从 description 文本正则回退提取震级与坐标。"""
         if not description:
             return magnitude, lat, lon, mag_type
         if not magnitude:
@@ -163,6 +170,7 @@ class PtwcAdapter(BaseAdapter):
         return magnitude, lat, lon, mag_type
 
     def _parse_alert(self, alert: ET.Element) -> Optional[Dict[str, Any]]:
+        """将 CAP alert 节点解析为标准化海啸/地震事件字典。"""
         infos = self._cap_info_list(alert)
         if not infos:
             return None
@@ -257,6 +265,7 @@ class PtwcAdapter(BaseAdapter):
         }
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """安全转换为浮点数，失败时返回默认值。"""
         try:
             if value is None:
                 return default
@@ -265,7 +274,9 @@ class PtwcAdapter(BaseAdapter):
             return default
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（PTWC 默认为速报）。"""
         return data.get("type", "report")
 
     def get_organization_name(self) -> str:
+        """返回 PTWC 机构显示名称。"""
         return "太平洋海啸预警中心 (PTWC)"

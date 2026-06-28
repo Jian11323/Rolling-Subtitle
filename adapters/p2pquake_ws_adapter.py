@@ -27,6 +27,7 @@ class P2PQuakeWebSocketAdapter(BaseAdapter):
     """P2PQuake WebSocket 适配器（仅解析 551、552）"""
 
     def __init__(self, source_name: str, source_url: str):
+        """初始化适配器，复用地震与海啸子适配器。"""
         super().__init__(source_name, source_url)
         self._eq_adapter = P2PQuakeAdapter('p2pquake', source_url)
         self._tsunami_adapter = P2PQuakeTsunamiAdapter('p2pquake_tsunami', source_url)
@@ -44,18 +45,18 @@ class P2PQuakeWebSocketAdapter(BaseAdapter):
                 return None
             code = data.get('code')
             if code not in P2PQUAKE_WS_CODES:
-                return None
+                return None  # 非 551/552 忽略
             mc = Config().message_config
             if code == 551:
                 if not getattr(mc, "p2pquake_parse_551", True):
-                    return None
+                    return None  # 设置页关闭地震情報解析
                 parsed = self._eq_adapter._parse_single_item(data)
                 if parsed:
                     parsed['source_type'] = 'p2pquake'
                 return parsed
             if code == 552:
                 if not getattr(mc, "p2pquake_parse_552", True):
-                    return None
+                    return None  # 设置页关闭津波予報解析
                 return self._tsunami_adapter.parse_single_item(data)
             return None
         except json.JSONDecodeError as e:
@@ -66,4 +67,5 @@ class P2PQuakeWebSocketAdapter(BaseAdapter):
             return None
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型。"""
         return data.get('type', 'report')

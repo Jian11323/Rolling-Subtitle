@@ -12,18 +12,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from utils.audio_alert import classify_eew_audio_tier
 from utils.logger import get_logger
+from utils.warning_feedback_dedup import (
+    register_warning_feedback_seen,
+    should_play_warning_feedback,
+)
 
 logger = get_logger()
 
 _play_lock = threading.Lock()
 _thread_local = threading.local()
 _tts_state_lock = threading.Lock()
+# 按 event_key 记录最近一次 TTS 播报状态
 _tts_last_by_event: Dict[str, Dict[str, Any]] = {}
+# 已朗读速报快照（用于速报去重）
 _tts_spoken_reports: list[Dict[str, Any]] = []
 _SPOKEN_REPORTS_MAX = 300
 _REPORT_TTS_MAX_AGE_SECONDS = 600  # 发震超过 10 分钟的速报不朗读，避免重连/轮询历史刷屏
 _WARNING_TTS_MAX_AGE_SECONDS = 300  # 发震超过 5 分钟的预警不朗读
 
+# TTS 重复策略常量
 _TTS_REPEAT_SMART = "smart"
 _TTS_REPEAT_FIRST_ONLY = "first_only"
 _TTS_REPEAT_ALWAYS = "always"
@@ -43,6 +50,7 @@ _SOURCE_NAME_MAP = {
 
 
 def _strip_brackets(text: str) -> str:
+    """去掉文本外层【】或 [] 括号。"""
     t = (text or "").strip()
     while len(t) >= 2 and t.startswith("【") and t.endswith("】"):
         t = t[1:-1].strip()
@@ -52,6 +60,7 @@ def _strip_brackets(text: str) -> str:
 
 
 def _sanitize_place_name(place_name: str) -> str:
+    """清理地名中的括号与多余空白，空值时返回「未知地点」。"""
     text = (place_name or "").strip()
     if not text:
         return "未知地点"
@@ -61,6 +70,7 @@ def _sanitize_place_name(place_name: str) -> str:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """安全转换为浮点数。"""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -68,6 +78,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def _fanstudio_cea_pr_org(province: str) -> str:
+    """将省级名称格式化为 TTS 可读机构名（如「四川省地震局」）。"""
     p = (province or "").strip()
     if not p:
         return "省级地震局"
@@ -200,6 +211,7 @@ def _report_org_for_tts(data: Dict[str, Any]) -> str:
 
 
 def _format_shock_time_for_tts(shock_time: str) -> str:
+    """将发震时间格式化为 TTS 中文读法（年月日时分秒）。"""
     if not shock_time or not str(shock_time).strip():
         return ""
     try:
@@ -219,6 +231,7 @@ def _format_shock_time_for_tts(shock_time: str) -> str:
 
 
 def _warning_updates_part(data: Dict[str, Any]) -> str:
+    """生成预警报数片段（第 N 报 / 最终报），无报数时返回空串。"""
     updates = data.get("updates")
     if updates is not None:
         try:
@@ -331,6 +344,7 @@ def build_tts_script(
 
 
 def _tts_tier_enabled(tier: str, alert_config: Any) -> bool:
+    """检查指定档位（felt/critical）的 TTS 是否已启用。"""
     tier = (tier or "").strip().lower()
     if tier == "felt":
         return bool(getattr(alert_config, "felt_tts_enabled", False))
@@ -340,6 +354,7 @@ def _tts_tier_enabled(tier: str, alert_config: Any) -> bool:
 
 
 def _tts_repeat_for_tier(tier: str, alert_config: Any) -> int:
+    """读取指定消息类型的 TTS 重复次数（1–10）。"""
     tier = (tier or "").strip().lower()
     if tier == "felt":
         repeat = getattr(alert_config, "felt_tts_repeat", 1)
@@ -361,6 +376,7 @@ def _tts_repeat_for_tier(tier: str, alert_config: Any) -> int:
 
 
 def _event_key(parsed_data: Dict[str, Any]) -> str:
+    """生成 TTS 去重用事件键（优先 event_id）。"""
     event_id = str(parsed_data.get("event_id") or parsed_data.get("id") or "").strip()
     if event_id:
         return event_id
@@ -374,6 +390,7 @@ def _event_key(parsed_data: Dict[str, Any]) -> str:
 
 
 def _warning_updates_value(data: Dict[str, Any]) -> Optional[int]:
+    """提取预警报数值；SA 源无报数字段时视为第 1 报。"""
     updates = data.get("updates")
     if updates is not None:
         try:
@@ -396,6 +413,7 @@ def _tts_state_record(
     tier: str,
     now: float,
 ) -> Dict[str, Any]:
+    """构建 TTS 去重状态快照。"""
     return {
         "time": now,
         "mag": mag,
@@ -405,64 +423,9 @@ def _tts_state_record(
     }
 
 
-def _is_warning_update_report(
-    parsed_data: Dict[str, Any],
-    prev: Optional[Dict[str, Any]],
-    tier: str,
-) -> bool:
-    """同一事件的预警更新报（报数增加或出现最终报）。"""
-    if tier not in ("felt", "critical") or prev is None:
-        return False
-    is_final = bool(parsed_data.get("final", False))
-    if is_final and not bool(prev.get("final", False)):
-        return True
-    current = _warning_updates_value(parsed_data)
-    if current is None or current <= 1:
-        return False
-    prev_updates = prev.get("updates")
-    if prev_updates is not None:
-        try:
-            prev_updates = int(prev_updates)
-        except (TypeError, ValueError):
-            prev_updates = None
-    if prev_updates is not None:
-        return current > prev_updates
-    return True
-
-
 def _should_speak_warning(parsed_data: Dict[str, Any], tier: str) -> bool:
     """预警：首报、更新报、震级/档位变化即朗读，不使用间隔时间。"""
-    if tier not in ("felt", "critical"):
-        return False
-
-    key = _event_key(parsed_data)
-    try:
-        mag = float(parsed_data.get("magnitude") or 0.0)
-    except (TypeError, ValueError):
-        mag = 0.0
-
-    now = time.time()
-    with _tts_state_lock:
-        prev = _tts_last_by_event.get(key)
-        record = _tts_state_record(parsed_data, mag, tier, now)
-
-        if prev is None:
-            _tts_last_by_event[key] = record
-            return True
-
-        if _is_warning_update_report(parsed_data, prev, tier):
-            _tts_last_by_event[key] = record
-            return True
-
-        prev_tier = str(prev.get("tier") or "")
-        prev_mag = float(prev.get("mag") or 0.0)
-        if prev_tier and prev_tier != tier:
-            _tts_last_by_event[key] = record
-            return True
-        if abs(prev_mag - mag) >= 0.5:
-            _tts_last_by_event[key] = record
-            return True
-        return False
+    return should_play_warning_feedback(parsed_data, tier)
 
 
 def _cenc_info_type_key(data: Dict[str, Any]) -> str:
@@ -543,6 +506,7 @@ def _is_same_report_event(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
 
 
 def _find_spoken_report_index(parsed_data: Dict[str, Any]) -> Optional[int]:
+    """在已朗读速报列表中查找与当前数据同一事件的索引。"""
     for idx in range(len(_tts_spoken_reports) - 1, -1, -1):
         if _is_same_report_event(parsed_data, _tts_spoken_reports[idx]):
             return idx
@@ -566,6 +530,7 @@ def _report_shock_age_seconds(parsed_data: Dict[str, Any]) -> Optional[float]:
 
 
 def _is_report_too_old_for_tts(parsed_data: Dict[str, Any]) -> bool:
+    """速报发震时间是否已超过允许朗读的最大年龄。"""
     age = _report_shock_age_seconds(parsed_data)
     if age is None:
         return False
@@ -573,6 +538,7 @@ def _is_report_too_old_for_tts(parsed_data: Dict[str, Any]) -> bool:
 
 
 def _is_warning_too_old_for_tts(parsed_data: Dict[str, Any]) -> bool:
+    """预警发震时间是否已超过允许朗读的最大年龄。"""
     age = _report_shock_age_seconds(parsed_data)
     if age is None:
         return False
@@ -621,6 +587,8 @@ def _register_tts_seen(
             tier_key = classify_eew_audio_tier(pd, ac) or "felt"
         if not tier_key:
             tier_key = "felt"
+        register_warning_feedback_seen(pd, tier_key)
+        return
     elif mt == "weather":
         tier_key = "weather"
     elif mt == "report" and pd.get("is_tsunami"):
@@ -701,6 +669,7 @@ def _should_speak_event(
 
 
 def _get_engine():
+    """获取当前线程的 pyttsx3 引擎实例（线程本地缓存）。"""
     if not hasattr(_thread_local, "engine"):
         import pyttsx3
 
@@ -713,6 +682,7 @@ def _get_engine():
 
 
 def _apply_engine_settings(alert_config: Any) -> None:
+    """将语速、音量、语音角色等设置应用到 TTS 引擎。"""
     engine = _get_engine()
     try:
         rate = int(getattr(alert_config, "tts_rate", 150) or 150)
@@ -743,6 +713,7 @@ def _apply_engine_settings(alert_config: Any) -> None:
 
 
 def list_tts_voices() -> Tuple[str, ...]:
+    """列举系统可用 TTS 语音 ID。"""
     try:
         engine = _get_engine()
         voices = engine.getProperty("voices") or []
@@ -753,6 +724,7 @@ def list_tts_voices() -> Tuple[str, ...]:
 
 
 def has_chinese_tts_voice() -> bool:
+    """检测系统是否安装了中文 TTS 语音包。"""
     try:
         engine = _get_engine()
         for voice in engine.getProperty("voices") or []:
@@ -765,6 +737,7 @@ def has_chinese_tts_voice() -> bool:
 
 
 def _speak_blocking(text: str, alert_config: Any, repeat: int = 1) -> None:
+    """在当前线程阻塞式朗读文本（仅 Windows SAPI）。"""
     script = (text or "").strip()
     if not script:
         return
@@ -783,6 +756,7 @@ def _speak_blocking(text: str, alert_config: Any, repeat: int = 1) -> None:
 
 
 def _feedback_mode(alert_config: Any) -> str:
+    """读取告警反馈模式：sound（声音）或 tts（语音）。"""
     mode = str(getattr(alert_config, "alert_feedback_mode", "sound") or "sound").strip().lower()
     if mode not in ("sound", "tts"):
         legacy = str(getattr(alert_config, "tts_playback_mode", "") or "").strip().lower()
@@ -806,6 +780,7 @@ def _run_tts_feedback(
     test_script: Optional[str] = None,
     test_repeat: int = 1,
 ) -> None:
+    """TTS 播报主逻辑：按消息类型生成脚本并阻塞朗读。"""
     ac = getattr(config, "alert_config", None)
     if ac is None:
         return
@@ -901,12 +876,11 @@ def _run_tts_feedback(
             pd.get("shock_time"),
         )
         return
-    if pd and not _should_speak_warning(pd, tier_key):
-        return
-
     script = build_warning_tts_script(pd, config)
     repeat = _tts_repeat_for_tier(tier_key, ac)
     with _play_lock:
+        if pd and not pd.get("_simulate") and not _should_speak_warning(pd, tier_key):
+            return
         _speak_blocking(script, ac, repeat)
 
 
@@ -935,6 +909,7 @@ def trigger_alert_feedback(
 
 
 def _entry_is_tsunami(entry: Dict[str, Any]) -> bool:
+    """判断历史条目是否为海啸类速报。"""
     pd = entry.get("parsed_data") or {}
     if not isinstance(pd, dict):
         return False
@@ -1104,6 +1079,7 @@ def test_tts_alert(
     history: Optional[List[Dict[str, Any]]] = None,
     tier: str = "felt",
 ) -> bool:
+    """设置页测试：朗读历史中最新的预警条目。"""
     _ = tier
     return test_tts_from_latest(config, history, "warning")
 
@@ -1112,6 +1088,7 @@ def test_tts_report(
     config: Any,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
+    """设置页测试：朗读历史中最新的 CENC 速报条目。"""
     return test_tts_from_latest(config, history, "report")
 
 
@@ -1119,6 +1096,7 @@ def test_tts_weather(
     config: Any,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
+    """设置页测试：朗读历史中最新的气象预警条目。"""
     return test_tts_from_latest(config, history, "weather")
 
 
@@ -1126,4 +1104,5 @@ def test_tts_tsunami(
     config: Any,
     history: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
+    """设置页测试：朗读历史中最新的海啸条目。"""
     return test_tts_from_latest(config, history, "tsunami")

@@ -19,7 +19,7 @@ from utils.resource_path import get_cmt_weather_cache_root
 
 logger = get_logger()
 
-BEACHBALL_SIZE_PX = 96
+BEACHBALL_SIZE_PX = 96  # 滚动字幕图标区沙滩球默认像素尺寸
 
 
 def _parse_nodal_plane(nodal_plane_str: str) -> Optional[tuple]:

@@ -35,22 +35,22 @@ class RegionNameFixer:
         self._loaded = False
         
         if json_file_path is None:
-            # 获取资源文件路径，兼容PyInstaller打包后的情况
+            # 获取资源文件路径，兼容 PyInstaller 打包后的情况
             try:
-                # PyInstaller打包后会设置sys._MEIPASS
+                # PyInstaller 打包后会设置 sys._MEIPASS
                 base_path = Path(sys._MEIPASS)  # type: ignore
             except (AttributeError, TypeError):
                 # 开发环境，使用项目根目录
                 try:
                     base_path = Path(__file__).parent.parent
                 except Exception:
-                    # 如果都失败，使用当前工作目录
+                    # 若上述均失败，使用当前工作目录
                     base_path = Path.cwd()
             
-            # 根据数据源类型选择对应JSON文件，并在多个目录名间自动回退
-            if self.source_type == 'sa':
+            # 根据数据源类型选择对应 JSON 文件，并在多个目录名间自动回退
+            if self.source_type == 'sa':  # ShakeAlert 美国区域数据
                 target_filename = "sa_region_data.json"
-            elif self.source_type in ['kma', 'kma-eew']:
+            elif self.source_type in ['kma', 'kma-eew']:  # 韩国气象厅区域数据
                 target_filename = "korea_region_data.json"
             else:
                 logger.warning(f"不支持的数据源类型: {source_type}")
@@ -62,7 +62,7 @@ class RegionNameFixer:
                 if candidate.exists():
                     resolved_path = candidate
                     break
-                # 首次初始化时优先尝试新目录，若都不存在则回落到新目录候选路径并给出告警
+                # 首次初始化时优先尝试新目录；若均不存在则回落到默认候选路径并告警
                 if resolved_path is None:
                     resolved_path = base_path / _REGION_DATA_DIR_CANDIDATES[0] / target_filename
             json_file_path = resolved_path
@@ -79,8 +79,8 @@ class RegionNameFixer:
             logger.warning(f"区域地名修正文件不存在: {self.json_file_path}")
     
     def _load_json_file(self):
-        """加载JSON格式的区域数据文件"""
-        if self._loaded:
+        """加载 JSON 格式的区域边界数据文件。"""
+        if self._loaded:  # 避免重复加载 JSON
             return
         
         logger.info(f"正在加载区域地名修正文件: {self.json_file_path}")
@@ -103,7 +103,7 @@ class RegionNameFixer:
             logger.error(f"加载区域地名修正文件失败: {e}")
             return
         
-        # 提取regions数组
+        # 提取 regions 数组
         if isinstance(data, dict) and 'regions' in data:
             self.regions = data['regions']
         elif isinstance(data, list):
@@ -139,7 +139,7 @@ class RegionNameFixer:
                 return place_name
         
         # 检查是否有有效数据
-        if not self.regions:
+        if not self.regions:  # 无区域数据则无法修正
             return place_name
         
         # 查找包含该经纬度的区域
@@ -156,7 +156,7 @@ class RegionNameFixer:
                 region_name and
                 lat_min <= latitude <= lat_max and
                 lon_min <= longitude <= lon_max):
-                if region_name != place_name:
+                if region_name != place_name:  # 仅在修正结果变化时打 debug 日志
                     logger.debug(f"区域地名修正: {place_name} -> {region_name} (数据源: {self.source_type}, 坐标: {latitude}, {longitude})")
                 return region_name
         
@@ -178,7 +178,7 @@ _kma_region_fixer = None
 
 
 def get_sa_region_fixer():
-    """获取USGS/SA区域地名修正器实例（单例模式）"""
+    """获取 USGS/SA 区域地名修正器实例（单例模式）。"""
     global _sa_region_fixer
     if _sa_region_fixer is None:
         try:
@@ -190,7 +190,7 @@ def get_sa_region_fixer():
 
 
 def get_kma_region_fixer():
-    """获取KMA区域地名修正器实例（单例模式）"""
+    """获取 KMA 区域地名修正器实例（单例模式）。"""
     global _kma_region_fixer
     if _kma_region_fixer is None:
         try:

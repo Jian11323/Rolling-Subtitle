@@ -105,6 +105,7 @@ class CustomAdapter(BaseAdapter):
         }
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """安全转换为浮点数。"""
         try:
             if value is None:
                 return default
@@ -113,4 +114,5 @@ class CustomAdapter(BaseAdapter):
             return default
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（自定义源默认为预警）。"""
         return data.get("type", "warning")

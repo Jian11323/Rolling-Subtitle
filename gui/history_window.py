@@ -35,6 +35,7 @@ class HistoryWindow(QDialog):
     """事件历史窗口"""
 
     def __init__(self, parent=None):
+        """创建历史窗口，绑定 2 秒自动刷新定时器。"""
         super().__init__(parent)
         self.setWindowTitle("事件历史")
         self.resize(980, 520)
@@ -43,11 +44,12 @@ class HistoryWindow(QDialog):
         self.setStyleSheet(light_dialog_stylesheet("#FFFFFF"))
         self._setup_ui()
         self._auto_refresh_timer = QTimer(self)
-        self._auto_refresh_timer.setInterval(2000)
+        self._auto_refresh_timer.setInterval(2000)  # 每 2 秒刷新历史表格
         self._auto_refresh_timer.timeout.connect(self.refresh_history)
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        """构建表格与导出/清空/关闭按钮。"""
+        layout = QVBoxLayout(self)  # 主垂直布局
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
@@ -59,7 +61,7 @@ class HistoryWindow(QDialog):
         self.table.setHorizontalHeaderLabels(
             ["接收时间", "数据源", "类型", "事件时间", "内容"]
         )
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)  # 只读表格
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.verticalHeader().setVisible(False)
@@ -110,10 +112,12 @@ class HistoryWindow(QDialog):
         layout.addLayout(btn_row)
 
     def _parent_main(self):
+        """获取父级 MainWindow 实例。"""
         p = self.parent()
         return p if p is not None else None
 
     def _get_rows(self) -> List[Dict[str, Any]]:
+        """从主窗口读取完整历史或 per-source 快照。"""
         parent = self._parent_main()
         if parent is None:
             return []
@@ -125,9 +129,10 @@ class HistoryWindow(QDialog):
         return []
 
     def refresh_history(self):
+        """刷新表格：按接收时间倒序，合并数据源用斜杠分隔。"""
         try:
             rows = self._get_rows()
-            rows = sorted(rows, key=lambda x: x.get("received_at", ""), reverse=True)
+            rows = sorted(rows, key=lambda x: x.get("received_at", ""), reverse=True)  # 最新记录排最前
             self.table.setRowCount(len(rows))
             for row_idx, item in enumerate(rows):
                 merged = item.get("merged_sources") or []
@@ -150,6 +155,7 @@ class HistoryWindow(QDialog):
             logger.error(f"刷新事件历史失败: {e}")
 
     def _export_csv(self):
+        """调用主窗口导出 CSV 并提示结果。"""
         parent = self._parent_main()
         if parent is None or not hasattr(parent, "export_event_history_csv"):
             return
@@ -160,6 +166,7 @@ class HistoryWindow(QDialog):
         show_info(self, "导出", "导出成功" if ok else "导出失败")
 
     def _export_json(self):
+        """调用主窗口导出 JSON 并提示结果。"""
         parent = self._parent_main()
         if parent is None or not hasattr(parent, "export_event_history_json"):
             return
@@ -170,23 +177,27 @@ class HistoryWindow(QDialog):
         show_info(self, "导出", "导出成功" if ok else "导出失败")
 
     def _clear_history(self):
+        """清空主窗口历史缓冲并刷新表格。"""
         parent = self._parent_main()
         if parent is not None and hasattr(parent, "clear_event_history"):
             parent.clear_event_history()
         self.refresh_history()
 
     def showEvent(self, event):
+        """窗口显示时立即刷新并启动自动刷新定时器。"""
         super().showEvent(event)
         self.refresh_history()
         if not self._auto_refresh_timer.isActive():
             self._auto_refresh_timer.start()
 
     def hideEvent(self, event):
+        """窗口隐藏时停止自动刷新以节省资源。"""
         if self._auto_refresh_timer.isActive():
             self._auto_refresh_timer.stop()
         super().hideEvent(event)
 
     def _set_item(self, row: int, col: int, value: str):
+        """设置表格单元格文本并左对齐。"""
         text = "" if value is None else str(value)
         item = QTableWidgetItem(text)
         item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)

@@ -13,18 +13,18 @@ import traceback
 from datetime import datetime
 
 # 添加项目根目录到路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 让同级模块可直接导入
 
 # 启动/崩溃日志：exe 同目录，使用统一 exe 路径以支持中文路径
 def _startup_log_path():
     try:
         from utils.resource_path import get_executable_dir
         base = get_executable_dir()
-        return os.path.join(base, "启动日志.txt")
+        return os.path.join(base, "启动日志.txt")  # exe 同目录启动日志
     except Exception:
         try:
             base = os.path.dirname(os.path.abspath(sys.argv[0] or __file__))
-            return os.path.join(base, "启动日志.txt")
+            return os.path.join(base, "启动日志.txt")  # 回退到脚本所在目录
         except Exception:
             return "启动日志.txt"
 
@@ -40,9 +40,9 @@ _write_startup_log("启动时间: " + datetime.now().isoformat())
 
 # 检查必要的依赖
 try:
-    import websockets
-    import requests
-    from PyQt5.QtWidgets import QApplication, QMessageBox
+    import websockets  # WebSocket 通信依赖
+    import requests  # HTTP 请求依赖
+    from PyQt5.QtWidgets import QApplication, QMessageBox  # GUI 主框架
 except ImportError as e:
     _write_startup_log("ImportError: " + str(e))
     print(f"错误: 缺少必要的依赖包: {e}")
@@ -52,9 +52,9 @@ except ImportError as e:
 
 # 导入阶段异常也写入启动日志，便于打包后闪退排查
 try:
-    from config import Config
-    from utils.logger import get_logger
-    from gui import MainWindow
+    from config import Config  # 全局配置入口
+    from utils.logger import get_logger  # 日志工具
+    from gui import MainWindow  # 主窗口
 
     logger = get_logger()
 
@@ -90,7 +90,7 @@ def main():
         # 加载配置
         config = Config()
         logger.set_log_config(config.log_config)
-        logger.info(f"数据源: {len(config.ws_urls)}个")
+        logger.info(f"数据源: {len(config.ws_urls)}个")  # 记录启动时启用的数据源数量
 
         render_backend = getattr(config.gui_config, 'render_backend', None) or ("opengl" if config.gui_config.use_gpu_rendering else "cpu")
         # 在创建 QApplication 之前设置 OpenGL（仅当选择 OpenGL 时）
@@ -114,7 +114,7 @@ def main():
             logger.info("已选择 CPU（软件）渲染，跳过 OpenGL 设置")
 
         # 创建QApplication
-        app = QApplication(sys.argv)
+        app = QApplication(sys.argv)  # Qt 应用主对象
 
         # 打包版单实例：避免连开两个 exe 时各自弹出「发现新版本」等重复流程
         try:
@@ -200,7 +200,7 @@ def main():
         logger.debug("使用PyQt5 GUI框架")
 
         # 运行主循环
-        sys.exit(app.exec_())
+        sys.exit(app.exec_())  # 进入 GUI 事件循环
 
     except KeyboardInterrupt:
         logger.info("程序被用户中断")

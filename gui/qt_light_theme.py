@@ -13,6 +13,7 @@ from typing import Optional
 from PyQt5.QtWidgets import QMessageBox, QWidget
 from PyQt5.QtGui import QColor, QPalette
 
+# 浅色滚动条样式表，供 QScrollArea / QTableWidget 等复用
 LIGHT_SCROLLBAR_QSS = """
 QScrollBar:vertical {
     background: #F5F5F5;
@@ -74,7 +75,7 @@ def apply_light_palette(
     pal.setColor(QPalette.Button, bg_color)
     pal.setColor(QPalette.ButtonText, text_color)
     widget.setPalette(pal)
-    widget.setAutoFillBackground(True)
+    widget.setAutoFillBackground(True)  # 强制用 palette 填充背景
 
 
 def light_dialog_stylesheet(bg: str = "#FFFFFF") -> str:
@@ -93,6 +94,7 @@ def _prepare_message_box(
     title: str,
     text: str,
 ) -> QMessageBox:
+    """创建并应用浅色主题的 QMessageBox 实例。"""
     msg = QMessageBox(parent)
     msg.setIcon(icon)
     msg.setWindowTitle(title)
@@ -109,14 +111,17 @@ def _prepare_message_box(
 
 
 def show_info(parent: Optional[QWidget], title: str, text: str) -> None:
+    """显示浅色主题信息对话框。"""
     _prepare_message_box(parent, QMessageBox.Information, title, text).exec_()
 
 
 def show_warning(parent: Optional[QWidget], title: str, text: str) -> None:
+    """显示浅色主题警告对话框。"""
     _prepare_message_box(parent, QMessageBox.Warning, title, text).exec_()
 
 
 def show_critical(parent: Optional[QWidget], title: str, text: str) -> None:
+    """显示浅色主题错误对话框。"""
     _prepare_message_box(parent, QMessageBox.Critical, title, text).exec_()
 
 
@@ -127,6 +132,7 @@ def show_question(
     buttons=QMessageBox.Yes | QMessageBox.No,
     default_button=QMessageBox.Yes,
 ) -> int:
+    """显示浅色主题确认对话框，返回用户点击的标准按钮。"""
     msg = _prepare_message_box(parent, QMessageBox.Question, title, text)
     msg.setStandardButtons(buttons)
     msg.setDefaultButton(default_button)

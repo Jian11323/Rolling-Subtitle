@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-_SINGLETON_KEY = "RollingSubtitle_EarthquakeScroller_SingleInstance"
+_SINGLETON_KEY = "RollingSubtitle_EarthquakeScroller_SingleInstance"  # QLocalServer 锁名
 
 
 def try_acquire_single_instance(app: Any) -> bool:
@@ -13,7 +13,7 @@ def try_acquire_single_instance(app: Any) -> bool:
     若当前为打包版且已有实例在运行，返回 False。
     调用方应在创建主窗口、执行启动时更新检查之前调用。
     """
-    if not getattr(sys, "frozen", False):
+    if not getattr(sys, "frozen", False):  # 开发环境允许多开，便于调试
         return True
     try:
         from PyQt5.QtNetwork import QLocalServer, QLocalSocket
@@ -22,13 +22,13 @@ def try_acquire_single_instance(app: Any) -> bool:
 
     probe = QLocalSocket()
     probe.connectToServer(_SINGLETON_KEY)
-    if probe.waitForConnected(500):
+    if probe.waitForConnected(500):  # 已有实例在监听，拒绝本次启动
         probe.disconnectFromServer()
         return False
 
     server = QLocalServer(app)
-    QLocalServer.removeServer(_SINGLETON_KEY)
-    if not server.listen(_SINGLETON_KEY):
+    QLocalServer.removeServer(_SINGLETON_KEY)  # 清理上次异常退出遗留的 socket
+    if not server.listen(_SINGLETON_KEY):  # 监听失败时放行，避免误拦启动
         return True
     app._rolling_single_instance_server = server
     return True

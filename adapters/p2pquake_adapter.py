@@ -22,6 +22,7 @@ class P2PQuakeAdapter(BaseAdapter):
     """P2PQuake数据源适配器（日本气象厅地震情报）"""
     
     def __init__(self, source_name: str, source_url: str):
+        """初始化 P2PQuake 地震情报适配器。"""
         super().__init__(source_name, source_url)
     
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
@@ -146,6 +147,10 @@ class P2PQuakeAdapter(BaseAdapter):
             organization = self.get_organization_name()
             
             # 构建结果
+            eq_time_raw = earthquake.get('time', '')
+            event_id = item.get('id') or ''
+            if not str(event_id).strip():
+                event_id = f"p2pquake:{place_name}:{eq_time_raw}:{latitude:.4f}:{longitude:.4f}"
             result = {
                 'type': 'report',  # 日本气象厅地震情报属于速报类型
                 'source_type': 'p2pquake',
@@ -156,7 +161,7 @@ class P2PQuakeAdapter(BaseAdapter):
                 'place_name': place_name,
                 'shock_time': shock_time,
                 'organization': organization,
-                'event_id': item.get('id', ''),
+                'event_id': event_id,
                 'raw_data': item,
             }
             

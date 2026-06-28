@@ -16,16 +16,16 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
-    Config,
-    APP_VERSION,
-    P2PQUAKE_WSS_URL,
-    FANSTUDIO_HTTP_SOURCE_KEYS,
-    BMKG_HTTP_URL,
-    GEONET_HTTP_URL,
-    INGV_HTTP_URL,
-    EARLYEST_HTTP_URL,
-    JMA_ATOM_LONG_URL,
-    PTWC_CAP_URL,
+    Config,  # 读取应用配置
+    APP_VERSION,  # 用于设置 User-Agent 的版本号
+    P2PQUAKE_WSS_URL,  # P2PQuake 总开关对应的 WSS 地址
+    FANSTUDIO_HTTP_SOURCE_KEYS,  # Fan Studio HTTP 数据源键集合
+    BMKG_HTTP_URL,  # 印尼 BMKG 地震数据地址
+    GEONET_HTTP_URL,  # 新西兰 GeoNet 地震数据地址
+    INGV_HTTP_URL,  # 意大利 INGV 地震数据地址
+    EARLYEST_HTTP_URL,  # INGV Early-est 数据地址
+    JMA_ATOM_LONG_URL,  # 日本气象厅火山 XML 地址
+    PTWC_CAP_URL,  # PTWC 海啸 CAP 地址
 )
 from adapters import (
     FanStudioHttpAdapter,
@@ -44,7 +44,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 多路 HTTP 数据源同时启动时，各线程首次请求前的错开间隔（秒），减轻瞬时负载
-HTTP_POLL_STARTUP_STAGGER_SEC = 1.0
+HTTP_POLL_STARTUP_STAGGER_SEC = 1.0  # 启动阶段错峰首包请求
 
 
 def is_http_source_enabled(config: Config, url: str) -> bool:
@@ -55,9 +55,9 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
-        return True
+        return True  # 自定义 HTTP 源只要 URL 匹配就允许轮询
     if not config.enabled_sources.get(url, False):
-        return False
+        return False  # 未启用的数据源直接跳过
     if "api.p2pquake.net" in low:
         if not config.enabled_sources.get(P2PQUAKE_WSS_URL, False):
             return False
@@ -90,8 +90,8 @@ class HTTPPollingConnection:
         self.adapter = adapter
         self.config = config
         self.poll_interval = poll_interval
-        self._running = True
-        self._last_poll_time = 0
+        self._running = True  # 连接存活标志
+        self._last_poll_time = 0  # 上次轮询时间戳
         self._last_data_hash = None  # 用于检测数据变化
         self._last_error_log_time = 0.0  # 重复错误降噪：上次打 ERROR 的时间
         self._last_error_msg = ""  # 重复错误降噪：上次错误摘要
@@ -99,16 +99,23 @@ class HTTPPollingConnection:
         self.last_request_time = 0.0  # 最近一次请求时间
         self._session = requests.Session()
         self._session.headers.update({
-            'User-Agent': f'EarthquakeScroller/{APP_VERSION}'
+            'User-Agent': f'EarthquakeScroller/{APP_VERSION}'  # 统一请求标识，便于服务端识别
         })
         
         # 所有HTTP数据源都需要禁用代理
         self._session.proxies = {
             'http': None,
             'https': None
-        }
+        }  # 强制直连，避免系统代理影响轮询
         logger.debug(f"[{self.source_name}] 已禁用代理（HTTP数据源）")
-    
+
+    def _request_verify_ssl(self) -> bool:
+        """自定义 HTTP 源可配置跳过 SSL 校验；其余源始终校验。"""
+        custom_url = (self.config.custom_data_source_url or "").strip()
+        if custom_url and self.url == custom_url:
+            return not bool(getattr(self.config, 'custom_data_source_insecure_ssl', False))
+        return True
+
     def start(
         self,
         message_callback: Callable[[str, Dict], None],
@@ -121,6 +128,7 @@ class HTTPPollingConnection:
             startup_delay: 线程启动后、首次轮询前的等待秒数（用于多源错开首包请求）
         """
         def poll_loop():
+            """轮询线程主循环：按间隔调用 _poll 并处理异常。"""
             if startup_delay and startup_delay > 0:
                 time.sleep(startup_delay)
             logger.info(f"[{self.source_name}] HTTP轮询线程已启动，轮询间隔: {self.poll_interval}秒")
@@ -162,6 +170,7 @@ class HTTPPollingConnection:
                         timeout=30,
                         proxies={'http': None, 'https': None},
                         headers=req_headers if req_headers else None,
+                        verify=self._request_verify_ssl(),
                     )
                     response.raise_for_status()
                     break
@@ -175,7 +184,17 @@ class HTTPPollingConnection:
                     if now - self._last_error_log_time < 60 and err_summary == self._last_error_msg:
                         logger.debug(f"[{self.source_name}] HTTP请求失败（已降噪）: {e}")
                     else:
-                        logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
+                        is_ssl = isinstance(e, requests.exceptions.SSLError)
+                        if is_ssl and not self._request_verify_ssl():
+                            logger.warning(
+                                f"[{self.source_name}] HTTP请求失败（已跳过 SSL 校验仍失败）: {e}"
+                            )
+                        elif is_ssl:
+                            logger.warning(
+                                f"[{self.source_name}] HTTP请求失败（SSL 证书无效）: {e}"
+                            )
+                        else:
+                            logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
                         self._last_error_log_time = now
                         self._last_error_msg = err_summary
                     self.last_request_ok = False
@@ -235,7 +254,23 @@ class HTTPPollingConnection:
                     message_callback(self.source_name, parsed_result)
                     logger.info(f"[{self.source_name}] 轮询成功，处理了最新1条数据")
             else:
-                logger.warning(f"[{self.source_name}] 轮询成功，但适配器解析返回None，可能数据格式不正确或解析失败")
+                empty_data = (
+                    data is None
+                    or (isinstance(data, list) and len(data) == 0)
+                    or (isinstance(data, dict) and not data)
+                )
+                _silent_none_sources = (
+                    'p2pquake', 'p2pquake_tsunami',
+                    'fanstudio_typhoon', 'early_est',
+                )
+                if empty_data or self.source_name in _silent_none_sources:
+                    logger.debug(
+                        f"[{self.source_name}] 轮询成功，无新数据可解析（适配器返回 None）"
+                    )
+                else:
+                    logger.warning(
+                        f"[{self.source_name}] 轮询成功，但适配器解析返回None，可能数据格式不正确或解析失败"
+                    )
                 # 输出更详细的数据信息用于调试
                 if isinstance(data, dict):
                     logger.debug(f"[{self.source_name}] 数据键: {list(data.keys())}")
@@ -291,7 +326,7 @@ class HTTPPollingManager:
         # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
-        # Fan Studio Typhoon / AQI HTTP 数据源
+        # Fan Studio 台风 / AQI HTTP 数据源
         if url in FANSTUDIO_HTTP_SOURCE_KEYS:
             if 'typhoon.php' in url:
                 return FanStudioHttpAdapter('fanstudio_typhoon', url)
@@ -355,7 +390,7 @@ class HTTPPollingManager:
             connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)
             self.connections[url] = connection
             
-            startup_delay = HTTP_POLL_STARTUP_STAGGER_SEC * http_started_index
+            startup_delay = HTTP_POLL_STARTUP_STAGGER_SEC * http_started_index  # 为多源首轮请求错峰
             http_started_index += 1
             connection.start(self.message_callback, startup_delay=startup_delay)
             

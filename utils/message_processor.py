@@ -22,6 +22,7 @@ _place_name_fixer = None
 
 
 def _get_place_name_fixer():
+    """懒加载地名修正器单例；初始化失败时返回 None。"""
     global _place_name_fixer
     if _place_name_fixer is None:
         try:
@@ -94,6 +95,7 @@ class MessageProcessor:
     """消息处理器"""
     
     def __init__(self):
+        """初始化配置与可选的百度翻译服务。"""
         self.config = Config()
         try:
             self.translator = TranslationService(self.config)
@@ -110,7 +112,7 @@ class MessageProcessor:
         lon: Optional[float],
     ) -> str:
         """按经纬度修正地名（fe_fix 区域库）。"""
-        if lat is None or lon is None:
+        if lat is None or lon is None:  # 无坐标无法做 bbox 修正
             return place_name
         fixer = _get_place_name_fixer()
         if not fixer or not fixer.is_supported(source_type):
@@ -140,17 +142,17 @@ class MessageProcessor:
         if lat is not None and lon is not None and lat == 0.0 and lon == 0.0:
             lat = lon = None
 
-        if should_apply_place_name_fix(self.config):
+        if should_apply_place_name_fix(self.config):  # 地名修正模式（与翻译互斥）
             place_name = self._apply_coord_place_name_fix(
                 place_name, source_type, lat, lon
             )
             return place_name
 
-        if not getattr(self.config.translation_config, "enabled", False):
+        if not getattr(self.config.translation_config, "enabled", False):  # 未启用百度翻译
             return place_name
-        if not should_translate_place_name(source_type, place_name):
+        if not should_translate_place_name(source_type, place_name):  # 中文源或无需翻译的地名
             return place_name
-        if not self.translator:
+        if not self.translator:  # 翻译服务初始化失败
             return place_name
         original = place_name
         try:
@@ -170,7 +172,7 @@ class MessageProcessor:
         if not self.translator:
             return text
         has_non_chinese = bool(re.search(r"[^\u4e00-\u9fff\s]", text))
-        if not has_non_chinese:
+        if not has_non_chinese:  # 纯中文文本无需翻译
             return text
         try:
             translated = self.translator.translate(text, quick_mode=False)
@@ -330,6 +332,7 @@ class MessageProcessor:
 
     @staticmethod
     def _resolve_epi_intensity_value(data: Dict[str, Any]) -> Any:
+        """从解析结果或 raw_data 中提取震中烈度/震度数值。"""
         raw = data.get("raw_data")
         for k in ("epi_intensity", "epiIntensity", "MaxIntensity", "maxIntensity"):
             v = data.get(k)

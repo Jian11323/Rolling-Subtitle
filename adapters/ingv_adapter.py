@@ -14,6 +14,7 @@ class INGVAdapter(BaseAdapter):
     response_format = "json"
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 INGV Terraquake JSON，取 payload 首条有效事件。"""
         if not isinstance(raw_data, dict):
             return None
         payload = raw_data.get("payload")
@@ -28,6 +29,7 @@ class INGVAdapter(BaseAdapter):
         return None
 
     def _parse_feature(self, feature: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """将 GeoJSON 风格 feature 解析为标准化速报字典。"""
         props = feature.get("properties") or {}
         geom = feature.get("geometry") or {}
         coords = geom.get("coordinates") or []
@@ -47,7 +49,7 @@ class INGVAdapter(BaseAdapter):
                     pass
             if len(coords) >= 3:
                 try:
-                    depth = float(coords[2])
+                    depth = float(coords[2])  # 第三维为深度（km）
                 except (TypeError, ValueError):
                     pass
         magnitude = self._safe_float(props.get("mag", 0), 0.0)
@@ -67,6 +69,7 @@ class INGVAdapter(BaseAdapter):
         }
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """安全转换为浮点数。"""
         try:
             if value is None:
                 return default
@@ -75,4 +78,5 @@ class INGVAdapter(BaseAdapter):
             return default
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（INGV 默认为速报）。"""
         return data.get("type", "report")

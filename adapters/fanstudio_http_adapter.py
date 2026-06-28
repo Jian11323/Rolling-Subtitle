@@ -21,6 +21,7 @@ class FanStudioHttpAdapter(BaseAdapter):
     """Fan Studio HTTP 数据源适配器"""
 
     def __init__(self, source_name: str, source_url: str):
+        """根据 URL 识别 HTTP 接口类型（台风或 AQI）。"""
         super().__init__(source_name, source_url)
         lower_url = source_url.lower()
         if 'typhoon.php' in lower_url:
@@ -31,9 +32,11 @@ class FanStudioHttpAdapter(BaseAdapter):
             self.http_type = source_name
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（HTTP 接口均为速报）。"""
         return 'report'
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 Fan Studio HTTP JSON，按接口类型分发至台风或 AQI 解析。"""
         try:
             data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
             if self.http_type == 'typhoon':
@@ -47,6 +50,7 @@ class FanStudioHttpAdapter(BaseAdapter):
 
     @staticmethod
     def _normalize_value(item: Dict[str, Any], keys: list) -> str:
+        """按候选键名顺序取第一个非空字符串值。"""
         for key in keys:
             value = item.get(key)
             if value is None:
@@ -57,6 +61,7 @@ class FanStudioHttpAdapter(BaseAdapter):
         return ''
 
     def _parse_typhoon(self, data: Any) -> Optional[Dict[str, Any]]:
+        """解析台风实时数据，优先取活跃台风条目。"""
         if isinstance(data, dict) and data.get('msg') == '当前无台风':
             return None
         if isinstance(data, dict) and 'Data' in data:
@@ -129,6 +134,7 @@ class FanStudioHttpAdapter(BaseAdapter):
         }
 
     def _format_center_position(self, item: Dict[str, Any]) -> str:
+        """将经纬度格式化为「北纬/南纬 …，东经/西经 …」文本。"""
         lat = self._normalize_value(item, ['centerlat', 'center_lat', 'centerLat', 'latitude', 'Latitude'])
         lng = self._normalize_value(item, ['centerlng', 'center_lng', 'centerLng', 'longitude', 'Longitude'])
         if not lat or not lng:
@@ -143,10 +149,12 @@ class FanStudioHttpAdapter(BaseAdapter):
             return f"{lat}，{lng}"
 
     def _parse_aqi(self, data: Any) -> Optional[Any]:
+        """解析城市空气质量指数；列表时仅保留最新一批以免队列溢出。"""
         if isinstance(data, dict) and 'Data' in data:
             data = data.get('Data')
 
         def build_item(entry: Dict[str, Any]) -> Dict[str, Any]:
+            """将单条 AQI 记录构建为标准化字典。"""
             time_point = self._normalize_value(entry, ['TimePoint', 'time_point', 'time', 'UpdateTime', 'updated_at'])
             area = self._normalize_value(entry, ['Area', 'area', 'City', 'CityName', 'city'])
             aqi = self._normalize_value(entry, ['AQI', 'aqi'])

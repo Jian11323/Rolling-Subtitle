@@ -47,7 +47,7 @@ def iana_to_display(iana_id: str) -> str:
     若 iana_id 在 TZ_OFFSET_CITY 中，返回对应显示文本；否则根据当前偏移匹配「UTC±N 城市」。
     用于兼容旧配置（如保存了 Asia/Hong_Kong）时在下拉框中选中对应偏移项。
     """
-    for display, tid in TZ_OFFSET_CITY:
+    for display, tid in TZ_OFFSET_CITY:  # 精确匹配已知 IANA ID
         if tid == iana_id:
             return display
     try:
@@ -70,7 +70,7 @@ def iana_to_display(iana_id: str) -> str:
         # 在已知列表中找同一偏移的显示名（用「UTC±N 」前缀匹配，避免 UTC+5 与 UTC+5:30 混淆）
         prefix = utc_str + " "
         for display, tid in TZ_OFFSET_CITY:
-            if display.startswith(prefix):
+            if display.startswith(prefix):  # 同偏移档位取列表中的显示名
                 return display
         return f"{utc_str}（{iana_id}）"
     except Exception:

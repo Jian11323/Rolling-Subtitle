@@ -108,7 +108,7 @@ class _ScrollingTextMixin:
         self._current_load_task_id = 0
         self._cached_text_width = 0
         self._cached_image_width = 0
-        self._image_after_text = False  # True 时图片在文字后绘制（CMT 沙滩球在消息末尾）
+        self._image_after_text = False  # 为 True 时图片绘制在文字之后（如 CMT 沙滩球在消息末尾）
         self._last_scroll_time = time.time()
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
@@ -145,6 +145,7 @@ class _ScrollingTextMixin:
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
 
     def _contains_cjk(self, text: str) -> bool:
+        """判断文本是否包含中日韩统一表意文字（CJK）字符。"""
         for ch in text or "":
             cp = ord(ch)
             if (0x4E00 <= cp <= 0x9FFF) or (0x3400 <= cp <= 0x4DBF) or (0xF900 <= cp <= 0xFAFF):
@@ -152,6 +153,7 @@ class _ScrollingTextMixin:
         return False
 
     def _font_supports_text(self, font: QFont, text: str) -> bool:
+        """检查字体是否包含文本中全部 CJK 码位（via inFontUcs4）。"""
         if not text:
             return True
         fm = QFontMetrics(font)
@@ -163,6 +165,7 @@ class _ScrollingTextMixin:
         return True
 
     def _resolve_render_font_for_text(self, text: str) -> QFont:
+        """为含中文的文本选择整句可用的绘制字体（必要时回退微软雅黑/宋体）。"""
         base = QFont(self.font)
         if not self._contains_cjk(text):
             return base
@@ -248,7 +251,7 @@ class _ScrollingTextMixin:
 
             if lead_w > 0:
                 painter.fillRect(self.rect(), base_bg)
-                bright = QColor(self._lead_badge_flash_color)
+                bright = QColor(self._lead_badge_flash_color)  # 左侧红条亮色
                 if not bright.isValid():
                     bright = QColor("#FF0000")
                 dim = QColor(self._lead_badge_dim_color)
@@ -276,7 +279,7 @@ class _ScrollingTextMixin:
                 self._draw_background_watermark(painter, bg_color)
 
             if not self.current_text:
-                return
+                return  # 没有文本时只绘制背景与水印
 
             center_y = self.height() / 2.0
             base_x = self.x_position + lead_w
@@ -877,6 +880,7 @@ class _ScrollingTextMixin:
             return
 
         def start():
+            """在主线程安全启动图片预加载后台线程。"""
             window_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
             cache_key = f"{url}_{window_height}"
             with self._image_cache_lock:
@@ -1141,7 +1145,7 @@ class _ScrollingTextMixin:
             self.set_loading(False)
         else:
             # 先检查缓存，如果图片在缓存中，立即显示
-            # URL 直接用作 cache key；本地路径使用 resolve 后的绝对路径
+            # 远程 URL 直接作为 cache key；本地路径使用 resolve 后的绝对路径
             try:
                 if self._is_image_url(image_path):
                     img_path_resolved = image_path
@@ -1226,7 +1230,7 @@ class _ScrollingTextMixin:
                     self._clear_lead_badge_if_not_alert_hint_content()
                     return True
 
-            # URL 图片走异步加载
+            # 远程图片 URL 走异步加载
             logger.info(f"启动异步图片加载线程: {image_path}, task_id: {current_task_id}")
             thread = threading.Thread(
                 target=self._load_image_async,
@@ -1245,6 +1249,7 @@ class ScrollingText(QOpenGLWidget, _ScrollingTextMixin):
     """滚动文本组件（GPU/OpenGL 渲染）"""
     
     def __init__(self, config):
+        """初始化 OpenGL 硬件加速滚动组件并配置 VSync/抗锯齿。"""
         fmt = QSurfaceFormat()
         swap_interval = 1 if config.gui_config.vsync_enabled else 0
         fmt.setSwapInterval(swap_interval)
@@ -1282,7 +1287,7 @@ class ScrollingText(QOpenGLWidget, _ScrollingTextMixin):
     
     def resizeGL(self, width: int, height: int):
         """OpenGL窗口大小改变时调用（QOpenGLWidget要求）"""
-        # OpenGL视口会自动更新，无需手动设置
+        # OpenGL 视口会随 resizeGL 自动更新，此处无需手动设置
         pass
     
     def paintGL(self):
@@ -1295,6 +1300,7 @@ class ScrollingTextCPU(_ScrollingTextMixin, QWidget):
     """滚动文本组件（CPU/软件 渲染）"""
     
     def __init__(self, config):
+        """初始化 CPU 软件渲染滚动组件（低配/无 OpenGL 时使用）。"""
         super().__init__()
         # 由本控件完全负责绘制，避免系统/样式清屏导致窗口不显示
         self.setAttribute(Qt.WA_OpaquePaintEvent, True)

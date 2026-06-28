@@ -42,10 +42,35 @@ def get_place_name_fixer():
     return _place_name_fixer
 
 
+def _resolve_event_id(
+    data: Dict[str, Any],
+    source_type: str,
+    place_name: str = "",
+    shock_time: str = "",
+    latitude: float = 0.0,
+    longitude: float = 0.0,
+) -> str:
+    """eventId/id 缺失时用稳定字段合成，避免轮播 event_id 为空。"""
+    for key in ("eventId", "uniEventId", "id"):
+        val = data.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    parts = [
+        source_type or "",
+        (place_name or "").strip(),
+        (shock_time or "").strip(),
+    ]
+    if latitude or longitude:
+        parts.append(f"{latitude:.4f},{longitude:.4f}")
+    joined = ":".join(p for p in parts if p)
+    return joined or f"{source_type}:unknown"
+
+
 class FanStudioAdapter(BaseAdapter):
     """Fan Studio数据源适配器"""
     
     def __init__(self, source_name: str, source_url: str):
+        """初始化适配器并从 URL 提取 Fan Studio 子源类型。"""
         super().__init__(source_name, source_url)
         # 从URL或source_name中提取数据源类型
         self.data_source_type = self._extract_source_type()
@@ -308,7 +333,7 @@ class FanStudioAdapter(BaseAdapter):
                     ):
                         logger.debug("[FanStudio] update cenc-ir：独立数据源已关闭，跳过")
                         return None
-                    # All 通道转发的 P2PQuake 地震情報：与 MESSAGE_CONFIG 开关一致
+                    # All 通道转发的 P2PQuake 地震情報：与消息配置开关一致
                     if source == 'p2pquake' and not getattr(
                         config.message_config, 'p2pquake_parse_551', True
                     ):
@@ -404,7 +429,7 @@ class FanStudioAdapter(BaseAdapter):
     def _parse_cenc_ir(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """解析 Fan Studio CENC 烈度速报（cenc-ir 独立通道）。"""
         def _normalize_json_obj(v: Any) -> Any:
-            # 兼容一层/多层字符串化 JSON（例如 "\"{...}\""）
+            """兼容一层/多层字符串化 JSON（例如 "\"{...}\""）。"""
             cur = v
             for _ in range(3):
                 if not isinstance(cur, str):
@@ -598,11 +623,13 @@ class FanStudioAdapter(BaseAdapter):
         magnitude = self._safe_float(
             all_mag.get('Mww') or all_mag.get('M') or all_mag.get('mB') or all_mag.get('mb') or all_mag.get('Mwp') or 0
         )
-        event_id = data.get('eventId', data.get('id', ''))
         nodal_plane_1 = data.get('nodalPlane1', '')
         nodal_plane_2 = data.get('nodalPlane2', '')
         if shock_time:
             shock_time = timezone_utils.cst_to_display(shock_time)
+        event_id = _resolve_event_id(
+            data, 'fssn-cmt', place_name, shock_time, latitude, longitude
+        )
         if self.data_source_type == 'all':
             organization = self._get_organization_name_by_type('fssn-cmt')
         else:
@@ -676,13 +703,15 @@ class FanStudioAdapter(BaseAdapter):
                 logger.debug(f"检查地名修正配置失败: {e}")
         
         # 特殊字段处理
-        event_id = data.get('eventId', data.get('id', ''))
-        # 不向展示层传递 HKO verify、USGS/FSSN infoTypeName 等区分字段（标头与正文均不依赖）
-        info_type = data.get('infoTypeName', '') if source_type not in ('hko', 'usgs', 'fssn') else ''
-
         # 格式化时间（FanStudio 速报均为 UTC+8，转为显示时区）
         if shock_time:
             shock_time = timezone_utils.cst_to_display(shock_time)
+
+        event_id = _resolve_event_id(
+            data, source_type, place_name, shock_time, latitude, longitude
+        )
+        # 不向展示层传递 HKO verify、USGS/FSSN infoTypeName 等区分字段（标头与正文均不依赖）
+        info_type = data.get('infoTypeName', '') if source_type not in ('hko', 'usgs', 'fssn') else ''
         
         # 获取机构名称：如果适配器类型是 'all'，使用实际的 source_type
         if self.data_source_type == 'all':

@@ -6,14 +6,15 @@ import math
 from typing import Any, Dict, Optional
 
 
+# 地球平均半径（公里），用于 haversine 距离计算
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """计算两点间大圆距离（公里）。"""
-    r = 6371.0
+    r = 6371.0  # 地球平均半径（公里）
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
-    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))  # haversine 大圆距离
 
 
 def event_coordinates(parsed_data: Dict[str, Any]) -> Optional[tuple]:
@@ -26,7 +27,7 @@ def event_coordinates(parsed_data: Dict[str, Any]) -> Optional[tuple]:
     except (TypeError, ValueError):
         return None
     if lat == 0 and lon == 0:
-        return None
+        return None  # 0,0 视为无效坐标
     return lat, lon
 
 
@@ -36,13 +37,13 @@ def passes_magnitude_filter(parsed_data: Dict[str, Any], config: Any, message_ty
     if mc is None:
         return True
     if message_type == "warning":
-        return True
+        return True  # 预警不受震级过滤限制
     try:
         min_mag = float(getattr(mc, "min_report_magnitude", 0) or 0)
     except (TypeError, ValueError):
         min_mag = 0.0
     if min_mag <= 0:
-        return True
+        return True  # 0 表示不限制震级
     try:
         mag = float(parsed_data.get("magnitude") or 0)
     except (TypeError, ValueError):
@@ -67,7 +68,7 @@ def passes_geo_filter(parsed_data: Dict[str, Any], config: Any) -> bool:
     if radius <= 0:
         return True
     dist = haversine_km(center_lat, center_lon, coords[0], coords[1])
-    return dist <= radius
+    return dist <= radius  # 在半径内则通过
 
 
 def should_accept_message(

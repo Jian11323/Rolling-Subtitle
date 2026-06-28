@@ -28,14 +28,17 @@ USER_AGENT = f"EarthquakeScroller/{APP_VERSION}"
 
 # 与 build_lite.spec 中 onedir 名称一致（空格 + V + 版本号）
 def portable_dist_folder_name(version: str) -> str:
+    """便携版解压后的文件夹名称。"""
     return f"地震预警及情报实况栏 V{version.strip()}"
 
 
 def portable_exe_basename(version: str) -> str:
+    """便携版主程序 exe 文件名。"""
     return f"地震预警及情报实况栏 V{version.strip()}.exe"
 
 
 def _sha256_file(path: str) -> str:
+    """计算文件 SHA256 十六进制摘要。"""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
@@ -44,6 +47,7 @@ def _sha256_file(path: str) -> str:
 
 
 def _fetch_manifest(url: str, timeout: float) -> Optional[Dict[str, Any]]:
+    """拉取远程 manifest.json 并解析为字典。"""
     try:
         r = requests.get(
             url.strip(),
@@ -70,10 +74,10 @@ def _remote_newer(
     except Exception as e:
         logger.warning(f"版本号解析失败: {e}")
         return False, "版本号格式无效，已跳过更新。"
-    if lv == rv:
+    if lv == rv:  # 本地与远程版本相同
         return False, ""
     if upgrade_only:
-        if rv > lv:
+        if rv > lv:  # 远程版本更高才升级
             return True, ""
         return False, ""
     return lv != rv, ""
@@ -107,6 +111,7 @@ def _download_file(
     timeout: float,
     progress_cb=None,
 ) -> bool:
+    """流式下载更新包到本地路径；可选 progress_cb(0–100) 回调。"""
     try:
         with requests.get(
             url,
@@ -122,7 +127,7 @@ def _download_file(
                     if not chunk:
                         continue
                     f.write(chunk)
-                    done += len(chunk)
+                    done += len(chunk)  # 累计已下载字节
                     if progress_cb and total > 0:
                         progress_cb(min(99, int(done * 100 / total)))
         if progress_cb:
@@ -245,6 +250,7 @@ def _spawn_detached_bat(bat_path: str, *, show_console: bool = False) -> bool:
 
 
 def _verify_sha256(path: str, expected: str) -> bool:
+    """校验文件 SHA256；expected 为空时跳过校验。"""
     if not expected:
         return True
     actual = _sha256_file(path).lower()
@@ -277,6 +283,11 @@ def run_interactive_update_check(parent, config) -> bool:
 
 
 def _run_update_flow(app, config, parent, force_prompt_if_newer: bool) -> bool:
+    """
+    更新主流程：拉清单、比对版本、下载、校验并启动安装/解压脚本。
+
+    返回 True 表示已触发安装流程，调用方应退出当前进程。
+    """
     from PyQt5.QtWidgets import QApplication, QProgressDialog
     from PyQt5.QtCore import Qt
     from PyQt5.QtWidgets import QMessageBox

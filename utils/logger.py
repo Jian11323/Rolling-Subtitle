@@ -18,11 +18,13 @@ class Logger:
     _initialized = False
     
     def __new__(cls):
+        """单例：确保全局仅有一个 Logger 实例。"""
         if cls._instance is None:
             cls._instance = super(Logger, cls).__new__(cls)
         return cls._instance
     
     def __init__(self):
+        """初始化日志目录、控制台与文件处理器。"""
         if self._initialized:
             return
         
@@ -30,7 +32,7 @@ class Logger:
         # 统一目录：C:\Users\账户名\AppData\Roaming\subtitl\
         try:
             # 使用与配置文件相同的目录
-            data_dir = Path.home() / 'AppData' / 'Roaming' / 'subtitl'
+            data_dir = Path.home() / 'AppData' / 'Roaming' / 'subtitl'  # 与配置文件同目录
             data_dir.mkdir(parents=True, exist_ok=True)
             self.log_dir = str(data_dir)
         except Exception:
@@ -96,11 +98,11 @@ class Logger:
                 '%(asctime)s [%(levelname)s] %(name)s - %(message)s',
                 datefmt='%Y-%m-%d %H:%M:%S'
             )
-            if self.split_by_date:
+            if self.split_by_date:  # 按日期分文件
                 log_filename = os.path.join(self.log_dir, f"log_{datetime.now().strftime('%Y%m%d')}.txt")
             else:
                 log_filename = os.path.join(self.log_dir, "log.txt")
-            if clear_if_config and self.clear_log_on_startup:
+            if clear_if_config and self.clear_log_on_startup:  # 启动时清空旧日志
                 try:
                     log_dir = Path(self.log_dir)
                     main_log_path = Path(log_filename).resolve()

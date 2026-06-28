@@ -115,9 +115,10 @@ class MessageItem:
     shock_time: Optional[str] = None  # 发震时间（用于预警消息有效期检查）
     parsed_data: Optional[Dict] = None  # 气象：颜色/图片热更新；预警：轮播时白字提示与烈度需保留解析字段
     first_displayed_at: Optional[float] = None  # 首次在窗口显示的时间（用于预警至少展示5分钟）
-    image_after_text: bool = False  # True 时图片在文字后绘制（如 CMT 沙滩球在消息末尾）
+    image_after_text: bool = False  # 为 True 时图片绘制在文字之后（如 CMT 沙滩球在消息末尾）
 
     def __post_init__(self):
+        """dataclass 初始化后补全 timestamp 默认值。"""
         if not hasattr(self, 'timestamp') or self.timestamp is None:
             self.timestamp = time.time()
     
@@ -313,7 +314,7 @@ class MessageBuffer:
                     # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
                     if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
                         logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
-                        return False
+                        return False  # 内容完全一致则不重复入缓冲
                     # 找到同一条事件，替换
                     old_msg_id = id(existing_msg)
                     new_msg_id = id(message)
@@ -435,6 +436,28 @@ class MessageBuffer:
                 self._sort_by_priority()
         
         return results
+    
+    def purge_fanstudio_aqi_stale(self, source: str, keep_time_point: str) -> int:
+        """
+        移除 fanstudio_aqi 中 shock_time 早于 keep_time_point 的消息（新小时批次到达时调用）。
+        """
+        if not source or not keep_time_point:
+            return 0
+        removed = 0
+        with self._lock:
+            kept = []
+            for msg in self.buffer:
+                if msg.source == source and msg.shock_time and msg.shock_time < keep_time_point:
+                    removed += 1
+                    continue
+                kept.append(msg)
+            if removed:
+                self.buffer = kept
+        if removed:
+            logger.debug(
+                f"[{source}] 已清理 {removed} 条旧时段 AQI 消息，保留 time_point>={keep_time_point}"
+            )
+        return removed
     
     def find_by_event_id(self, event_id: str, source: str) -> Optional[MessageItem]:
         """
@@ -682,6 +705,7 @@ class MessageBuffer:
             return None
 
         def removal_key(msg: MessageItem) -> tuple:
+            """缓冲区溢出时的移除排序键：低优先级、较旧的消息优先淘汰。"""
             priority = get_source_priority(msg.source)
             add_order = self._message_add_order.get(id(msg), float('inf'))
             # 先按优先级降序，低优先级先被移除；同优先级内先移除最旧消息
@@ -708,6 +732,7 @@ class MessageBuffer:
         current_msg_id = self._current_displaying_msg_id
         
         def sort_key(msg: MessageItem) -> tuple:
+            """缓冲区排序键：(优先级, 固定 source 顺序, 添加顺序)。"""
             # 排序键：(优先级, 固定source顺序, 添加顺序)
             # 优先级越小越靠前；同优先级内按固定 source 次序；同 source 才回退添加顺序
             priority = get_source_priority(msg.source)
@@ -777,7 +802,7 @@ class MessageBuffer:
                 self._current_displaying_msg_id = None
                 return None
             
-            if not self.use_priority:
+            if not self.use_priority:  # 关闭优先级时按队列顺序循环
                 # 简单循环轮播
                 self.current_index = (self.current_index + 1) % len(self.buffer)
                 msg = self.buffer[self.current_index]

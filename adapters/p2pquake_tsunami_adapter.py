@@ -22,6 +22,7 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
     """P2PQuake 海啸预报适配器（日本气象厅）"""
 
     def __init__(self, source_name: str, source_url: str):
+        """初始化 P2PQuake 海啸预报适配器。"""
         super().__init__(source_name, source_url)
 
     def parse_single_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -134,4 +135,5 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
         return ''.join(parts).strip() or fallback
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（海啸预报默认为速报）。"""
         return data.get('type', 'report')

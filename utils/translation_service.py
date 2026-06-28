@@ -26,6 +26,7 @@ _BAIDU_TIMEOUT = 5
 
 
 def _get_baidu_credentials(config: Any) -> tuple[str, str]:
+    """从配置读取百度翻译 app_id 与 secret。"""
     tc = getattr(config, "translation_config", config)
     app_id = (getattr(tc, "baidu_app_id", "") or "").strip()
     secret = (
@@ -39,10 +40,11 @@ class TranslationService:
     """翻译服务（百度翻译，多语种→中文）。"""
 
     def __init__(self, config: Any):
+        """初始化翻译服务并加载本地缓存文件。"""
         self.config = config
         self.cache: Dict[str, str] = {}
         try:
-            config_dir = Path.home() / "AppData" / "Roaming" / "subtitl"
+            config_dir = Path.home() / "AppData" / "Roaming" / "subtitl"  # Windows 用户配置 Roaming 目录
             config_dir.mkdir(parents=True, exist_ok=True)
             self.cache_file = config_dir / "translation_cache.json"
         except Exception as e:
@@ -53,11 +55,13 @@ class TranslationService:
 
     @staticmethod
     def _normalize_key(text: str) -> str:
+        """规范化缓存键：合并连续空白为单个空格。"""
         if not text:
             return text
         return " ".join(text.split())
 
     def _load_cache(self) -> None:
+        """从磁盘加载翻译缓存并去重。"""
         if not self.cache_file.exists():
             return
         try:
@@ -67,7 +71,7 @@ class TranslationService:
             duplicates_removed = 0
             for key, value in raw_cache.items():
                 normalized_key = self._normalize_key(key)
-                if normalized_key in normalized_cache:
+                if normalized_key in normalized_cache:  # 重复键保留后者
                     duplicates_removed += 1
                 normalized_cache[normalized_key] = value
             self.cache = normalized_cache
@@ -79,6 +83,7 @@ class TranslationService:
             logger.error(f"加载翻译缓存失败: {e}")
 
     def _async_save_cache(self) -> None:
+        """在后台线程异步保存翻译缓存。"""
         def _save() -> None:
             try:
                 with self.lock:
@@ -116,14 +121,14 @@ class TranslationService:
         normalized_text = self._normalize_key(text)
         if not skip_cache and normalized_text in self.cache:
             return self.cache[normalized_text]
-        if quick_mode:
+        if quick_mode:  # 快速模式不调用 API，直接返回原文
             return text
 
         has_korean = bool(re.search(r"[가-힣]", text))
         has_japanese = bool(re.search(r"[ひらがなカタカナ一-龯]", text))
         has_english = bool(re.search(r"[a-zA-Z]", text))
         has_chinese = bool(re.search(r"[\u4e00-\u9fff]", text))
-        if has_chinese and not (has_korean or has_japanese or has_english):
+        if has_chinese and not (has_korean or has_japanese or has_english):  # 纯中文无需翻译
             return text
 
         if force_lang:
@@ -139,7 +144,7 @@ class TranslationService:
 
         try:
             result = self._call_baidu_api(text, app_id, secret_key, from_lang)
-            if result and result != text:
+            if result and result != text:  # 翻译成功且与原文不同才缓存
                 with self.lock:
                     self.cache[normalized_text] = result
                 self._async_save_cache()
@@ -150,6 +155,7 @@ class TranslationService:
         return text
 
     def _call_baidu_api(self, text: str, app_id: str, secret_key: str, from_lang: str) -> str:
+        """调用百度翻译 API；失败时返回原文。"""
         salt = str(random.randint(32768, 65536)) + str(int(time.time() * 1000))
         sign_str = app_id + text + salt + secret_key
         sign = hashlib.md5(sign_str.encode("utf-8")).hexdigest()
@@ -184,6 +190,7 @@ class TranslationService:
 
     @staticmethod
     def _call_baidu_api_urllib(data: dict) -> dict:
+        """无 requests 时使用 urllib 调用百度翻译 API。"""
         import urllib.parse
         import urllib.request
 

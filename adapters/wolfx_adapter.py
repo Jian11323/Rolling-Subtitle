@@ -30,7 +30,7 @@ WOLFX_TYPE_MAP: Dict[str, str] = {
     "cwa_eew": "wolfx_cwa_eew",
 }
 
-# source_type -> MessageConfig 解析开关属性名（与设置页 Wolfx 区块一致）
+# source_type -> 消息配置解析开关字段名（与设置页 Wolfx 区块一致）
 WOLFX_PARSE_FLAG: Dict[str, str] = {
     "wolfx_jma_eew": "ali_all_parse_nied",
     "wolfx_sc_eew": "ali_all_parse_early_est",
@@ -41,6 +41,7 @@ WOLFX_PARSE_FLAG: Dict[str, str] = {
 }
 
 ORG_BY_SOURCE: Dict[str, str] = {
+    # 各 Wolfx 子源对应的机构显示名称
     "wolfx_jma_eew": "日本气象厅（Wolfx）",
     "wolfx_sc_eew": "四川省地震局（Wolfx）",
     "wolfx_fj_eew": "福建省地震局（Wolfx）",
@@ -51,6 +52,7 @@ ORG_BY_SOURCE: Dict[str, str] = {
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
+    """安全转换为浮点数。"""
     try:
         if value is None or value == "":
             return default
@@ -92,6 +94,7 @@ def _extract_warn_areas(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     rows: List[Dict[str, Any]] = []
 
     def _row_from_wa_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        """从单个 WarnArea 条目提取预报区字段。"""
         row: Dict[str, Any] = {
             "chiiki": item.get("Chiiki") or item.get("chiiki"),
             "shindo1": item.get("Shindo1") or item.get("shindo1"),
@@ -117,6 +120,7 @@ class WolfxAdapter(BaseAdapter):
     """Wolfx all_eew / cwa_eew 端点解析。"""
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 Wolfx WebSocket JSON 消息，过滤心跳与训练报后返回预警字典。"""
         if isinstance(raw_data, str):
             try:
                 raw_data = json.loads(raw_data)
@@ -127,7 +131,7 @@ class WolfxAdapter(BaseAdapter):
 
         wtype = str(raw_data.get("type") or "").strip().lower()
         if wtype in ("heartbeat", "pong", "ping", "initial_all", "update", ""):
-            return None
+            return None  # 心跳与空 type 不解析
 
         source_type = WOLFX_TYPE_MAP.get(wtype)
         if not source_type:
@@ -137,30 +141,32 @@ class WolfxAdapter(BaseAdapter):
         mgr = str(getattr(self, "_manager_source_type", "") or "")
         if mgr == "wolfx_cwa_eew":
             if source_type != "wolfx_cwa_eew":
-                return None
+                return None  # CWA 独立连接只收 cwa_eew
         elif mgr == "wolfx_all_eew":
             if source_type == "wolfx_cwa_eew":
-                return None
+                return None  # all_eew 通道不含 CWA
 
         try:
             cfg = Config()
             mc = cfg.message_config
             flag = WOLFX_PARSE_FLAG.get(source_type)
             if flag and not bool(getattr(mc, flag, True)):
-                return None
+                return None  # 设置页关闭了该子源解析
         except Exception as e:
             logger.debug(f"WolfxAdapter: 读取解析开关失败，继续解析: {e}")
 
         if raw_data.get("isTraining") is True or raw_data.get("is_training") is True:
             logger.debug("WolfxAdapter: 训练报 isTraining，跳过")
-            return None
+            return None  # 训练报不展示
 
         return self._build_warning_dict(raw_data, source_type)
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（Wolfx 默认为预警）。"""
         return str(data.get("type") or "warning")
 
     def _build_warning_dict(self, data: Dict[str, Any], source_type: str) -> Dict[str, Any]:
+        """将 Wolfx 子源原始字段映射为标准化预警字典。"""
         mag = data.get("Magunitude")
         if mag is None:
             mag = data.get("Magnitude") or data.get("magnitude")

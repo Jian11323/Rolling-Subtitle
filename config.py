@@ -18,14 +18,14 @@ logger = get_logger()
 
 # 非 Fan Studio 的 WebSocket 数据源固定顺序（与轮播优先级一致，确保顺序不变）
 # Wolfx 聚合源 wss://ws-api.wolfx.jp/all_eew
-P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
-WS_URL_CANONICAL_ORDER: List[str] = [
-    "wss://ws.fanstudio.tech/cenc-ir",
-    P2PQUAKE_WSS_URL,
-    "wss://ws-api.wolfx.jp/all_eew",
-    "wss://ws-api.wolfx.jp/cwa_eew",
+P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake 地震情报 WSS 总开关
+WS_URL_CANONICAL_ORDER: List[str] = [  # 公开版固定连接顺序
+    "wss://ws.fanstudio.tech/cenc-ir",  # 烈度速报优先
+    P2PQUAKE_WSS_URL,  # P2PQuake WSS
+    "wss://ws-api.wolfx.jp/all_eew",  # Wolfx 聚合预警
+    "wss://ws-api.wolfx.jp/cwa_eew",  # Wolfx CWA 单独通道
 ]
-P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
+P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [  # P2PQuake 启动前/按需 HTTP 拉取
     "https://api.p2pquake.net/v2/history?codes=551&limit=3",
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1",
 ]
@@ -81,18 +81,21 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
-AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"
+AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.6.1
+CHANGELOG_TEXT = """版本 2.6.2
 
-1、修复窗口局部配色问题
-2、修复预警系统通知时 PowerShell 窗口闪一下的问题
-3、修复右键退出无法退出软件的问题"""
+1、修复TTS重复的问题
+2、修复设置保存的问题
+3、修复模拟预警不生效的问题
+4、增加音频
+5、增加自动保存设置（测试中）
+4、修复其他问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -142,6 +145,7 @@ class GUIConfig:
     minimize_to_tray: bool = False
     toast_notifications_enabled: bool = False
     performance_mode: str = "standard"  # low | standard | high | custom
+    auto_save_settings: bool = False  # Auto-save settings window changes to disk
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -351,6 +355,12 @@ class AlertConfig:
     ciev_sound_enabled: bool = False
     ciev_sound_path: str = ""
     ciev_sound_repeat: int = 1
+    nhk_news_bell_enabled: bool = False
+    nhk_news_bell_path: str = ""
+    nhk_news_bell_repeat: int = 1
+    jma_eew_alert_sound_enabled: bool = True
+    jma_eew_alert_sound_path: str = ""
+    jma_eew_alert_sound_repeat: int = 2
     alert_feedback_mode: str = "sound"
     felt_tts_enabled: bool = False
     critical_tts_enabled: bool = False
@@ -392,6 +402,8 @@ class AlertConfig:
             self.felt_sound_path = (self.felt_sound_path or "").strip()
             self.critical_sound_path = (self.critical_sound_path or "").strip()
             self.ciev_sound_path = (self.ciev_sound_path or "").strip()
+            self.nhk_news_bell_path = (self.nhk_news_bell_path or "").strip()
+            self.jma_eew_alert_sound_path = (self.jma_eew_alert_sound_path or "").strip()
             try:
                 self.felt_sound_repeat = int(self.felt_sound_repeat)
             except (TypeError, ValueError):
@@ -404,9 +416,19 @@ class AlertConfig:
                 self.ciev_sound_repeat = int(self.ciev_sound_repeat)
             except (TypeError, ValueError):
                 self.ciev_sound_repeat = 1
+            try:
+                self.nhk_news_bell_repeat = int(self.nhk_news_bell_repeat)
+            except (TypeError, ValueError):
+                self.nhk_news_bell_repeat = 1
+            try:
+                self.jma_eew_alert_sound_repeat = int(self.jma_eew_alert_sound_repeat)
+            except (TypeError, ValueError):
+                self.jma_eew_alert_sound_repeat = 2
             self.felt_sound_repeat = max(1, min(10, self.felt_sound_repeat))
             self.critical_sound_repeat = max(1, min(10, self.critical_sound_repeat))
             self.ciev_sound_repeat = max(1, min(10, self.ciev_sound_repeat))
+            self.nhk_news_bell_repeat = max(1, min(10, self.nhk_news_bell_repeat))
+            self.jma_eew_alert_sound_repeat = max(1, min(10, self.jma_eew_alert_sound_repeat))
             self.alert_feedback_mode = (self.alert_feedback_mode or "sound").strip().lower()
             if self.alert_feedback_mode not in ("sound", "tts"):
                 self.alert_feedback_mode = "sound"
@@ -543,7 +565,7 @@ class Config:
             return
         
         # 配置实例
-        self.gui_config = GUIConfig()
+        self.gui_config = GUIConfig()  # GUI 相关配置
         self.message_config = MessageConfig()
         self.alert_config = AlertConfig()
         self.ws_config = WebSocketConfig()
@@ -554,6 +576,7 @@ class Config:
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
         self.custom_data_source_url: str = ""  # 自定义数据源 URL（http/https/ws/wss），空为关闭
+        self.custom_data_source_insecure_ssl: bool = False  # 自定义 HTTP 源跳过 SSL 证书校验
         self.http_poll_intervals: Dict[str, int] = dict(DEFAULT_HTTP_POLL_INTERVALS)
         
         # 配置变更回调
@@ -651,6 +674,7 @@ class Config:
                     self.gui_config, 'toast_notifications_enabled', False
                 ),
                 'performance_mode': getattr(self.gui_config, 'performance_mode', 'standard'),
+                'auto_save_settings': getattr(self.gui_config, 'auto_save_settings', False),
             },
             'MESSAGE_CONFIG': {
                 'max_message_length': self.message_config.max_message_length,
@@ -766,6 +790,12 @@ class Config:
                 'ciev_sound_enabled': getattr(self.alert_config, 'ciev_sound_enabled', False),
                 'ciev_sound_path': getattr(self.alert_config, 'ciev_sound_path', ''),
                 'ciev_sound_repeat': getattr(self.alert_config, 'ciev_sound_repeat', 1),
+                'nhk_news_bell_enabled': getattr(self.alert_config, 'nhk_news_bell_enabled', False),
+                'nhk_news_bell_path': getattr(self.alert_config, 'nhk_news_bell_path', ''),
+                'nhk_news_bell_repeat': getattr(self.alert_config, 'nhk_news_bell_repeat', 1),
+                'jma_eew_alert_sound_enabled': getattr(self.alert_config, 'jma_eew_alert_sound_enabled', True),
+                'jma_eew_alert_sound_path': getattr(self.alert_config, 'jma_eew_alert_sound_path', ''),
+                'jma_eew_alert_sound_repeat': getattr(self.alert_config, 'jma_eew_alert_sound_repeat', 2),
                 'alert_feedback_mode': getattr(self.alert_config, 'alert_feedback_mode', 'sound'),
                 'felt_tts_enabled': getattr(self.alert_config, 'felt_tts_enabled', False),
                 'critical_tts_enabled': getattr(self.alert_config, 'critical_tts_enabled', False),
@@ -807,6 +837,9 @@ class Config:
             },
             'ENABLED_SOURCES': self._get_persisted_enabled_sources(),
             'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
+            'CUSTOM_DATA_SOURCE_INSECURE_SSL': bool(
+                getattr(self, 'custom_data_source_insecure_ssl', False)
+            ),
             'HTTP_POLL_INTERVALS': dict(self.http_poll_intervals),
         }
     
@@ -1195,6 +1228,9 @@ class Config:
             if removed_ws:
                 logger.info(f"已清理非公开 WebSocket 数据源: {removed_ws}")
             self.custom_data_source_url = (config_data.get('CUSTOM_DATA_SOURCE_URL') or "").strip()
+            self.custom_data_source_insecure_ssl = bool(
+                config_data.get('CUSTOM_DATA_SOURCE_INSECURE_SSL', False)
+            )
 
             raw_poll = config_data.get('HTTP_POLL_INTERVALS', {})
             if isinstance(raw_poll, dict) and raw_poll:
@@ -1426,6 +1462,7 @@ class Config:
 
         self.ws_urls = self._build_ws_urls_ordered()
         self.custom_data_source_url = ""
+        self.custom_data_source_insecure_ssl = False
         logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
     
     def _build_ws_urls_ordered(self) -> List[str]:
@@ -1500,6 +1537,8 @@ class Config:
         http_url_to_name = {
             "https://api.fanstudio.tech/we/typhoon.php": "fanstudio_typhoon",
             "https://api.fanstudio.tech/we/aqi.php": "fanstudio_aqi",
+            "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
+            "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
             BMKG_HTTP_URL: "bmkg",
             GEONET_HTTP_URL: "geonet",
             INGV_HTTP_URL: "ingv",

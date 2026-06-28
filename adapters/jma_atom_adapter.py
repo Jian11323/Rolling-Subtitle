@@ -10,15 +10,17 @@ from .base_adapter import BaseAdapter
 from utils import timezone_utils
 
 ATOM_NS = "http://www.w3.org/2005/Atom"
-NS = {"atom": ATOM_NS}
+NS = {"atom": ATOM_NS}  # Atom feed XML 命名空间
 
 VOLCANO_KEYWORDS = (
+    # JMA 火山情报标题/正文关键词
     "火山", "噴火", "降灰", "噴煙", "火山観測報", "降灰予報", "噴煙流向",
     "火山名", "噴火警戒", "火口",
 )
 
 
 def _extract_volcano_name(content: str) -> str:
+    """从 JMA 火山情报正文正则提取火山名称。"""
     if not content:
         return ""
     m = re.search(r"【火山名　([^　】]+)", content)
@@ -37,6 +39,7 @@ def _extract_volcano_name(content: str) -> str:
 
 
 def _extract_description(content: str) -> str:
+    """从正文提取现象描述（「現象：」之后或标题括号之后）。"""
     if not content:
         return ""
     raw = content.strip()
@@ -55,6 +58,7 @@ class JmaAtomAdapter(BaseAdapter):
     fetch_headers = {"User-Agent": "JMAVolcanoFeed/1.0 (Python; feed client)"}
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
+        """解析 JMA eqvol_l.xml Atom feed，返回最新火山相关条目。"""
         if raw_data is None:
             return None
         xml_bytes = raw_data
@@ -73,10 +77,12 @@ class JmaAtomAdapter(BaseAdapter):
             return None
 
     def _parse_entries(self, xml_bytes: bytes) -> List[Dict[str, Any]]:
+        """解析 Atom feed 中所有 entry 节点为字典列表。"""
         root = ET.fromstring(xml_bytes)
         entries: List[Dict[str, Any]] = []
         for entry_el in root.findall(".//atom:entry", NS):
             def text(elem, tag: str, default: str = "") -> str:
+                """读取 Atom entry 子元素的文本内容。"""
                 if elem is None:
                     return default
                 child = elem.find(f"atom:{tag}", NS)
@@ -105,6 +111,7 @@ class JmaAtomAdapter(BaseAdapter):
         return entries
 
     def _filter_volcano_only(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按关键词过滤，仅保留火山相关条目。"""
         result = []
         for e in entries:
             combined = (e.get("title") or "") + " " + (e.get("content") or "")
@@ -113,6 +120,7 @@ class JmaAtomAdapter(BaseAdapter):
         return result
 
     def _entry_to_parsed(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """将 Atom entry 字典转换为标准化火山情报字典。"""
         content = entry.get("content") or ""
         updated = (entry.get("updated") or "").strip()
         shock_time = timezone_utils.utc_to_display(updated) if updated else ""
@@ -133,4 +141,5 @@ class JmaAtomAdapter(BaseAdapter):
         }
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
+        """获取消息类型（JMA Atom 默认为 volcano）。"""
         return data.get("type", "volcano")
