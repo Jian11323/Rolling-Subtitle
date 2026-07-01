@@ -50,6 +50,7 @@ fe-fix.txt
 SA、KMA-EEW-Fe Fix/
 
 # 本地辅助（不上传）
+tools/
 cleanup_only.sh
 clear_repo_and_cleanup.bat
 run.bat

@@ -8,9 +8,10 @@
 
 import json
 import sys
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from pathlib import Path
 from utils.logger import get_logger
+from utils.china_place_lookup import lookup_china_place_name
 
 logger = get_logger()
 
@@ -32,6 +33,8 @@ class RegionNameFixer:
         """
         self.source_type = source_type.lower()
         self.regions: List[Dict] = []
+        self._grid_table: Optional[List[List[int]]] = None
+        self._grid_names: List[str] = []
         self._loaded = False
         
         if json_file_path is None:
@@ -106,6 +109,7 @@ class RegionNameFixer:
         # 提取 regions 数组
         if isinstance(data, dict) and 'regions' in data:
             self.regions = data['regions']
+            self._load_grid_lookup(data)
         elif isinstance(data, list):
             self.regions = data
         else:
@@ -117,6 +121,76 @@ class RegionNameFixer:
         
         if len(self.regions) == 0:
             logger.warning("区域地名修正文件为空")
+
+    def _load_grid_lookup(self, data: Dict[str, Any]) -> None:
+        """加载可选的 F-E 栅格查表数据（fe_fix_region_data.json 的 grid 字段）。"""
+        grid = data.get("grid")
+        if not isinstance(grid, dict):
+            return
+        table = grid.get("table")
+        names = grid.get("names")
+        if not isinstance(table, list) or not table or not isinstance(names, list) or not names:
+            return
+        self._grid_table = table
+        self._grid_names = names
+        logger.info(
+            f"已加载 F-E 栅格查表: {len(table)}×{len(table[0])}, 地名 {len(names)} 条"
+        )
+
+    @staticmethod
+    def _bbox_area(region: Dict[str, Any]) -> float:
+        lat_min = region.get("lat_min")
+        lat_max = region.get("lat_max")
+        lon_min = region.get("lon_min")
+        lon_max = region.get("lon_max")
+        if lat_min is None or lat_max is None or lon_min is None or lon_max is None:
+            return float("inf")
+        return (lat_max - lat_min) * (lon_max - lon_min)
+
+    @staticmethod
+    def _point_in_bbox(region: Dict[str, Any], latitude: float, longitude: float) -> bool:
+        lat_min = region.get("lat_min")
+        lat_max = region.get("lat_max")
+        lon_min = region.get("lon_min")
+        lon_max = region.get("lon_max")
+        region_name = region.get("name", "")
+        return (
+            lat_min is not None
+            and lat_max is not None
+            and lon_min is not None
+            and lon_max is not None
+            and bool(region_name)
+            and lat_min <= latitude <= lat_max
+            and lon_min <= longitude <= lon_max
+        )
+
+    def _lookup_by_grid(self, latitude: float, longitude: float) -> Optional[str]:
+        """按 1° F-E 栅格查表，与 fe_fix.txt 的 feNumbers/feNames 一致。"""
+        if not self._grid_table or not self._grid_names:
+            return None
+        row = int(latitude + 90)
+        col = int(longitude + 180)
+        row = max(0, min(len(self._grid_table) - 1, row))
+        col = max(0, min(len(self._grid_table[0]) - 1, col))
+        region_id = self._grid_table[row][col]
+        if region_id < 0 or region_id >= len(self._grid_names):
+            region_id = len(self._grid_names) - 1
+        return self._grid_names[region_id]
+
+    def _lookup_by_bbox(self, latitude: float, longitude: float) -> Optional[str]:
+        """bbox 查表：优先非 aggregate 区域，再取面积最小者。"""
+        hits = [
+            region
+            for region in self.regions
+            if self._point_in_bbox(region, latitude, longitude)
+        ]
+        if not hits:
+            return None
+
+        leaf_hits = [region for region in hits if not region.get("aggregate")]
+        pool = leaf_hits if leaf_hits else hits
+        pool.sort(key=self._bbox_area)
+        return pool[0].get("name") or None
     
     def fix_place_name(self, place_name: str, latitude: float, longitude: float) -> str:
         """
@@ -141,26 +215,30 @@ class RegionNameFixer:
         # 检查是否有有效数据
         if not self.regions:  # 无区域数据则无法修正
             return place_name
+
+        # 中国境内优先使用行政区 polygon 查表（区县级精度）
+        if self.source_type in ("fe-fix", "fe_fix", "fe"):
+            china_name = lookup_china_place_name(latitude, longitude)
+            if china_name:
+                if china_name != place_name:
+                    logger.debug(
+                        f"中国行政区地名修正: {place_name} -> {china_name} "
+                        f"(坐标: {latitude}, {longitude})"
+                    )
+                return china_name
         
-        # 查找包含该经纬度的区域
-        for region in self.regions:
-            lat_min = region.get('lat_min')
-            lat_max = region.get('lat_max')
-            lon_min = region.get('lon_min')
-            lon_max = region.get('lon_max')
-            region_name = region.get('name', '')
-            
-            # 检查经纬度是否在区域内
-            if (lat_min is not None and lat_max is not None and
-                lon_min is not None and lon_max is not None and
-                region_name and
-                lat_min <= latitude <= lat_max and
-                lon_min <= longitude <= lon_max):
-                if region_name != place_name:  # 仅在修正结果变化时打 debug 日志
-                    logger.debug(f"区域地名修正: {place_name} -> {region_name} (数据源: {self.source_type}, 坐标: {latitude}, {longitude})")
-                return region_name
-        
-        return place_name
+        region_name = self._lookup_by_grid(latitude, longitude)
+        if region_name is None:
+            region_name = self._lookup_by_bbox(latitude, longitude)
+        if region_name is None:
+            return place_name
+
+        if region_name != place_name:
+            logger.debug(
+                f"区域地名修正: {place_name} -> {region_name} "
+                f"(数据源: {self.source_type}, 坐标: {latitude}, {longitude})"
+            )
+        return region_name
     
     def is_supported(self) -> bool:
         """
