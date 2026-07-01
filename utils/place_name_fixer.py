@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 地名修正工具
-使用 Region Fe Fix/fe_fix_region_data.json 根据经纬度修正地名（区域 bbox，与 korea_region_data.json 同结构）
+使用 Region Fe Fix/fe_fix_region_data.json 根据经纬度修正地名（区域 bbox，与 korea_region_data.json 同结构）。
+中国境内优先使用同目录下 china_place_index.json（0.05° 区县级栅格查表）。
 支持 usgs, emsc, bcsf, gfz, usp, kma 数据源
 """
 
