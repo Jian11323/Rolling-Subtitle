@@ -17,11 +17,20 @@ from utils.jma_shindo import (
     jma_shindo_meets_nhk_bell_threshold,
 )
 from utils.logger import get_logger
-from utils.warning_feedback_dedup import event_key, should_play_warning_feedback
+from utils.warning_feedback_dedup import (
+    event_key,
+    is_startup_sync_message,
+    register_warning_feedback_seen,
+    should_play_warning_feedback,
+)
 
 logger = get_logger()
 
 _play_lock = threading.Lock()
+
+
+def _warning_feedback_policy(alert_config: Any) -> str:
+    return getattr(alert_config, "warning_feedback_policy", "first_received") or "first_received"
 
 # 强震判定阈值：震级 ≥4.8 或预估烈度 ≥7 为 critical 档
 _EEW_MAG_CRITICAL = 4.8
@@ -325,6 +334,17 @@ def _play_alert_sound_impl(
 
     pd = parsed_data or {}
 
+    if not force and is_startup_sync_message(pd):
+        if message_type == "warning":
+            tier_for_seen = (tier or "").strip().lower()
+            if not tier_for_seen:
+                tier_for_seen = classify_eew_audio_tier(pd, ac) or "felt"
+            if tier_for_seen in ("felt", "critical", "nhk"):
+                register_warning_feedback_seen(
+                    pd, tier_for_seen, policy=_warning_feedback_policy(ac)
+                )
+        return False
+
     if tier:
         tier_key = tier.strip().lower()
         if tier_key not in ("felt", "critical", "nhk"):
@@ -339,7 +359,9 @@ def _play_alert_sound_impl(
         tier_key = classify_eew_audio_tier(parsed_data, ac)
         if not tier_key or not _tier_enabled(tier_key, ac):
             return False
-        if not force and not should_play_warning_feedback(pd, tier_key):  # 同源/跨源重复报文跳过
+        if not force and not should_play_warning_feedback(
+            pd, tier_key, policy=_warning_feedback_policy(ac)
+        ):
             logger.debug(
                 "跳过重复预警告警音: event_id=%s source_type=%s (同源或跨源同一震次)",
                 pd.get("event_id"),
@@ -380,7 +402,9 @@ def play_nhk_news_bell(
                 return
             if not force and not _tier_enabled("nhk", ac):
                 return
-            if not force and not should_play_warning_feedback(pd, "nhk"):
+            if not force and not should_play_warning_feedback(
+                pd, "nhk", policy=_warning_feedback_policy(ac)
+            ):
                 logger.debug(
                     "跳过重复 NHK 新闻铃: event_id=%s source_type=%s",
                     pd.get("event_id"),
@@ -411,6 +435,8 @@ def play_jma_eew_alert_sound(
         return
     pd = parsed_data or {}
     if not force:
+        if is_startup_sync_message(pd):
+            return
         if bool(pd.get("cancel")):
             return
         msg_type = (pd.get("type") or "").strip().lower()

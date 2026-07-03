@@ -22,23 +22,51 @@ _PHYSICAL_DEDUP_SEC = 120.0  # 跨源物理去重时间窗口（秒）
 _BURST_WINDOW_SEC = 3.0
 _MAG_TOLERANCE = 0.5  # 突发合并时震级容差
 
+POLICY_SMART = "smart"
+POLICY_FIRST_RECEIVED = "first_received"
+
+
+def normalize_warning_feedback_policy(policy: Optional[str]) -> str:
+    """归一化预警反馈策略名。"""
+    p = (policy or POLICY_FIRST_RECEIVED).strip().lower()
+    if p in ("first_report_only", "first_only", "first_received"):
+        return POLICY_FIRST_RECEIVED
+    if p == POLICY_SMART:
+        return POLICY_SMART
+    return POLICY_FIRST_RECEIVED
+
+
+def normalize_event_id(event_id: str) -> str:
+    """
+    归一化 event_id，合并多源同一震次的不同写法。
+    例：Wolfx 四川 ``202606290012.0001_1`` 与 CEA ``202606290012.0001`` 视为同一键。
+    """
+    eid = str(event_id or "").strip()
+    if not eid or "_" not in eid:
+        return eid
+    base, suffix = eid.rsplit("_", 1)
+    if suffix.isdigit() and "." in base:
+        return base
+    return eid
+
 
 def event_key(parsed_data: Dict[str, Any]) -> str:
-    """生成事件去重键：优先 event_id，否则用地名+发震时间+源类型拼接。"""
-    event_id = str(parsed_data.get("event_id") or parsed_data.get("id") or "").strip()
+    """生成事件去重键：优先归一化 event_id，否则用地名+发震时间（跨源一致）。"""
+    raw_id = str(parsed_data.get("event_id") or parsed_data.get("id") or "").strip()
+    event_id = normalize_event_id(raw_id)
     if event_id:
         return event_id
-    return "|".join(
-        [
-            str(parsed_data.get("source_type") or ""),
-            str(parsed_data.get("place_name") or ""),
-            str(parsed_data.get("shock_time") or ""),
-        ]
-    )
+    place = str(parsed_data.get("place_name") or "").strip()
+    shock = str(parsed_data.get("shock_time") or "").strip()
+    if place and shock:
+        return f"pt|{place}|{shock}"
+    if place:
+        return f"pn|{place}"
+    return ""
 
 
 def _warning_updates_value(data: Dict[str, Any]) -> Optional[int]:
-    """提取预警报数（updates）；SA 源无报数字段时视为第 1 报。"""
+    """提取数据源原始预警报数（updates）；仅作记录，first_received 策略不据此决定是否播放。"""
     updates = data.get("updates")
     if updates is not None:
         try:
@@ -67,8 +95,29 @@ def _state_record(
         "mag": mag,
         "tier": tier,
         "updates": _warning_updates_value(parsed_data),
+        "source_updates": _warning_updates_value(parsed_data),
+        "internal_seq": 0,
+        "played_feedback": False,
         "final": bool(parsed_data.get("final", False)),
     }
+
+
+def _is_duplicate_warning_snapshot(
+    parsed_data: Dict[str, Any],
+    prev: Dict[str, Any],
+    tier: str,
+    mag: float,
+) -> bool:
+    """同源重复报文：档位、震级、源报数、最终报标志均未变。"""
+    if str(prev.get("tier") or "") != tier:
+        return False
+    if abs(float(prev.get("mag") or 0.0) - mag) >= 0.01:
+        return False
+    if _warning_updates_value(parsed_data) != prev.get("source_updates"):
+        return False
+    if bool(parsed_data.get("final", False)) != bool(prev.get("final", False)):
+        return False
+    return True
 
 
 def _is_warning_update_report(
@@ -164,14 +213,103 @@ def _find_burst_duplicate(mag: float, now: float) -> bool:
     return False
 
 
-def should_play_warning_feedback(parsed_data: Dict[str, Any], tier: str) -> bool:
+def _apply_physical_dedup(
+    parsed_data: Dict[str, Any],
+    record: Dict[str, Any],
+    key: str,
+    prev: Optional[Dict[str, Any]],
+    mag: float,
+    now: float,
+) -> bool:
     """
-    预警：首报、更新报、震级/档位变化即播放；同源重复报文跳过。
+    跨源物理 / 突发去重（仅 event_key 首条时生效）。
+    同一 event_key 的更新报不再做物理拦截，避免 smart 策略下修订报被误杀。
+    """
+    if prev is not None:
+        return True
+    if _find_physical_duplicate(parsed_data) is not None:
+        _last_by_event[key] = record
+        return False
+    if _find_burst_duplicate(mag, now):
+        _last_by_event[key] = record
+        return False
+    return True
+
+
+def _should_play_first_received(
+    parsed_data: Dict[str, Any],
+    prev: Optional[Dict[str, Any]],
+    record: Dict[str, Any],
+    tier: str,
+    mag: float,
+) -> bool:
+    """
+    本程序视角的首报-only：不采用数据源原始报数。
+    例：GQ 首条推送源报数 13 → 内部第 1 报，播放；源报数 14 → 内部第 2 报，不播。
+    """
+    source_updates = _warning_updates_value(parsed_data)
+    record["source_updates"] = source_updates
+
+    if prev is not None and _is_duplicate_warning_snapshot(parsed_data, prev, tier, mag):
+        return False
+
+    if prev is None:
+        internal_seq = 1
+    else:
+        internal_seq = int(prev.get("internal_seq") or 0) + 1
+
+    record["internal_seq"] = internal_seq
+    record["played_feedback"] = bool(prev.get("played_feedback")) if prev else False
+
+    if record["played_feedback"]:
+        return False
+
+    if internal_seq == 1:
+        record["played_feedback"] = True
+        return True
+
+    return False
+
+
+def _should_play_smart(
+    parsed_data: Dict[str, Any],
+    prev: Optional[Dict[str, Any]],
+    tier: str,
+    mag: float,
+) -> bool:
+    """原 smart 策略：首报、更新报、震级/档位变化可再播。"""
+    if prev is None:
+        return True
+    if _is_warning_update_report(parsed_data, prev, tier):
+        return True
+    prev_tier = str(prev.get("tier") or "")
+    prev_mag = float(prev.get("mag") or 0.0)
+    if prev_tier and prev_tier != tier:
+        return True
+    if abs(prev_mag - mag) >= 0.5:
+        return True
+    return False
+
+
+def should_play_warning_feedback(
+    parsed_data: Dict[str, Any],
+    tier: str,
+    *,
+    policy: Optional[str] = None,
+) -> bool:
+    """
+    预警：是否播放主反馈（sound / TTS）。
+
+    ``first_received``（默认）：本程序收到的第一条有效报文视为内部第 1 报并播放，
+    后续报文（无论数据源报数为 2 还是 14）均不再播放。
+
+    ``smart``：首报、更新报、震级/档位变化即播放；同源重复报文跳过。
     多数据源报道同一物理事件时，预设音频/TTS 只响一遍。
     """
     if tier not in ("felt", "critical", "nhk"):
         return False
 
+    policy_key = normalize_warning_feedback_policy(policy)
     key = event_key(parsed_data)
     try:
         mag = float(parsed_data.get("magnitude") or 0.0)
@@ -183,46 +321,55 @@ def should_play_warning_feedback(parsed_data: Dict[str, Any], tier: str) -> bool
         prev = _last_by_event.get(key)
         record = _state_record(parsed_data, mag, tier, now)
 
-        should_play = False
-        if prev is None:  # 该 event_key 首次收到
-            should_play = True
-        elif _is_warning_update_report(parsed_data, prev, tier):  # 预警更新报或最终报
-            should_play = True
+        if policy_key == POLICY_FIRST_RECEIVED:
+            if prev is not None and _is_duplicate_warning_snapshot(
+                parsed_data, prev, tier, mag
+            ):
+                return False
+            should_play = _should_play_first_received(
+                parsed_data, prev, record, tier, mag
+            )
         else:
-            prev_tier = str(prev.get("tier") or "")
-            prev_mag = float(prev.get("mag") or 0.0)
-            if prev_tier and prev_tier != tier:
-                should_play = True
-            elif abs(prev_mag - mag) >= 0.5:
-                should_play = True
-
-        if should_play and prev is None:  # 首报时做跨源物理去重
-            if _find_physical_duplicate(parsed_data) is not None:  # 其他源已响过同一震次
-                _last_by_event[key] = record
-                return False
-            if _find_burst_duplicate(mag, now):  # 短时突发合并窗口内已响
-                _last_by_event[key] = record
-                return False
+            should_play = _should_play_smart(parsed_data, prev, tier, mag)
 
         if should_play:
+            if not _apply_physical_dedup(parsed_data, record, key, prev, mag, now):
+                return False
             _last_by_event[key] = record
             _record_physical_play(parsed_data, tier, now)
             return True
 
+        if policy_key == POLICY_FIRST_RECEIVED and prev is not None:
+            if not _is_duplicate_warning_snapshot(parsed_data, prev, tier, mag):
+                _last_by_event[key] = record
+
         return False
+
+
+def is_startup_sync_message(parsed_data: Dict[str, Any]) -> bool:
+    """启动批量同步历史报文：仅展示字幕，不播放告警音/TTS。"""
+    return bool((parsed_data or {}).get("_suppress_tts"))
 
 
 def register_warning_feedback_seen(
     parsed_data: Dict[str, Any],
     tier: str,
+    *,
+    policy: Optional[str] = None,
 ) -> None:
     """跳过播放但仍写入去重状态（启动同步等）。"""
-    if tier not in ("felt", "critical"):
+    if tier not in ("felt", "critical", "nhk"):
         return
+    policy_key = normalize_warning_feedback_policy(policy)
     try:
         mag = float(parsed_data.get("magnitude") or 0.0)
     except (TypeError, ValueError):
         mag = 0.0
+
+    if policy_key == POLICY_FIRST_RECEIVED:
+        # 启动同步不写入任何状态，避免占用内部第 1 报或物理去重槽位
+        return
+
     key = event_key(parsed_data)
     with _state_lock:
         _last_by_event[key] = _state_record(parsed_data, mag, tier, time.time())

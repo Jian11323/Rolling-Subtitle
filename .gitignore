@@ -64,6 +64,8 @@ wiki/
 .wiki-tmp/
 
 # 非核心文档与脚本（不上传）
+docs/
+tests/
 docs/软件自动更新说明.md
 使用说明书.md
 打包检查报告.md

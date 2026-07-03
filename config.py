@@ -81,16 +81,16 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.6.3"  # 当前程序版本
+APP_VERSION = "2.6.4"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.6.3
+CHANGELOG_TEXT = """版本 2.6.4
 
-1、修复地名索引问题，增加国内地名索引"""
+1、修复预设音频多次重复播放问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -373,6 +373,8 @@ class AlertConfig:
     tts_include_safety_hint: bool = True
     tts_repeat_policy: str = "smart"
     tts_cooldown_seconds: int = 60
+    # 预警主反馈去重：first_received=本程序首条视为内部第1报仅播一次；smart=更新报/震级变化可再播
+    warning_feedback_policy: str = "first_received"
 
     def validate(self) -> bool:
         try:
@@ -459,6 +461,13 @@ class AlertConfig:
             self.tts_repeat_policy = (self.tts_repeat_policy or "smart").strip().lower()
             if self.tts_repeat_policy not in ("smart", "first_only", "always"):
                 self.tts_repeat_policy = "smart"
+            self.warning_feedback_policy = (
+                self.warning_feedback_policy or "first_received"
+            ).strip().lower()
+            if self.warning_feedback_policy in ("first_report_only", "first_only"):
+                self.warning_feedback_policy = "first_received"
+            if self.warning_feedback_policy not in ("smart", "first_received"):
+                self.warning_feedback_policy = "first_received"
             try:
                 self.tts_rate = int(self.tts_rate)
             except (TypeError, ValueError):
@@ -808,6 +817,9 @@ class Config:
                 'tts_include_safety_hint': getattr(self.alert_config, 'tts_include_safety_hint', True),
                 'tts_repeat_policy': getattr(self.alert_config, 'tts_repeat_policy', 'smart'),
                 'tts_cooldown_seconds': getattr(self.alert_config, 'tts_cooldown_seconds', 60),
+                'warning_feedback_policy': getattr(
+                    self.alert_config, 'warning_feedback_policy', 'first_received'
+                ),
             },
             'WS_CONFIG': {
                 'reconnect_interval': self.ws_config.reconnect_interval,

@@ -13,6 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.audio_alert import classify_eew_audio_tier
 from utils.logger import get_logger
 from utils.warning_feedback_dedup import (
+    event_key,
+    is_startup_sync_message,
     register_warning_feedback_seen,
     should_play_warning_feedback,
 )
@@ -376,17 +378,8 @@ def _tts_repeat_for_tier(tier: str, alert_config: Any) -> int:
 
 
 def _event_key(parsed_data: Dict[str, Any]) -> str:
-    """生成 TTS 去重用事件键（优先 event_id）。"""
-    event_id = str(parsed_data.get("event_id") or parsed_data.get("id") or "").strip()
-    if event_id:
-        return event_id
-    return "|".join(
-        [
-            str(parsed_data.get("source_type") or ""),
-            str(parsed_data.get("place_name") or ""),
-            str(parsed_data.get("shock_time") or ""),
-        ]
-    )
+    """生成 TTS 去重用事件键（与预警音去重一致）。"""
+    return event_key(parsed_data)
 
 
 def _warning_updates_value(data: Dict[str, Any]) -> Optional[int]:
@@ -423,9 +416,14 @@ def _tts_state_record(
     }
 
 
-def _should_speak_warning(parsed_data: Dict[str, Any], tier: str) -> bool:
-    """预警：首报、更新报、震级/档位变化即朗读，不使用间隔时间。"""
-    return should_play_warning_feedback(parsed_data, tier)
+def _should_speak_warning(
+    parsed_data: Dict[str, Any],
+    tier: str,
+    *,
+    policy: Optional[str] = None,
+) -> bool:
+    """预警：是否朗读（与告警音共用去重策略）。"""
+    return should_play_warning_feedback(parsed_data, tier, policy=policy)
 
 
 def _cenc_info_type_key(data: Dict[str, Any]) -> str:
@@ -548,7 +546,7 @@ def _is_warning_too_old_for_tts(parsed_data: Dict[str, Any]) -> bool:
 def _should_suppress_tts(parsed_data: Dict[str, Any], message_type: str) -> bool:
     """启动批量同步或过期消息：仅展示字幕，不朗读。"""
     pd = parsed_data or {}
-    if pd.get("_suppress_tts"):
+    if is_startup_sync_message(pd):
         return True
     mt = (message_type or "").strip().lower()
     if mt == "warning":
@@ -587,7 +585,11 @@ def _register_tts_seen(
             tier_key = classify_eew_audio_tier(pd, ac) or "felt"
         if not tier_key:
             tier_key = "felt"
-        register_warning_feedback_seen(pd, tier_key)
+        register_warning_feedback_seen(
+            pd,
+            tier_key,
+            policy=getattr(ac, "warning_feedback_policy", "first_received"),
+        )
         return
     elif mt == "weather":
         tier_key = "weather"
@@ -879,7 +881,11 @@ def _run_tts_feedback(
     script = build_warning_tts_script(pd, config)
     repeat = _tts_repeat_for_tier(tier_key, ac)
     with _play_lock:
-        if pd and not pd.get("_simulate") and not _should_speak_warning(pd, tier_key):
+        if pd and not pd.get("_simulate") and not _should_speak_warning(
+            pd,
+            tier_key,
+            policy=getattr(ac, "warning_feedback_policy", "first_received"),
+        ):
             return
         _speak_blocking(script, ac, repeat)
 

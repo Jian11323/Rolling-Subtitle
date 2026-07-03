@@ -98,6 +98,7 @@ def cst_to_display(cst_time_str: str) -> str:
             "%Y-%m-%d %H:%M:%S.%f",
             "%Y-%m-%d %H:%M:%S",
             "%Y/%m/%d %H:%M:%S",
+            "%Y.%m.%d-%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S.%f",
             "%Y%m%d%H%M%S",
