@@ -13,6 +13,10 @@ from config import (
     NEW_HTTP_SOURCE_KEYS,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
+    FANSTUDIO_ALL_URL,
+    CENC_IR_URL,
+    FANSTUDIO_TYPHOON_HTTP,
+    FANSTUDIO_AQI_HTTP,
 )
 
 PERFORMANCE_MODE_LOW = "low"
@@ -35,14 +39,12 @@ PERFORMANCE_MODE_LABELS: Dict[str, str] = {
     PERFORMANCE_MODE_CUSTOM: "自定义（未跟随预设）",
 }
 
-FANSTUDIO_ALL_URL = "wss://ws.fanstudio.tech/all"
 FANSTUDIO_WEATHER_URL = "wss://ws.fanstudio.tech/weatheralarm"
 WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
 WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"
-CENC_IR_URL = "wss://ws.fanstudio.tech/cenc-ir"
 # Fan Studio HTTP 辅助数据源
-TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
-AQI_HTTP = "https://api.fanstudio.tech/we/aqi.php"
+TYPHOON_HTTP = FANSTUDIO_TYPHOON_HTTP
+AQI_HTTP = FANSTUDIO_AQI_HTTP
 
 
 def _base_enabled_sources() -> Dict[str, bool]:
@@ -341,6 +343,7 @@ def _data_source_snapshot(config) -> tuple:
         tuple(config.ws_urls),
         tuple(sorted(config.enabled_sources.items())),
         (config.custom_data_source_url or "").strip(),
+        bool(getattr(config.ws_config, "fanstudio_use_backup", False)),
         flags,
     )
 

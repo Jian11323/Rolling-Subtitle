@@ -20,6 +20,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config  # 读取全局配置与开关
+from config import FANSTUDIO_ALL_URLS, CENC_IR_WSS_URLS
 from adapters import (
     FanStudioAdapter,  # Fan Studio WebSocket 适配器
     P2PQuakeWebSocketAdapter,  # P2PQuake WSS 适配器
@@ -36,8 +37,6 @@ logger = get_logger()
 # P2PQuake HTTP 聚合接口：同时包含 551 地震情报与 552 津波预报
 P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"  # 启动前聚合拉取
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
-FANSTUDIO_ALL_URLS = ("wss://ws.fanstudio.tech/all")  # Fan Studio all 通道
-CENC_IR_WSS_URL = "wss://ws.fanstudio.tech/cenc-ir"  # 烈度速报独立通道
 WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"  # Wolfx 聚合预警通道
 WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"  # Wolfx CWA 独立通道
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
@@ -948,10 +947,10 @@ class WebSocketManager:
         4) wolfx(all_eew)
         5) 其他
         """
-        normalized_url = (url or "").strip().lower()
+        normalized_url = (url or "").strip().lower().rstrip("/")
         if normalized_url in FANSTUDIO_ALL_URLS:
             return "fanstudio"
-        if normalized_url == CENC_IR_WSS_URL:
+        if normalized_url in CENC_IR_WSS_URLS:
             return "cenc_ir"
         if normalized_url == P2PQUAKE_WSS_URL:
             return "p2pquake"

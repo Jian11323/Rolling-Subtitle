@@ -23,6 +23,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
 from utils import timezone_utils
+from config import CENC_IR_URL
 
 logger = get_logger()
 
@@ -329,7 +330,7 @@ class FanStudioAdapter(BaseAdapter):
                         config = Config()
                     # 烈度速报独立 WSS 已关闭时，/all 仍可能推送同源 update，此处与 main_window 入口过滤一致
                     if source == 'cenc-ir' and not config.enabled_sources.get(
-                        "wss://ws.fanstudio.tech/cenc-ir", False
+                        CENC_IR_URL, False
                     ):
                         logger.debug("[FanStudio] update cenc-ir：独立数据源已关闭，跳过")
                         return None

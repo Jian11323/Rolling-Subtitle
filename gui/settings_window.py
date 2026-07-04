@@ -36,6 +36,10 @@ from config import (
     JMA_ATOM_LONG_URL,
     PTWC_CAP_URL,
     DEFAULT_HTTP_POLL_INTERVALS,
+    FANSTUDIO_ALL_URL,
+    CENC_IR_URL,
+    FANSTUDIO_TYPHOON_HTTP,
+    FANSTUDIO_AQI_HTTP,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path, get_resource_path
@@ -263,10 +267,9 @@ class SettingsWindow(QDialog):
         self.auto_save_settings_cb = None
     
     def _update_base_urls(self):
-        """更新基础URL（固定使用fanstudio.tech）"""
-        base_domain = "fanstudio.tech"
-        self.all_source_url = f"wss://ws.{base_domain}/all"  # Fan Studio 聚合 WebSocket
-        self.base_domain = base_domain
+        """更新基础 URL（固定使用 fanstudio.tech 主站）"""
+        self.all_source_url = FANSTUDIO_ALL_URL
+        self.base_domain = "fanstudio.tech"
     
     def _setup_ui(self):
         """设置UI（只在初始化时调用一次）"""
@@ -634,6 +637,10 @@ class SettingsWindow(QDialog):
             if hasattr(self, 'fanstudio_all_connect_cb'):
                 self.fanstudio_all_connect_cb.setChecked(
                     self.config.enabled_sources.get(self.all_source_url, True)
+                )
+            if hasattr(self, 'fanstudio_backup_cb'):
+                self.fanstudio_backup_cb.setChecked(
+                    getattr(self.config.ws_config, 'fanstudio_use_backup', False)
                 )
             for attr, cfg_name in [
                 ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
@@ -2372,9 +2379,9 @@ class SettingsWindow(QDialog):
         scroll_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         scroll_layout.setSpacing(22)
 
-        fanstudio_http_poll_sources = [  # Fan Studio HTTP 轮询源（间隔在下方单独设置）
-            ("https://api.fanstudio.tech/we/typhoon.php", "台风实时与历史数据"),
-            ("https://api.fanstudio.tech/we/aqi.php", "城市空气质量指数"),
+        fanstudio_http_poll_sources = [
+            (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
+            (FANSTUDIO_AQI_HTTP, "城市空气质量指数"),
         ]
         intl_sources = [  # 国际/独立 HTTP 数据源：(URL, 显示名, 默认是否启用)
             (BMKG_HTTP_URL, "BMKG 印尼地震速报", False),
@@ -2400,6 +2407,18 @@ class SettingsWindow(QDialog):
         fs_hint.setStyleSheet(STYLE_HINT)
         fs_hint.setWordWrap(True)
         gw_layout.addWidget(fs_hint)
+        self.fanstudio_backup_cb = QCheckBox("启用备用服务器 (fanstudio.hk)")
+        self.fanstudio_backup_cb.setChecked(
+            getattr(self.config.ws_config, "fanstudio_use_backup", False)
+        )
+        self.fanstudio_backup_cb.setToolTip(
+            "主服务器：wss://ws.fanstudio.tech / https://api.fanstudio.tech\n"
+            "备用服务器：wss://ws.fanstudio.hk / https://api.fanstudio.hk\n"
+            "勾选后改用备用服务器（含 WebSocket 聚合、烈度速报及 HTTP 台风/AQI）；"
+            "与主站互斥、不会同时连接；保存后需重启生效。"
+        )
+        self.fanstudio_backup_cb.setStyleSheet("font-size: 14px; line-height: 20pt; padding: 2px 0;")
+        gw_layout.addWidget(self.fanstudio_backup_cb)
         self.fanstudio_all_connect_cb = QCheckBox("Fan Studio")  # /all 聚合 WebSocket 总开关
         self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
         self.fanstudio_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
@@ -2407,30 +2426,30 @@ class SettingsWindow(QDialog):
         # CENC 烈度速报（cenc-ir）为 Fan Studio 独立连接，不在 /all 通道中
         self._add_source_checkbox(
             group_warning,
-            "wss://ws.fanstudio.tech/cenc-ir",
+            CENC_IR_URL,
             "中国地震台网中心地震烈度速报",
             default_value=False,
-            status_key="wss://ws.fanstudio.tech/cenc-ir",
+            status_key=CENC_IR_URL,
             status_tooltip="连接状态：已连接 / 未连接",
             status_connected_text="已连接",
             status_disconnected_text="未连接",
         )
         self._add_source_checkbox(
             group_warning,
-            "https://api.fanstudio.tech/we/typhoon.php",
+            FANSTUDIO_TYPHOON_HTTP,
             "台风实时与历史数据",
             default_value=True,
-            status_key="https://api.fanstudio.tech/we/typhoon.php",
+            status_key=FANSTUDIO_TYPHOON_HTTP,
             status_tooltip="解析状态：已解析 / 未解析",
             status_connected_text="已解析",
             status_disconnected_text="未解析",
         )
         self._add_source_checkbox(
             group_warning,
-            "https://api.fanstudio.tech/we/aqi.php",
+            FANSTUDIO_AQI_HTTP,
             "城市空气质量指数",
             default_value=True,
-            status_key="https://api.fanstudio.tech/we/aqi.php",
+            status_key=FANSTUDIO_AQI_HTTP,
             status_tooltip="解析状态：已解析 / 未解析",
             status_connected_text="已解析",
             status_disconnected_text="未解析",
@@ -3793,10 +3812,10 @@ class SettingsWindow(QDialog):
             return "Wolfx all"
         if "ws-api.wolfx.jp/cwa_eew" in low:
             return "Wolfx cwa"
-        if "ws.fanstudio.tech/all" in low:
-            return "Fan Studio"
-        if "ws.fanstudio.tech/cenc-ir" in low:
-            return "Fan Studio Cenc-IR"
+        if "ws.fanstudio.tech/all" in low or "ws.fanstudio.hk/all" in low:
+            return "Fan Studio (备用)" if "fanstudio.hk" in low else "Fan Studio"
+        if "ws.fanstudio.tech/cenc-ir" in low or "ws.fanstudio.hk/cenc-ir" in low:
+            return "Fan Studio Cenc-IR (备用)" if "fanstudio.hk" in low else "Fan Studio Cenc-IR"
         return source_name or url
 
     def _compute_health_percent(self, connection_state: str, heartbeat_state: str, timeout_count: int, heartbeat_age: Any, timeout_threshold: float) -> float:
@@ -4056,6 +4075,8 @@ class SettingsWindow(QDialog):
         all_url = self.all_source_url
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
+        if hasattr(self, "fanstudio_backup_cb"):
+            self.config.ws_config.fanstudio_use_backup = self.fanstudio_backup_cb.isChecked()
         for attr, cfg_name in [
             ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
             ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
@@ -4366,6 +4387,8 @@ class SettingsWindow(QDialog):
         all_url = self.all_source_url
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
+        if hasattr(self, "fanstudio_backup_cb"):
+            self.config.ws_config.fanstudio_use_backup = self.fanstudio_backup_cb.isChecked()
         for url, checkbox in self.source_vars.items():
             if url and url != all_url:
                 self.config.enabled_sources[url] = checkbox.isChecked()  # 逐项同步单项源开关

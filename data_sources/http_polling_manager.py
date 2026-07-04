@@ -20,6 +20,8 @@ from config import (
     APP_VERSION,  # 用于设置 User-Agent 的版本号
     P2PQUAKE_WSS_URL,  # P2PQuake 总开关对应的 WSS 地址
     FANSTUDIO_HTTP_SOURCE_KEYS,  # Fan Studio HTTP 数据源键集合
+    fanstudio_active_http_url,
+    fanstudio_http_canonical_key,
     BMKG_HTTP_URL,  # 印尼 BMKG 地震数据地址
     GEONET_HTTP_URL,  # 新西兰 GeoNet 地震数据地址
     INGV_HTTP_URL,  # 意大利 INGV 地震数据地址
@@ -52,11 +54,12 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     if not url:
         return False
     low = url.lower()
+    lookup_url = fanstudio_http_canonical_key(url) if "api.fanstudio" in low else url
     # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
         return True  # 自定义 HTTP 源只要 URL 匹配就允许轮询
-    if not config.enabled_sources.get(url, False):
+    if not config.enabled_sources.get(lookup_url, False):
         return False  # 未启用的数据源直接跳过
     if "api.p2pquake.net" in low:
         if not config.enabled_sources.get(P2PQUAKE_WSS_URL, False):
@@ -326,8 +329,8 @@ class HTTPPollingManager:
         # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
-        # Fan Studio 台风 / AQI HTTP 数据源
-        if url in FANSTUDIO_HTTP_SOURCE_KEYS:
+        # Fan Studio 台风 / AQI HTTP 数据源（主/备用域名）
+        if "api.fanstudio" in url:
             if 'typhoon.php' in url:
                 return FanStudioHttpAdapter('fanstudio_typhoon', url)
             if 'aqi.php' in url:
@@ -354,11 +357,19 @@ class HTTPPollingManager:
     
     def start_all_connections(self):
         """启动所有HTTP轮询连接"""
+        use_backup = bool(getattr(self.config.ws_config, "fanstudio_use_backup", False))
         # 从配置中获取启用的HTTP数据源
         http_urls = []
         for url in self.config.enabled_sources.keys():
             if url.startswith('http://') or url.startswith('https://'):
-                if is_http_source_enabled(self.config, url):
+                if url in FANSTUDIO_HTTP_SOURCE_KEYS:
+                    active_url = fanstudio_active_http_url(url, use_backup)
+                    if is_http_source_enabled(self.config, url):
+                        http_urls.append(active_url)
+                        logger.debug(f"发现启用的 Fan Studio HTTP 数据源: {active_url}")
+                    else:
+                        logger.debug(f"Fan Studio HTTP 数据源已禁用: {url}")
+                elif is_http_source_enabled(self.config, url):
                     http_urls.append(url)
                     logger.debug(f"发现启用的HTTP数据源: {url}")
                 else:
@@ -429,8 +440,13 @@ class HTTPPollingManager:
     def update_poll_intervals(self, intervals: Dict[str, int]) -> None:
         """热更新已运行连接的轮询间隔（秒）"""
         for url, connection in self.connections.items():
-            if url in intervals:
+            lookup = fanstudio_http_canonical_key(url) if "api.fanstudio" in url else url
+            if lookup in intervals:
+                connection.poll_interval = max(1, int(intervals[lookup]))
+            elif url in intervals:
                 connection.poll_interval = max(1, int(intervals[url]))
-                logger.info(
-                    f"已更新 HTTP 轮询间隔: {connection.source_name} -> {connection.poll_interval}s"
-                )
+            else:
+                continue
+            logger.info(
+                f"已更新 HTTP 轮询间隔: {connection.source_name} -> {connection.poll_interval}s"
+            )

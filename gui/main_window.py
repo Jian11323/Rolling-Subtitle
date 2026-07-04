@@ -34,6 +34,12 @@ from config import (
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
     PTWC_CAP_URL,
+    FANSTUDIO_ALL_URL,
+    CENC_IR_URL,
+    FANSTUDIO_TYPHOON_HTTP,
+    FANSTUDIO_AQI_HTTP,
+    fanstudio_active_http_url,
+    fanstudio_http_canonical_key,
 )
 from adapters.fanstudio_adapter import FanStudioAdapter
 from data_sources import WebSocketManager, HTTPPollingManager
@@ -1703,8 +1709,7 @@ class MainWindow(QMainWindow):
         st = (parsed_data.get("source_type") or "").strip()
         sn = source_name or ""
 
-        base_domain = "fanstudio.tech"
-        fanstudio_all_url = f"wss://ws.{base_domain}/all"
+        fanstudio_all_url = FANSTUDIO_ALL_URL
         if not es.get(fanstudio_all_url, True):
             if parsed_data.get("fanstudio") and st != "cenc-ir" and source_name != "cenc-ir":
                 logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
@@ -1727,7 +1732,7 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：Wolfx 聚合预警（all_eew）已关闭")
                 return False
 
-        cenc_ir_url = "wss://ws.fanstudio.tech/cenc-ir"
+        cenc_ir_url = CENC_IR_URL
         if source_name == "cenc-ir" or st == "cenc-ir":
             if not es.get(cenc_ir_url, False):
                 logger.debug("已忽略消息：烈度速报（cenc-ir）数据源已在设置中关闭")
@@ -1771,12 +1776,14 @@ class MainWindow(QMainWindow):
             logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」已在设置中关闭")
             return False
 
+        use_fs_backup = bool(getattr(self.config.ws_config, "fanstudio_use_backup", False))
         fanstudio_http_map = {
-            "fanstudio_typhoon": "https://api.fanstudio.tech/we/typhoon.php",
-            "fanstudio_aqi": "https://api.fanstudio.tech/we/aqi.php",
+            "fanstudio_typhoon": fanstudio_active_http_url(FANSTUDIO_TYPHOON_HTTP, use_fs_backup),
+            "fanstudio_aqi": fanstudio_active_http_url(FANSTUDIO_AQI_HTTP, use_fs_backup),
         }
         fs_http_url = fanstudio_http_map.get(sn) or fanstudio_http_map.get(st)
-        if fs_http_url and not es.get(fs_http_url, False):
+        fs_http_key = fanstudio_http_canonical_key(fs_http_url) if fs_http_url else None
+        if fs_http_key and not es.get(fs_http_key, False):
             logger.debug(f"已忽略消息：Fan Studio HTTP 源「{sn or st}」已关闭")
             return False
 
