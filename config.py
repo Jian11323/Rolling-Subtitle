@@ -138,7 +138,8 @@ AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifes
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
 CHANGELOG_TEXT = """版本 2.6.6
 
-1、气象预警图标接口获取进行更新"""
+1、气象预警图标改用 Fan Studio 接口获取
+2、自动更新清单兼容 UTF-8 BOM"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
