@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -55,7 +56,8 @@ def _fetch_manifest(url: str, timeout: float) -> Optional[Dict[str, Any]]:
             headers={"User-Agent": USER_AGENT},
         )
         r.raise_for_status()
-        data = r.json()
+        # utf-8-sig：兼容部分编辑器/上传工具写入的 UTF-8 BOM（否则 r.json() 会 JSONDecodeError）
+        data = json.loads(r.content.decode("utf-8-sig"))
         if not isinstance(data, dict):
             return None
         return data

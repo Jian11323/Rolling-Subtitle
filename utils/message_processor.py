@@ -87,8 +87,8 @@ from utils.epi_intensity_estimate import (
 
 logger = get_logger()
 
-# 中国气象局预警图标基础 URL，可根据 type 编码查询预警图标
-NMC_ALARM_IMAGE_BASE = "https://image.nmc.cn/assets/img/alarm"
+# Fan Studio 气象预警图标：type 参数为预警编码（如 11B20_yellow）
+FANSTUDIO_ALARM_ICON_URL = "https://api.fanstudio.tech/we/img/alarm_icon.php?type={type}"
 
 
 class MessageProcessor:
@@ -1168,23 +1168,26 @@ class MessageProcessor:
     
     def _match_weather_image(self, weather_data: Dict[str, Any]) -> Optional[str]:
         """
-        气象预警图标仅使用中国气象局在线资源（需 raw_data 中含 NMC type 编码，如 p0005003）。
+        气象预警图标使用 Fan Studio 在线接口（需 raw_data 中含 type 编码，如 11B20_yellow）。
         不再使用本地「气象预警信号图片」目录。
         """
         try:
+            from urllib.parse import quote
+
             alarm_type = weather_data.get('type')
             if alarm_type and isinstance(alarm_type, str) and alarm_type.strip():
                 type_str = alarm_type.strip()
-                if re.match(r'^p[a-zA-Z0-9]+$', type_str):
-                    url = f"{NMC_ALARM_IMAGE_BASE}/{type_str}.png"
+                # 允许 11B20_yellow、p0005003 等常见编码；拒绝空白与路径分隔符
+                if re.match(r'^[A-Za-z0-9][A-Za-z0-9_.\-]*$', type_str):
+                    url = FANSTUDIO_ALARM_ICON_URL.format(type=quote(type_str, safe=""))
                     logger.info(f"使用 type 字段获取气象预警图片: {url}")
                     return url
-                logger.warning(f"气象预警 type 非 NMC 图标编码，无法使用在线图标: {type_str!r}")
+                logger.warning(f"气象预警 type 编码无效，无法使用在线图标: {type_str!r}")
                 return None
             headline = weather_data.get('headline', '') or weather_data.get('title', '')
             if headline:
                 logger.warning(
-                    "气象预警缺少 NMC type 编码，无法显示在线图标（数据源需提供 type；已不使用本地图片）"
+                    "气象预警缺少 type 编码，无法显示在线图标（数据源需提供 type；已不使用本地图片）"
                 )
             else:
                 logger.warning("气象预警数据中无 type 且无 headline/title")
@@ -1217,7 +1220,7 @@ class MessageProcessor:
     
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:
         """
-        获取气象预警图标 URL（仅中国气象局 NMC 在线图标，依赖 raw_data.type 编码）。
+        获取气象预警图标 URL（Fan Studio 在线图标，依赖 raw_data.type 编码）。
 
         Args:
             parsed_data: 解析后的数据字典
