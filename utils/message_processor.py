@@ -260,8 +260,6 @@ class MessageProcessor:
             elif message_type == 'report':
                 if parsed_data.get('source_type') == 'fanstudio_typhoon':
                     return self._format_fanstudio_typhoon_message(parsed_data)
-                if parsed_data.get('source_type') == 'fanstudio_aqi':
-                    return self._format_fanstudio_aqi_message(parsed_data)
                 if parsed_data.get('source_type') == 'fssn-cmt':
                     return self._format_fssn_cmt_message(parsed_data)
                 if parsed_data.get('source_type') == 'cenc-ir':
@@ -849,14 +847,14 @@ class MessageProcessor:
                     continue
                 station_count += 1
                 try:
-                    pga = float(row.get('PGA', 0) or 0)
-                    pgv = float(row.get('PGV', 0) or 0)
+                    pga = float(row.get('PGA', row.get('pga', 0)) or 0)
+                    pgv = float(row.get('PGV', row.get('pgv', 0)) or 0)
                 except (TypeError, ValueError):
                     continue
                 max_pga = pga if max_pga is None or pga > max_pga else max_pga
                 max_pgv = pgv if max_pgv is None or pgv > max_pgv else max_pgv
                 try:
-                    est_i = float(row.get('estimateInt', row.get('INT', 0)) or 0)
+                    est_i = float(row.get('estimateInt', row.get('INT', row.get('int', 0))) or 0)
                 except (TypeError, ValueError):
                     est_i = None
                 if est_i is not None and (max_estimate_int is None or est_i > max_estimate_int):
@@ -865,6 +863,13 @@ class MessageProcessor:
                     city = str(row.get('City') or '').strip()
                     county = str(row.get('County') or '').strip()
                     town = str(row.get('Town') or '').strip()
+                    if not (province or city or county or town):
+                        loc = row.get('location_name')
+                        if isinstance(loc, dict):
+                            province = str(loc.get('province') or '').strip()
+                            city = str(loc.get('city') or '').strip()
+                            county = str(loc.get('county') or '').strip()
+                            town = str(loc.get('town') or '').strip()
                     name_parts = [x for x in (province, city, county, town) if x]
                     max_estimate_place = "".join(name_parts) if name_parts else ""
 
@@ -931,30 +936,6 @@ class MessageProcessor:
         message = f"{header}{message_body}"
         return message
 
-    def _format_fanstudio_aqi_message(self, data: Dict[str, Any]) -> str:
-        """格式化 Fan Studio AQI 数据"""
-        time_point = (data.get('shock_time') or '').strip()
-        area = (data.get('place_name') or '').strip()
-        aqi = (data.get('AQI') or '').strip()
-        quality = (data.get('Quality') or '').strip()
-        co_level = (data.get('COLevel') or '').strip()
-        no2_level = (data.get('NO2Level') or '').strip()
-        o3_level = (data.get('O3Level') or '').strip()
-        so2_level = (data.get('SO2Level') or '').strip()
-        pm10_level = (data.get('PM10Level') or '').strip()
-        pm25_level = (data.get('PM2_5Level') or '').strip()
-        primary = (data.get('PrimaryPollutant') or '').strip()
-        unhealthful = (data.get('Unheathful') or '').strip()
-        measure = (data.get('Measure') or '').strip()
-
-        header = "【城市空气质量指数】"
-        message = header + f"{time_point}，{area}空气质量指数{aqi}，等级{quality}，一氧化碳指数{co_level}，二氧化氮指数{no2_level}，臭氧指数{o3_level}，二氧化硫指数{so2_level}，PM10指数{pm10_level}，PM2.5指数{pm25_level}，首要污染物：{primary}。{unhealthful}，{measure}。"
-        # 保证单行显示与末尾标点
-        message = message.replace('\n', ' ').strip()
-        if not message.endswith(('。', '！', '？')):
-            message += '。'
-        return message
-
     def _format_report_message(self, data: Dict[str, Any]) -> str:
         """
         格式化速报消息
@@ -968,10 +949,11 @@ class MessageProcessor:
         shock_time = data.get('shock_time', '')
         depth = self._safe_float(data.get('depth', 0), 10.0)  # 无深度时默认为10km
         info_type = data.get('info_type', '')  # 获取infoTypeName字段（用于CENC）
+        source_type = str(data.get('source_type') or '').strip()
         
         place_name = self._localize_place_name(
             place_name,
-            data.get('source_type', ''),
+            source_type,
             data.get('latitude'),
             data.get('longitude'),
         )
@@ -988,6 +970,16 @@ class MessageProcessor:
         # 机构名称
         if data.get("fanstudio"):
             message_parts.append(self._fanstudio_report_header(data))
+        elif source_type == "wolfx_cenc":
+            det = str(info_type or "").strip()
+            if "正式" in det:
+                message_parts.append("【Wolfx中国地震台网中心正式测定】")
+            elif "自动" in det:
+                message_parts.append("【Wolfx中国地震台网中心自动测定】")
+            else:
+                message_parts.append("【Wolfx中国地震台网中心地震信息】")
+        elif source_type == "wolfx_jma_eqlist":
+            message_parts.append("【Wolfx JMA 地震情報】")
         elif organization:
             if organization == "FSSN":
                 message_parts.append("【FSSN 地震信息】")
@@ -1168,17 +1160,33 @@ class MessageProcessor:
     
     def _match_weather_image(self, weather_data: Dict[str, Any]) -> Optional[str]:
         """
-        气象预警图标使用 Fan Studio 在线接口（需 raw_data 中含 type 编码，如 11B20_yellow）。
-        不再使用本地「气象预警信号图片」目录。
+        气象预警图标：优先使用数据源下发的 img（如 NMC CDN）；
+        否则回退 Fan Studio 在线接口（需 type 编码，如 11B20_yellow / p0005003）。
         """
         try:
             from urllib.parse import quote
+
+            # 无界科技 / 部分 Fan Studio 帧直接给出完整图标 URL
+            img_url = weather_data.get("img") or weather_data.get("image") or weather_data.get("icon")
+            if isinstance(img_url, str):
+                img_url = img_url.strip()
+                if img_url.startswith("http://"):
+                    # NMC / obs 等常给 http，统一提升为 https，避免混合内容与重定向失败
+                    img_url = "https://" + img_url[len("http://") :]
+                if img_url.startswith("https://"):
+                    logger.info(f"使用数据源 img 字段获取气象预警图片: {img_url}")
+                    return img_url
 
             alarm_type = weather_data.get('type')
             if alarm_type and isinstance(alarm_type, str) and alarm_type.strip():
                 type_str = alarm_type.strip()
                 # 允许 11B20_yellow、p0005003 等常见编码；拒绝空白与路径分隔符
                 if re.match(r'^[A-Za-z0-9][A-Za-z0-9_.\-]*$', type_str):
+                    # p 开头编码优先走 NMC 官方图床（与无界科技 img 一致），Fan Studio 代理常解析失败
+                    if re.match(r'^p\d+$', type_str, re.I):
+                        nmc_url = f"https://image.nmc.cn/assets/img/alarm/{type_str}.png"
+                        logger.info(f"使用 NMC 图床获取气象预警图片: {nmc_url}")
+                        return nmc_url
                     url = FANSTUDIO_ALARM_ICON_URL.format(type=quote(type_str, safe=""))
                     logger.info(f"使用 type 字段获取气象预警图片: {url}")
                     return url
@@ -1187,10 +1195,10 @@ class MessageProcessor:
             headline = weather_data.get('headline', '') or weather_data.get('title', '')
             if headline:
                 logger.warning(
-                    "气象预警缺少 type 编码，无法显示在线图标（数据源需提供 type；已不使用本地图片）"
+                    "气象预警缺少 img/type，无法显示在线图标（数据源需提供 img 或 type）"
                 )
             else:
-                logger.warning("气象预警数据中无 type 且无 headline/title")
+                logger.warning("气象预警数据中无 img/type 且无 headline/title")
             return None
         except Exception as e:
             logger.error(f"匹配气象预警图片时出错: {e}", exc_info=True)
@@ -1220,7 +1228,8 @@ class MessageProcessor:
     
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:
         """
-        获取气象预警图标 URL（Fan Studio 在线图标，依赖 raw_data.type 编码）。
+        获取气象预警图标 URL。
+        优先 raw_data.img（无界科技等），否则按 type 走 NMC / Fan Studio 图标接口。
 
         Args:
             parsed_data: 解析后的数据字典

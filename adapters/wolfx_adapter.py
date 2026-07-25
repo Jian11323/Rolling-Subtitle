@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Wolfx WebSocket 适配器（ws-api.wolfx.jp/all_eew 与 …/cwa_eew）。
+Wolfx WebSocket 适配器（ws-api.wolfx.jp/all_eew、cwa_eew）。
 
-字段约定见 https://api.wolfx.jp/ 各 JSON 表（jma_eew / sc_eew / fj_eew / cenc_eew / cq_eew / cwa_eew）。
+除 CWA 走独立 cwa_eew 外，其余 EEW / 列表速报均经 all_eew 收发。
+字段约定见 https://api.wolfx.jp/ 各 JSON 表。
 """
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base_adapter import BaseAdapter
 
-from config import Config
+from config import Config, WOLFX_CENC_EQLIST_URL, WOLFX_JMA_EQLIST_URL
 from utils.logger import get_logger
 from utils import timezone_utils
 
@@ -28,7 +29,11 @@ WOLFX_TYPE_MAP: Dict[str, str] = {
     "cenc_eew": "wolfx_cenc_eew",
     "cq_eew": "wolfx_cq_eew",
     "cwa_eew": "wolfx_cwa_eew",
+    "cenc_eqlist": "wolfx_cenc",
+    "jma_eqlist": "wolfx_jma_eqlist",
 }
+
+WOLFX_REPORT_TYPES = frozenset({"wolfx_cenc", "wolfx_jma_eqlist"})
 
 # source_type -> 消息配置解析开关字段名（与设置页 Wolfx 区块一致）
 WOLFX_PARSE_FLAG: Dict[str, str] = {
@@ -48,6 +53,8 @@ ORG_BY_SOURCE: Dict[str, str] = {
     "wolfx_cenc_eew": "中国地震台网（Wolfx）",
     "wolfx_cq_eew": "重庆市地震局（Wolfx）",
     "wolfx_cwa_eew": "台湾中央气象署（Wolfx）",
+    "wolfx_cenc": "中国地震台网中心（Wolfx）",
+    "wolfx_jma_eqlist": "日本气象厅地震情报（Wolfx）",
 }
 
 
@@ -56,6 +63,10 @@ def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
             return default
+        s = str(value).strip().lower().replace("km", "").strip()
+        m = re.match(r"^([-+]?\d+(?:\.\d+)?)", s)
+        if m:
+            return float(m.group(1))
         return float(value)
     except (TypeError, ValueError):
         return default
@@ -116,11 +127,48 @@ def _extract_warn_areas(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     return rows if rows else None
 
 
+def _extract_list_entry(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """从 cenc_eqlist / jma_eqlist 帧中取出最新一条（No1）。"""
+    for key in ("No1", "no1", "1"):
+        item = data.get(key)
+        if isinstance(item, dict):
+            return item
+    # 兼容 No01 等写法：取编号最小的 NoN
+    best: Optional[Tuple[int, Dict[str, Any]]] = None
+    for k, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        m = re.match(r"^no0*(\d+)$", str(k).strip(), re.IGNORECASE)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if best is None or n < best[0]:
+            best = (n, v)
+    return best[1] if best else None
+
+
+def _list_fingerprint(data: Dict[str, Any], item: Dict[str, Any]) -> str:
+    """列表帧去重指纹：优先顶层/条目 md5，否则用 EventID+时间+震级。"""
+    for src in (data, item):
+        md5 = str(src.get("md5") or src.get("MD5") or "").strip()
+        if md5:
+            return md5
+    eid = str(item.get("EventID") or item.get("event_id") or "").strip()
+    t = str(item.get("time") or item.get("time_full") or "").strip()
+    mag = str(item.get("magnitude") or "").strip()
+    return f"{eid}|{t}|{mag}"
+
+
 class WolfxAdapter(BaseAdapter):
-    """Wolfx all_eew / cwa_eew 端点解析。"""
+    """Wolfx all_eew / cwa_eew 端点解析（列表速报亦经 all_eew）。"""
+
+    def __init__(self, source_name: str, source_url: str):
+        """初始化适配器并准备列表速报去重状态。"""
+        super().__init__(source_name, source_url)
+        self._last_list_fp: Dict[str, str] = {}  # source_type -> fingerprint
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
-        """解析 Wolfx WebSocket JSON 消息，过滤心跳与训练报后返回预警字典。"""
+        """解析 Wolfx WebSocket JSON 消息，过滤心跳与训练报后返回预警/速报字典。"""
         if isinstance(raw_data, str):
             try:
                 raw_data = json.loads(raw_data)
@@ -144,10 +192,19 @@ class WolfxAdapter(BaseAdapter):
                 return None  # CWA 独立连接只收 cwa_eew
         elif mgr == "wolfx_all_eew":
             if source_type == "wolfx_cwa_eew":
-                return None  # all_eew 通道不含 CWA
+                return None  # CWA 仅走独立 cwa_eew，不经 all_eew
 
         try:
             cfg = Config()
+            # 列表速报：沿用设置页勾选（逻辑键仍为原专线 URL，实际走 all_eew）
+            if source_type == "wolfx_cenc" and not bool(
+                cfg.enabled_sources.get(WOLFX_CENC_EQLIST_URL, False)
+            ):
+                return None
+            if source_type == "wolfx_jma_eqlist" and not bool(
+                cfg.enabled_sources.get(WOLFX_JMA_EQLIST_URL, False)
+            ):
+                return None
             mc = cfg.message_config
             flag = WOLFX_PARSE_FLAG.get(source_type)
             if flag and not bool(getattr(mc, flag, True)):
@@ -159,11 +216,90 @@ class WolfxAdapter(BaseAdapter):
             logger.debug("WolfxAdapter: 训练报 isTraining，跳过")
             return None  # 训练报不展示
 
+        if source_type in WOLFX_REPORT_TYPES:
+            return self._build_report_dict(raw_data, source_type)
         return self._build_warning_dict(raw_data, source_type)
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
-        """获取消息类型（Wolfx 默认为预警）。"""
+        """获取消息类型（预警或速报）。"""
         return str(data.get("type") or "warning")
+
+    def _build_report_dict(self, data: Dict[str, Any], source_type: str) -> Optional[Dict[str, Any]]:
+        """将 Wolfx 列表速报（No1）映射为标准化 report 字典，并用指纹去重。"""
+        item = _extract_list_entry(data)
+        if not item:
+            logger.debug(f"WolfxAdapter: {source_type} 无 No1 条目，跳过")
+            return None
+
+        fp = _list_fingerprint(data, item)
+        if self._last_list_fp.get(source_type) == fp:
+            logger.debug(f"WolfxAdapter: {source_type} 列表未变化（{fp[:16]}…），跳过")
+            return None
+        self._last_list_fp[source_type] = fp
+
+        place_name = str(
+            item.get("location") or item.get("placeName") or item.get("place_name") or ""
+        ).strip()
+        mag = _to_float(item.get("magnitude"), 0.0)
+        lat = _to_float(item.get("latitude"), 0.0)
+        lon = _to_float(item.get("longitude"), 0.0)
+        depth = _to_float(item.get("depth"), 10.0)
+        if depth <= 0:
+            depth = 10.0
+
+        shock_raw = str(
+            item.get("time_full") or item.get("time") or item.get("ReportTime") or ""
+        ).strip()
+        if shock_raw:
+            if source_type == "wolfx_jma_eqlist":
+                shock_time = timezone_utils.jst_to_display(shock_raw)
+            else:
+                shock_time = timezone_utils.cst_to_display(shock_raw)
+        else:
+            shock_time = ""
+
+        event_id = str(item.get("EventID") or item.get("event_id") or "").strip()
+        if not event_id:
+            event_id = fp
+
+        result: Dict[str, Any] = {
+            "type": "report",
+            "source_type": source_type,
+            "magnitude": mag,
+            "latitude": lat,
+            "longitude": lon,
+            "depth": depth,
+            "place_name": place_name,
+            "shock_time": shock_time,
+            "organization": ORG_BY_SOURCE.get(source_type, "地震信息"),
+            "event_id": event_id,
+            "raw_data": dict(item),
+            "fanstudio": False,
+        }
+
+        if source_type == "wolfx_cenc":
+            itype = str(item.get("type") or "").strip().lower()
+            if itype == "reviewed":
+                result["info_type"] = "正式测定"
+            elif itype == "automatic":
+                result["info_type"] = "自动测定"
+            intensity = item.get("intensity")
+            if intensity is not None and str(intensity).strip() != "":
+                result["intensity"] = intensity
+                result["epiIntensity"] = intensity
+        elif source_type == "wolfx_jma_eqlist":
+            shindo = str(item.get("shindo") or "").strip()
+            if shindo:
+                result["epiIntensity"] = shindo
+                result["intensity"] = shindo
+            title = str(item.get("Title") or item.get("title") or "").strip()
+            if title:
+                result["wolfx_jma_eqlist_title"] = title
+            info = str(item.get("info") or "").strip()
+            if info:
+                result["tsunami_info"] = info
+
+        return result
 
     def _build_warning_dict(self, data: Dict[str, Any], source_type: str) -> Dict[str, Any]:
         """将 Wolfx 子源原始字段映射为标准化预警字典。"""

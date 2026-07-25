@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Fan Studio HTTP 数据源适配器
-支持：台风实时与历史数据、城市空气质量指数
+支持：台风实时与历史数据
 """
 
 import json
@@ -21,13 +21,11 @@ class FanStudioHttpAdapter(BaseAdapter):
     """Fan Studio HTTP 数据源适配器"""
 
     def __init__(self, source_name: str, source_url: str):
-        """根据 URL 识别 HTTP 接口类型（台风或 AQI）。"""
+        """根据 URL 识别 HTTP 接口类型。"""
         super().__init__(source_name, source_url)
         lower_url = source_url.lower()
         if 'typhoon.php' in lower_url:
             self.http_type = 'typhoon'
-        elif 'aqi.php' in lower_url:
-            self.http_type = 'aqi'
         else:
             self.http_type = source_name
 
@@ -36,13 +34,18 @@ class FanStudioHttpAdapter(BaseAdapter):
         return 'report'
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
-        """解析 Fan Studio HTTP JSON，按接口类型分发至台风或 AQI 解析。"""
+        """解析 Fan Studio HTTP JSON，按接口类型分发。"""
         try:
-            data = json.loads(raw_data) if isinstance(raw_data, str) else raw_data
+            if isinstance(raw_data, str):
+                try:
+                    data = json.loads(raw_data)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.debug("[FanStudio HTTP] 非 JSON 字符串，跳过")
+                    return None
+            else:
+                data = raw_data
             if self.http_type == 'typhoon':
                 return self._parse_typhoon(data)
-            if self.http_type == 'aqi':
-                return self._parse_aqi(data)
             return None
         except Exception as e:
             logger.error(f"[FanStudio HTTP] 解析数据失败: {e}")
@@ -147,65 +150,3 @@ class FanStudioHttpAdapter(BaseAdapter):
             return f"{lat_label}{abs(lat_val):.2f}°，{lng_label}{abs(lng_val):.2f}°"
         except ValueError:
             return f"{lat}，{lng}"
-
-    def _parse_aqi(self, data: Any) -> Optional[Any]:
-        """解析城市空气质量指数；列表时仅保留最新一批以免队列溢出。"""
-        if isinstance(data, dict) and 'Data' in data:
-            data = data.get('Data')
-
-        def build_item(entry: Dict[str, Any]) -> Dict[str, Any]:
-            """将单条 AQI 记录构建为标准化字典。"""
-            time_point = self._normalize_value(entry, ['TimePoint', 'time_point', 'time', 'UpdateTime', 'updated_at'])
-            area = self._normalize_value(entry, ['Area', 'area', 'City', 'CityName', 'city'])
-            aqi = self._normalize_value(entry, ['AQI', 'aqi'])
-            quality = self._normalize_value(entry, ['Quality', 'quality', 'Status', 'AirQuality'])
-            co_level = self._normalize_value(entry, ['COLevel', 'CO', 'co'])
-            no2_level = self._normalize_value(entry, ['NO2Level', 'NO2', 'no2'])
-            o3_level = self._normalize_value(entry, ['O3Level', 'O3', 'o3'])
-            so2_level = self._normalize_value(entry, ['SO2Level', 'SO2', 'so2'])
-            pm10_level = self._normalize_value(entry, ['PM10Level', 'PM10', 'pm10'])
-            pm25_level = self._normalize_value(entry, ['PM2_5Level', 'PM25', 'pm25'])
-            primary = self._normalize_value(entry, ['PrimaryPollutant', 'primary', 'Primary'])
-            unhealthful = self._normalize_value(entry, ['Unheathful', 'unhealthful', 'UnHealthy', 'Unhealthy', 'Description'])
-            measure = self._normalize_value(entry, ['Measure', 'measure', '备注', 'Remark', 'Remarks'])
-
-            entry_id = self._normalize_value(entry, ['Id', 'id', 'CityCode', 'city_code', 'AreaCode', 'area_code'])
-            event_id = f"fanstudio_aqi:{entry_id or 'unknown'}:{area or 'unknown'}:{time_point or 'unknown'}"
-            return {
-                'type': 'report',
-                'source_type': self.source_name,
-                'organization': self.get_organization_name(),
-                'place_name': area,
-                'shock_time': time_point,
-                'raw_data': entry,
-                'fanstudio': True,
-                'event_id': event_id,
-                'AQI': aqi,
-                'Quality': quality,
-                'COLevel': co_level,
-                'NO2Level': no2_level,
-                'O3Level': o3_level,
-                'SO2Level': so2_level,
-                'PM10Level': pm10_level,
-                'PM2_5Level': pm25_level,
-                'PrimaryPollutant': primary,
-                'Unheathful': unhealthful,
-                'Measure': measure,
-            }
-
-        if isinstance(data, list):
-            items = [build_item(entry) for entry in data if isinstance(entry, dict)]
-            if not items:
-                return None
-            # 首包仅入队最新一批，避免 300+ 城市同时灌满消息队列
-            items.sort(key=lambda x: (x.get('shock_time') or ''), reverse=True)
-            max_aqi_batch = 30
-            if len(items) > max_aqi_batch:
-                logger.debug(
-                    f"[FanStudio HTTP] AQI 共 {len(items)} 条，首包仅处理最新 {max_aqi_batch} 条"
-                )
-                items = items[:max_aqi_batch]
-            return items
-        if isinstance(data, dict):
-            return build_item(data)
-        return None

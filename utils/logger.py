@@ -12,6 +12,16 @@ from datetime import datetime
 from pathlib import Path
 
 
+class DebugOrErrorFilter(logging.Filter):
+    """仅放行 DEBUG 与 ERROR（含 CRITICAL / exception），过滤 INFO / WARNING。"""
+
+    _ALLOWED = frozenset({logging.DEBUG, logging.ERROR, logging.CRITICAL})
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """True 表示写入该条日志。"""
+        return record.levelno in self._ALLOWED
+
+
 class Logger:
     """日志管理器 - 单例模式"""
     _instance = None
@@ -58,9 +68,9 @@ class Logger:
             # 如果日志初始化失败，至少设置控制台输出
             print(f"警告: 日志初始化失败: {e}")
             self.logger = logging.getLogger('EarthquakeScroller')
-            self.logger.setLevel(logging.INFO)
+            self.logger.setLevel(logging.DEBUG)
             self.console_handler = logging.StreamHandler()
-            self.console_handler.setLevel(logging.INFO)
+            self.console_handler.setLevel(logging.DEBUG)  # 控制台全项：DEBUG/INFO/WARNING/ERROR
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             self.console_handler.setFormatter(formatter)
             self.logger.addHandler(self.console_handler)
@@ -68,15 +78,17 @@ class Logger:
         self._initialized = True
     
     def _setup_logger(self):
-        """设置日志记录器"""
+        """设置日志记录器：控制台全项；文件仅 DEBUG / ERROR。"""
         self.logger = logging.getLogger('EarthquakeScroller')
-        self.logger.setLevel(logging.INFO)
+        # 需设为 DEBUG，否则 debug() 会被 logger 级别直接丢弃
+        self.logger.setLevel(logging.DEBUG)
         console_formatter = logging.Formatter(
             '%(asctime)s [%(levelname)s] %(message)s',
             datefmt='%H:%M:%S'
         )
         self.console_handler = logging.StreamHandler()
-        self.console_handler.setLevel(logging.INFO)
+        # 控制台输出全部级别（DEBUG / INFO / WARNING / ERROR / CRITICAL）
+        self.console_handler.setLevel(logging.DEBUG)
         self.console_handler.setFormatter(console_formatter)
         self.logger.addHandler(self.console_handler)
         self._setup_file_handler(clear_if_config=True)
@@ -135,7 +147,9 @@ class Logger:
                 self.file_handler = logging.handlers.RotatingFileHandler(
                     log_filename, maxBytes=max_bytes, backupCount=5, encoding='utf-8'
                 )
-            self.file_handler.setLevel(logging.WARNING)
+            # DEBUG 级别 + 过滤器：只落盘 debug / error
+            self.file_handler.setLevel(logging.DEBUG)
+            self.file_handler.addFilter(DebugOrErrorFilter())
             self.file_handler.setFormatter(file_formatter)
             self.logger.addHandler(self.file_handler)
             self.log_file = log_filename

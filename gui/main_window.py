@@ -11,14 +11,13 @@ import math
 import asyncio
 import threading
 import time
-from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QApplication,
     QDialog, QLabel, QScrollArea, QPushButton, QFrame, QSystemTrayIcon, QAction,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent
-from typing import Dict, Any, Optional, Union, List, Tuple
+from typing import Dict, Any, Optional, Union, List, Tuple, Set
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -34,14 +33,26 @@ from config import (
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
     PTWC_CAP_URL,
+    USGS_HTTP_URL,
+    HKO_HTTP_URL,
+    GFZ_HTTP_URL,
+    USP_HTTP_URL,
+    CWA_REPORT_HTTP_URL,
     FANSTUDIO_ALL_URL,
-    CENC_IR_URL,
     FANSTUDIO_TYPHOON_HTTP,
-    FANSTUDIO_AQI_HTTP,
-    fanstudio_active_http_url,
     fanstudio_http_canonical_key,
+    WOLFX_ALL_EEW_URL,
+    WOLFX_CWA_EEW_URL,
+    WOLFX_CENC_EQLIST_URL,
+    WOLFX_JMA_EQLIST_URL,
+    EMSC_WSS_URL,
+    NOWQUAKE_CENCINT_WSS_URL,
+    DATA_PROVIDER_FANSTUDIO,
+    DATA_PROVIDER_WHEWS,
+    DATA_PROVIDER_OFFICIAL,
 )
 from adapters.fanstudio_adapter import FanStudioAdapter
+from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
 from data_sources import WebSocketManager, HTTPPollingManager
 from utils.message_processor import MessageProcessor
 from utils.logger import get_logger
@@ -50,8 +61,6 @@ from utils.geo_utils import should_accept_message
 from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import show_event_notification
-from utils.event_dedup import find_duplicate_index, merge_sources
-from utils.event_history_store import EventHistoryStore
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
@@ -63,6 +72,36 @@ logger = get_logger()
 # 过期预警入口日志降噪：同一 event 10 分钟内只 WARN 一次
 _EXPIRED_WARNING_LOG: Dict[str, float] = {}
 _EXPIRED_WARNING_LOG_TTL_SEC = 600
+
+# 切换主提供者时仍可保留的全局辅助源（与设置页「始终可用」一致）
+_GLOBAL_BUFFER_SOURCES: Set[str] = {
+    "__custom_text__",
+    "fanstudio_typhoon",
+    "cenc-ir",
+    "p2pquake",
+    "p2pquake_ws",
+    "p2pquake_tsunami",
+}
+# 仅 Fan Studio 聚合通道会出现的子源（无界/官方直连不会产出）
+_FANSTUDIO_ONLY_SOURCES: Set[str] = {
+    "ningxia",
+    "guangxi",
+    "shanxi",
+    "beijing",
+    "yunnan",
+    "fssn",
+    "fssn-cmt",
+    "海啸信息",
+}
+# 入队时始终保留的溯源字段（避免速报不存 parsed_data 导致切换后无法识别归属）
+_MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
+    "source_type",
+    "fanstudio",
+    "whews",
+    "type",
+    "event_id",
+    "is_tsunami",
+)
 
 
 def _log_expired_warning_ignored(source_name: str, parsed_data: Dict[str, Any]) -> None:
@@ -131,20 +170,25 @@ class MainWindow(QMainWindow):
         # 预警后限时显示速报再回自定义：到期时间戳（None 表示未在限时中）
         self._custom_text_return_at: Optional[float] = None
         self._post_warning_showing_report: bool = False
+        # 记录当前生效的自定义文本模式，便于热切换时判断是否刚切换
+        self._use_custom_text_active: bool = bool(
+            getattr(self.config.message_config, "use_custom_text", False)
+        )
+        self._data_source_hot_snapshot = None  # 延迟在首次热重载时初始化
+        # 记录当前主提供者，热切换时用于清空对方缓冲、禁止窜数据
+        self._active_data_provider = self.config.get_active_data_provider()
 
         # 告警序列控制器（懒初始化：在 _setup_ui 创建 scrolling_text 后注入）
         self.alert_controller: Optional[AlertController] = None
         
         # 设置窗口引用
         self.settings_window = None
-        self.history_window = None
         
         # 右键菜单缓存（避免每次右键点击时重新创建）
         self.context_menu = None
-        # 事件历史：环形缓冲 + 每源最新一条索引
-        max_hist = getattr(self.config.message_config, "event_history_max_entries", 500)
-        self._event_history_store = EventHistoryStore(max_hist)
         self._tray_icon: Optional[QSystemTrayIcon] = None
+        # 本会话已成功解析过的设置页状态键（如 fanstudio_parse_cea）
+        self._parsed_status_keys: Set[str] = set()
         
         # 窗口大小变更防抖：拖拽结束后再写入配置
         self._resize_save_timer = QTimer(self)
@@ -188,6 +232,19 @@ class MainWindow(QMainWindow):
                 logger.info("已注入自定义文本到 report_buffer（自定义文本模式）")
             self._start_message_processing()
             self._start_data_sources()
+            try:
+                from utils.performance_presets import _data_source_snapshot
+                self._data_source_hot_snapshot = (
+                    _data_source_snapshot(self.config),
+                    (
+                        (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
+                        (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
+                        (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
+                        tuple(sorted((self.config.http_poll_intervals or {}).items())),
+                    ),
+                )
+            except Exception:
+                self._data_source_hot_snapshot = None
             logger.info("后台任务已启动")
             # 预弹一次右键菜单（离屏并立即隐藏），消化首次 popup 的初始化，避免用户第一次右键时卡顿
             QTimer.singleShot(300, self._warm_up_context_menu)
@@ -199,66 +256,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"延迟启动后台任务失败: {e}")
 
-    def _record_cea_test_history(
-        self,
-        source_name: str,
-        parsed_data: Dict[str, Any],
-    ) -> None:
-        """initial_all 启动同步：写入/更新一条最新 CEA，供设置页预警 TTS 测试。"""
-        try:
-            pd = dict(parsed_data)
-            pd["_cea_test_seed"] = True
-            message = self.message_processor.format_message(
-                pd,
-                ignore_warning_expiry=True,
-            )
-            if not message:
-                return
-
-            source_display = self._get_history_source_display(source_name, pd)
-            type_display = self._get_history_type_display("warning")
-            content_display = self._build_history_content(pd, message)
-            raw_time = pd.get("shock_time") or pd.get("time") or pd.get("created_at") or ""
-            event_time = self._normalize_history_event_time(raw_time)
-
-            entry = {
-                "source_name": source_name,
-                "source_display": source_display,
-                "message_type": "warning",
-                "type_display": type_display,
-                "event_time": event_time,
-                "message_text": content_display,
-                "scroll_text": message,
-                "received_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "received_at_ts": time.time(),
-                "parsed_data": pd,
-                "merged_sources": [source_display or source_name],
-            }
-
-            dup_idx = self._event_history_store.find_index_from_end(
-                lambda e: (e.get("parsed_data") or {}).get("_cea_test_seed")
-            )
-            if dup_idx is not None:
-                self._event_history_store.update_entry(dup_idx, entry)
-            else:
-                self._event_history_store.append(
-                    source_name,
-                    "warning",
-                    content_display,
-                    pd,
-                    source_display=source_display,
-                    type_display=type_display,
-                    event_time=event_time,
-                    scroll_text=message,
-                )
-            logger.info(
-                "已写入最新 CEA 测试数据: %s M%s",
-                pd.get("place_name"),
-                pd.get("magnitude"),
-            )
-        except Exception as e:
-            logger.debug(f"写入 CEA 测试数据失败: {e}")
-    
     def _setup_ui(self):
         """设置用户界面"""
         try:
@@ -302,6 +299,7 @@ class MainWindow(QMainWindow):
             
             # 创建滚动文本组件（按 render_backend 选择 CPU / OpenGL）
             backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")  # 优先读显式配置，再回退到 GPU 开关
+            self._active_render_backend = backend
             scroll_widget = None  # 布局中用于右键菜单的控件
             if backend == "opengl":
                 self.scrolling_text = ScrollingText(self.config)
@@ -473,9 +471,6 @@ class MainWindow(QMainWindow):
         """)
         
         # 设置菜单项
-        history_action = self.context_menu.addAction("事件历史")
-        history_action.triggered.connect(self._open_history_window)
-
         settings_action = self.context_menu.addAction("设置")
         settings_action.triggered.connect(self._open_settings)
 
@@ -613,6 +608,15 @@ class MainWindow(QMainWindow):
             new_bg_color = self.config.gui_config.bg_color
             self.setStyleSheet(f"background-color: {new_bg_color};")
             logger.info(f"背景颜色已更新: {new_bg_color}")
+
+            # 日志配置热更新（启动清日志仍仅启动时生效）
+            try:
+                logger.set_log_config(self.config.log_config)
+            except Exception as e_log:
+                logger.debug(f"热更新日志配置失败（可忽略）: {e_log}")
+
+            # 渲染后端热切换（CPU ↔ OpenGL）
+            self._hot_reload_render_backend()
             
             # 更新滚动文本组件的配置（包括字体大小、VSync、目标帧率、滚动速度、消息颜色等）
             if self.scrolling_text:
@@ -634,29 +638,11 @@ class MainWindow(QMainWindow):
             else:
                 logger.warning("滚动文本组件不存在，跳过配置更新")
             
-            # 自定义文本热更新：若为自定义文本模式，更新 report_buffer 中 __custom_text__ 消息（文本与颜色）并刷新显示
-            if getattr(self.config.message_config, 'use_custom_text', False):
-                new_text = self.config.message_config.custom_text or ""
-                custom_color = getattr(self.config.message_config, 'custom_text_color', None) or '#01FF00'
-                with self.report_buffer._lock:
-                    for msg in self.report_buffer.buffer:
-                        if msg.source == '__custom_text__':
-                            msg.text = new_text
-                            msg.color = custom_color
-                            break
-                if (self._current_displaying_message and 
-                    self._current_displaying_message.source == '__custom_text__' and 
-                    self.scrolling_text):
-                    self.scrolling_text.update_text(
-                        new_text,
-                        custom_color,
-                        None,
-                        force=True,
-                        message_type='custom_text',
-                    )
-                    self._current_displaying_message.text = new_text
-                    self._current_displaying_message.color = custom_color
-                    logger.info("自定义文本已热更新到当前显示")
+            # 自定义文本模式 / 内容热更新
+            self._hot_reload_custom_text_mode()
+
+            # 数据源连接热重载（WebSocket / HTTP）
+            self._hot_reload_data_sources()
             
             logger.info("配置热修改应用完成")
             
@@ -664,7 +650,285 @@ class MainWindow(QMainWindow):
             logger.error(f"应用配置热修改失败: {e}")
             import traceback
             logger.exception("详细错误信息:")
-    
+
+    def _hot_reload_data_sources(self) -> None:
+        """按当前配置热启停 WebSocket / HTTP 数据源（仅在连接相关配置变化时执行）。"""
+        try:
+            from utils.performance_presets import _data_source_snapshot
+
+            snapshot = _data_source_snapshot(self.config)
+            # 附带鉴权相关字段，令牌/Key 变更也触发重载或热鉴权
+            auth_part = (
+                (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
+                (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
+                (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
+                tuple(sorted((self.config.http_poll_intervals or {}).items())),
+            )
+            full_snapshot = (snapshot, auth_part)
+            if full_snapshot == getattr(self, "_data_source_hot_snapshot", None):
+                return
+            self._data_source_hot_snapshot = full_snapshot
+
+            http_mgr = (self.data_sources or {}).get("http_polling")
+            if http_mgr is not None and hasattr(http_mgr, "reload_connections"):
+                http_mgr.reload_connections()
+
+            if self.ws_manager is not None and self._ws_loop is not None and self._ws_loop.is_running():
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.ws_manager.reload_connections(), self._ws_loop
+                )
+
+                def _after_ws_reload(f):
+                    try:
+                        f.result()
+                        fs_key = (
+                            getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
+                        ).strip()
+                        if fs_key and self.ws_manager is not None:
+                            self.ws_manager.send_fanstudio_auth(fs_key)
+                        logger.info("数据源连接已按配置热重载")
+                    except Exception as e_ws:
+                        logger.error(f"热重载 WebSocket 连接失败: {e_ws}")
+
+                fut.add_done_callback(_after_ws_reload)
+            else:
+                logger.info("HTTP 数据源已按配置热重载")
+
+            # 连接范围变化后清理缓冲：主提供者三选一切换时整表清空，再由新源拉取
+            prev_provider = getattr(self, "_active_data_provider", None)
+            new_provider = self.config.get_active_data_provider()
+            provider_switched = (
+                prev_provider is not None and prev_provider != new_provider
+            )
+            self._purge_inactive_buffer_messages(force_clear_all=provider_switched)
+            self._active_data_provider = new_provider
+        except Exception as e:
+            logger.error(f"热重载数据源失败: {e}", exc_info=True)
+
+    @staticmethod
+    def _is_global_buffer_source(source_name: str, parsed_data: Optional[Dict[str, Any]] = None) -> bool:
+        """判断消息是否属于全局辅助源（台风 / 烈度 / P2P 等）。"""
+        sn = (source_name or "").strip()
+        st = ""
+        if isinstance(parsed_data, dict):
+            st = (parsed_data.get("source_type") or "").strip()
+        return sn in _GLOBAL_BUFFER_SOURCES or st in _GLOBAL_BUFFER_SOURCES
+
+    def _purge_inactive_buffer_messages(self, *, force_clear_all: bool = False) -> None:
+        """按当前启用状态清理速报/预警缓冲区；切换主提供者时整表清空。"""
+        if force_clear_all:
+            removed_report = 0
+            removed_warning = 0
+            if getattr(self, "report_buffer", None) is not None:
+                removed_report = self.report_buffer.size()
+                self.report_buffer.clear()
+            if getattr(self, "warning_buffer", None) is not None:
+                removed_warning = self.warning_buffer.size()
+                self.warning_buffer.clear()
+            self._current_displaying_message = None
+            self._pending_update_message = None
+            # 自定义文本模式：清空后重新注入；否则显示加载提示，等待新源首包
+            if getattr(self.config.message_config, "use_custom_text", False):
+                new_text = (
+                    self.config.message_config.custom_text
+                    or "系统运行中，等待最新地震信息..."
+                )
+                custom_color = (
+                    getattr(self.config.message_config, "custom_text_color", None)
+                    or "#01FF00"
+                )
+                custom_msg = MessageItem(
+                    text=new_text,
+                    color=custom_color,
+                    timestamp=time.time(),
+                    message_type="custom_text",
+                    source="__custom_text__",
+                )
+                self.report_buffer.add(custom_msg)
+                if self.scrolling_text is not None:
+                    try:
+                        self.scrolling_text.update_text(
+                            new_text,
+                            custom_color,
+                            None,
+                            force=True,
+                            message_type="custom_text",
+                        )
+                        self._current_displaying_message = custom_msg
+                    except Exception:
+                        pass
+            elif self.scrolling_text is not None and hasattr(
+                self.scrolling_text, "show_loading_message"
+            ):
+                try:
+                    self.scrolling_text.show_loading_message()
+                except Exception:
+                    pass
+            logger.info(
+                f"热切换提供者：已清空全部缓冲，等待新数据源拉取 "
+                f"(速报={removed_report}, 预警={removed_warning})"
+            )
+            return
+
+        def _should_remove(msg: MessageItem) -> bool:
+            pd = dict(msg.parsed_data or {})
+            if not pd.get("source_type") and msg.source:
+                pd.setdefault("source_type", msg.source)
+            return not self._should_process_data_source_message(msg.source or "", pd)
+
+        removed_report = 0
+        removed_warning = 0
+        if getattr(self, "report_buffer", None) is not None:
+            removed_report = self.report_buffer.remove_where(_should_remove)
+        if getattr(self, "warning_buffer", None) is not None:
+            removed_warning = self.warning_buffer.remove_where(_should_remove)
+        if removed_report or removed_warning:
+            logger.info(
+                f"热切换后已清理失效缓冲消息（开关/归属过滤）: "
+                f"速报={removed_report}, 预警={removed_warning}"
+            )
+
+    def _hot_reload_render_backend(self) -> None:
+        """热切换滚动字幕渲染后端（CPU / OpenGL）。"""
+        backend = getattr(self.config.gui_config, "render_backend", None) or (
+            "opengl" if self.config.gui_config.use_gpu_rendering else "cpu"
+        )
+        if backend == getattr(self, "_active_render_backend", None):
+            return
+        if self.scrolling_text is None:
+            self._active_render_backend = backend
+            return
+        central = self.centralWidget()
+        if central is None or central.layout() is None:
+            return
+        layout = central.layout()
+        old = self.scrolling_text
+        # 保存当前显示状态，切换后恢复
+        prev_text = getattr(old, "current_text", "") or ""
+        prev_color = getattr(old, "current_color", None)
+        prev_type = getattr(old, "current_message_type", None)
+        prev_image = getattr(old, "current_image_path", None)
+        try:
+            if hasattr(old, "timer") and old.timer is not None:
+                old.timer.stop()
+            try:
+                old.scroll_completed.disconnect(self._on_scroll_completed)
+            except Exception:
+                pass
+            if backend == "opengl":
+                new_widget = ScrollingText(self.config)
+            else:
+                new_widget = ScrollingTextCPU(self.config)
+            layout.replaceWidget(old, new_widget)
+            old.setParent(None)
+            old.deleteLater()
+            self.scrolling_text = new_widget
+            self._active_render_backend = backend
+            new_widget.scroll_completed.connect(self._on_scroll_completed)
+            new_widget.setContextMenuPolicy(Qt.CustomContextMenu)
+            new_widget.customContextMenuRequested.connect(
+                lambda pos, w=new_widget: self._show_context_menu(pos, w)
+            )
+            if self.alert_controller is not None:
+                self.alert_controller._scrolling_text = new_widget
+            if prev_text:
+                new_widget.update_text(
+                    prev_text,
+                    prev_color,
+                    prev_image,
+                    force=True,
+                    message_type=prev_type,
+                )
+            logger.info(f"渲染后端已热切换为: {backend}")
+        except Exception as e:
+            logger.error(f"热切换渲染后端失败: {e}", exc_info=True)
+
+    def _hot_reload_custom_text_mode(self) -> None:
+        """热切换「地震速报 / 自定义文本」模式，并刷新自定义文本内容。"""
+        use_custom = bool(getattr(self.config.message_config, "use_custom_text", False))
+        was_custom = bool(getattr(self, "_use_custom_text_active", False))
+        new_text = self.config.message_config.custom_text or "系统运行中，等待最新地震信息..."
+        custom_color = getattr(self.config.message_config, "custom_text_color", None) or "#01FF00"
+        custom_msg = self.report_buffer.find_by_source("__custom_text__")
+
+        if use_custom:
+            if custom_msg is None:
+                custom_msg = MessageItem(
+                    text=new_text,
+                    color=custom_color,
+                    timestamp=time.time(),
+                    message_type="custom_text",
+                    source="__custom_text__",
+                )
+                self.report_buffer.add(custom_msg)
+                logger.info("已热注入自定义文本到 report_buffer")
+            else:
+                custom_msg.text = new_text
+                custom_msg.color = custom_color
+
+            # 仅在刚切入自定义模式时强制切显示；已在该模式则只更新文案
+            if not was_custom:
+                if not self._display_type_is_warning_or_test(self.current_display_type):
+                    self._switch_to_custom_text_only("mode_switch_on")
+            elif (
+                self._current_displaying_message
+                and self._current_displaying_message.source == "__custom_text__"
+                and self.scrolling_text
+            ):
+                self.scrolling_text.update_text(
+                    new_text,
+                    custom_color,
+                    None,
+                    force=True,
+                    message_type="custom_text",
+                )
+                self._current_displaying_message.text = new_text
+                self._current_displaying_message.color = custom_color
+                logger.info("自定义文本已热更新到当前显示")
+            self._use_custom_text_active = True
+            return
+
+        # 切回地震速报：移除合成自定义文本
+        self._use_custom_text_active = False
+        if not was_custom and custom_msg is None:
+            return
+        self._custom_text_return_at = None
+        self._post_warning_showing_report = False
+        with self.report_buffer._lock:
+            self.report_buffer.buffer = [
+                m for m in self.report_buffer.buffer if m.source != "__custom_text__"
+            ]
+            if self.report_buffer.current_index >= len(self.report_buffer.buffer):
+                self.report_buffer.current_index = 0
+        if (
+            was_custom
+            and self._current_displaying_message
+            and self._current_displaying_message.source == "__custom_text__"
+        ):
+            next_msg = None
+            if self.report_buffer.buffer:
+                next_msg = self.report_buffer.get_next()
+            if next_msg is not None and self.scrolling_text:
+                self._current_displaying_message = next_msg
+                self.current_display_type = next_msg.message_type
+                self.scrolling_text.update_text(
+                    next_msg.text,
+                    next_msg.color,
+                    getattr(next_msg, "image_path", None),
+                    force=True,
+                    message_type=next_msg.message_type,
+                )
+            elif self.scrolling_text:
+                self._current_displaying_message = None
+                self.current_display_type = None
+                self.scrolling_text.update_text(
+                    "系统运行中，等待最新地震信息...",
+                    "#01FF00",
+                    None,
+                    force=True,
+                    message_type="report",
+                )
+            logger.info("已热退出自定义文本模式，恢复地震速报显示")
     def _show_changelog_if_needed(self):
         """若当前版本未读过更新说明，则弹窗展示一次，关闭后记录已读版本并保存配置"""
         try:
@@ -787,206 +1051,6 @@ class MainWindow(QMainWindow):
                 logger.error(f"打开设置窗口失败: {e}")
         # 不再额外延迟，直接在下一事件循环打开（菜单点击已结束）
         QTimer.singleShot(0, _do_open_settings)
-
-    def _open_history_window(self):
-        """打开事件历史窗口（复用实例，减少重复创建开销）"""
-        def _do_open_history():
-            """在下一事件循环中打开或复用事件历史窗口。"""
-            try:
-                from .history_window import HistoryWindow
-                if self.history_window is None:
-                    self.history_window = HistoryWindow(self)
-                self.history_window.refresh_history()
-                self.history_window.show()
-                self.history_window.raise_()
-                self.history_window.activateWindow()
-            except Exception as e:
-                logger.error(f"打开事件历史窗口失败: {e}")
-        QTimer.singleShot(0, _do_open_history)
-
-    def _record_event_history(
-        self,
-        source_name: str,
-        message_type: str,
-        message_text: str,
-        parsed_data: Dict[str, Any],
-    ):
-        """记录事件历史（环形缓冲，支持跨源去重）。"""
-        try:
-            source_display = self._get_history_source_display(source_name, parsed_data)
-            type_display = self._get_history_type_display(message_type)
-            content_display = self._build_history_content(parsed_data, message_text)
-            raw_time = (
-                parsed_data.get("shock_time")
-                or parsed_data.get("time")
-                or parsed_data.get("created_at")
-                or ""
-            )
-            normalized_event_time = self._normalize_history_event_time(raw_time)
-            recent = self._event_history_store.get_entries_snapshot()
-            dup_idx = find_duplicate_index(parsed_data, recent)
-            if dup_idx is not None:
-                entries = self._event_history_store.get_entries_snapshot()
-                if 0 <= dup_idx < len(entries):
-                    existing = dict(entries[dup_idx])
-                    merge_sources(existing, source_display)
-                    existing["message_text"] = content_display
-                    existing["scroll_text"] = message_text
-                    existing["received_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    existing["received_at_ts"] = time.time()
-                    self._event_history_store.update_entry(dup_idx, existing)
-                    return
-            self._event_history_store.append(
-                source_name,
-                message_type,
-                content_display,
-                parsed_data,
-                source_display=source_display,
-                type_display=type_display,
-                event_time=normalized_event_time,
-                scroll_text=message_text,
-            )
-        except Exception as e:
-            logger.debug(f"写入事件历史失败: {e}")
-
-    def _normalize_history_event_time(self, raw_time: Any) -> str:
-        """统一历史事件时间格式为 YYYY-MM-DD HH:MM:SS。"""
-        if raw_time is None:
-            return "-"
-        text = str(raw_time).strip()
-        if not text:
-            return "-"
-
-        # 先做常见格式归一化
-        text = text.replace("/", "-")
-
-        # 兼容仅到分钟的格式：YYYY-MM-DD HH:MM
-        if len(text) == 16:
-            text = f"{text}:00"
-
-        candidate_formats = (
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%dT%H:%M",
-        )
-
-        for fmt in candidate_formats:
-            try:
-                dt = datetime.strptime(text, fmt)
-                return dt.strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                continue
-
-        # 兜底：提取日期时间片段并再次尝试
-        import re
-        m = re.search(r"(\d{4}-\d{1,2}-\d{1,2})\s+(\d{1,2}:\d{1,2}(?::\d{1,2})?)", text)
-        if m:
-            normalized = f"{m.group(1)} {m.group(2)}"
-            if len(m.group(2)) == 5:
-                normalized += ":00"
-            try:
-                dt = datetime.strptime(normalized, "%Y-%m-%d %H:%M:%S")
-                return dt.strftime("%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                pass
-
-        # 无法识别时返回原文本，避免丢信息
-        return text
-
-    def _get_history_type_display(self, message_type: str) -> str:
-        """历史窗口类型展示：仅「预警 / 速报」"""
-        if str(message_type).lower() == "warning":
-            return "预警"
-        return "速报"
-
-    def _get_history_source_display(self, source_name: str, parsed_data: Dict[str, Any]) -> str:
-        """历史窗口数据源名称优先展示中文机构名。"""
-        org = str(parsed_data.get("organization", "") or "").strip()
-        source_type = str(parsed_data.get("source_type", "") or "").strip().lower()
-
-        # 先按 source_type 做强约束归一化（避免 organization 混入“第X报/正式测定”等附加文本）
-        if source_type == "tsunami":
-            return "自然资源部海啸预警中心"
-        if source_type == "cenc":
-            return "中国地震台网"
-        if source_type == "cenc-ir":
-            return "中国地震台网烈度速报"
-
-        # 再按 organization 文本做归一化
-        if org:
-            org_low = org.lower()
-            if "海啸预警" in org:
-                return "自然资源部海啸预警中心"
-            if "烈度速报" in org:
-                return "中国地震台网烈度速报"
-            if ("地震台网" in org) or ("自动测定" in org_low) or ("正式测定" in org_low):
-                return "中国地震台网"
-            # 去除常见附加描述后再展示，尽量保持“仅机构名”
-            org = org.replace("自动测定/正式测定", "").replace("自动测定", "").replace("正式测定", "").strip(" -_/")
-            if org:
-                return org
-
-        source_map = {
-            "ningxia": "宁夏地震局",
-            "emsc": "欧洲地中海地震中心",
-            "beijing": "北京市地震局",
-            "shanxi": "山西省地震局",
-            "guangxi": "广西壮族自治区地震局",
-            "yunnan": "云南省地震局",
-            "cenc": "中国地震台网",
-            "cenc-ir": "中国地震台网烈度速报",
-            "hko": "香港天文台",
-            "usgs": "美国地质调查局",
-            "gfz": "德国地学研究中心",
-            "bcsf": "法国中央地震研究所",
-            "usp": "巴西圣保罗大学",
-            "kma": "韩国气象厅",
-            "cwa": "台湾省气象署",
-            "weatheralarm": "中国气象局",
-            "海啸信息": "自然资源部海啸预警中心",
-            "p2pquake": "日本气象厅",
-            "p2pquake_tsunami": "日本气象厅",
-        }
-        if source_name in source_map:
-            return source_map[source_name]
-        return source_name
-
-    def _build_history_content(self, parsed_data: Dict[str, Any], fallback_text: str) -> str:
-        """历史窗口内容展示：地点、震级、震源深度。"""
-        place = str(parsed_data.get("place_name", "") or "").strip()
-        magnitude = parsed_data.get("magnitude")
-        depth = parsed_data.get("depth")
-        parts = []
-        if place:
-            parts.append(f"地点：{place}")
-        if magnitude not in (None, ""):
-            parts.append(f"震级：{magnitude}")
-        if depth not in (None, ""):
-            parts.append(f"震源深度：{depth}公里")
-        if parts:
-            return "，".join(parts)
-        return fallback_text
-
-    def get_event_history_snapshot(self) -> Dict[str, Dict[str, Any]]:
-        """获取事件历史快照（供历史窗口展示，兼容旧接口）。"""
-        return self._event_history_store.get_per_source_snapshot()
-
-    def get_full_event_history(self) -> list:
-        """获取完整环形历史列表。"""
-        return self._event_history_store.get_entries_snapshot()
-
-    def export_event_history_csv(self, path: str) -> bool:
-        """导出事件历史为 CSV 文件。"""
-        return self._event_history_store.export_csv(path)
-
-    def export_event_history_json(self, path: str) -> bool:
-        """导出事件历史为 JSON 文件。"""
-        return self._event_history_store.export_json(path)
-
-    def clear_event_history(self):
-        """清空事件历史缓存"""
-        self._event_history_store.clear()
 
     def _warning_display_segments(
         self, message: MessageItem
@@ -1706,13 +1770,39 @@ class MainWindow(QMainWindow):
         """
         es = self.config.enabled_sources
         mc = self.config.message_config
-        st = (parsed_data.get("source_type") or "").strip()
+        # source_type 统一小写，兼容上游（尤其无界科技）大小写混杂
+        st = (parsed_data.get("source_type") or "").strip().lower()
         sn = source_name or ""
+        provider = self.config.get_active_data_provider()
+
+        # 主提供者门控：隐藏面板勾选残留不得继续投递/保留缓冲
+        # 台风 HTTP 虽带 fanstudio 标记，但是全局源，不随主提供者切换丢弃
+        is_typhoon = (
+            st == "fanstudio_typhoon"
+            or sn == "fanstudio_typhoon"
+            or source_name == "fanstudio_typhoon"
+        )
+        # Fan Studio 专属子源：无标记时也按名称门控，防止旧缓冲窜屏
+        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and provider != DATA_PROVIDER_FANSTUDIO:
+            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」不属于当前提供者")
+            return False
+        if parsed_data.get("fanstudio") and provider != DATA_PROVIDER_FANSTUDIO and not is_typhoon:
+            logger.debug("已忽略消息：当前非 Fan Studio 提供者")
+            return False
+        if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
+            logger.debug("已忽略消息：当前非无界科技提供者")
+            return False
 
         fanstudio_all_url = FANSTUDIO_ALL_URL
         if not es.get(fanstudio_all_url, True):
-            if parsed_data.get("fanstudio") and st != "cenc-ir" and source_name != "cenc-ir":
+            if parsed_data.get("fanstudio") and not is_typhoon:
                 logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
+                return False
+
+        # 烈度速报（Nowquake）：未勾选时丢弃
+        if source_name == "cenc-ir" or st == "cenc-ir":
+            if not es.get(NOWQUAKE_CENCINT_WSS_URL, False):
+                logger.debug("已忽略消息：CENC 烈度速报（Nowquake）已关闭")
                 return False
 
         if parsed_data.get("fanstudio") and st:
@@ -1721,21 +1811,52 @@ class MainWindow(QMainWindow):
                 logger.debug(f"已忽略消息：Fan Studio 子源「{st}」解析已关闭（{flag}=False）")
                 return False
 
-        wolfx_all_url = "wss://ws-api.wolfx.jp/all_eew"
-        wolfx_cwa_url = "wss://ws-api.wolfx.jp/cwa_eew"
+        if parsed_data.get("whews"):
+            from config import is_whews_url
+            if not any(bool(v) and is_whews_url(k) for k, v in es.items()):
+                logger.debug("已忽略消息：无界科技连接均已关闭")
+                return False
+            if st:
+                flag = WHEWS_SOURCE_FLAG_FIELD.get(st)
+                if flag and not getattr(mc, flag, True):
+                    logger.debug(f"已忽略消息：无界科技子源「{st}」解析已关闭（{flag}=False）")
+                    return False
+            # JMA 情报仅走 P2PQuake；预警（source_type=jma）随主服务
+            if st in ("jma_eq",):
+                logger.debug("已忽略消息：无界科技 JMA 情报已禁用，请使用 P2PQuake")
+                return False
+
+        wolfx_all_url = WOLFX_ALL_EEW_URL
+        wolfx_cwa_url = WOLFX_CWA_EEW_URL
+        is_wolfx_msg = (
+            st.startswith("wolfx_")
+            or sn.startswith("wolfx_")
+            or st == "wolfx_cwa_eew"
+            or source_name in ("wolfx_cwa_eew", "wolfx_cenc", "wolfx_cenc_eqlist", "wolfx_jma_eqlist")
+        )
+        if is_wolfx_msg and provider != DATA_PROVIDER_OFFICIAL:
+            logger.debug("已忽略消息：当前非官方+Wolfx 提供者")
+            return False
         if st == "wolfx_cwa_eew" or source_name == "wolfx_cwa_eew":
             if not es.get(wolfx_cwa_url, False):
                 logger.debug("已忽略消息：Wolfx 台湾中央气象署专线已关闭")
+                return False
+        elif st == "wolfx_cenc" or source_name in ("wolfx_cenc", "wolfx_cenc_eqlist"):
+            if not es.get(WOLFX_CENC_EQLIST_URL, False):
+                logger.debug("已忽略消息：Wolfx 中国地震台网地震信息已关闭")
+                return False
+        elif st == "wolfx_jma_eqlist" or source_name in ("wolfx_jma_eqlist",):
+            if not es.get(WOLFX_JMA_EQLIST_URL, False):
+                logger.debug("已忽略消息：Wolfx JMA 地震情報已关闭")
                 return False
         elif st.startswith("wolfx_") or sn.startswith("wolfx_"):
             if not es.get(wolfx_all_url, True):
                 logger.debug("已忽略消息：Wolfx 聚合预警（all_eew）已关闭")
                 return False
 
-        cenc_ir_url = CENC_IR_URL
-        if source_name == "cenc-ir" or st == "cenc-ir":
-            if not es.get(cenc_ir_url, False):
-                logger.debug("已忽略消息：烈度速报（cenc-ir）数据源已在设置中关闭")
+        if st == "emsc" and not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
+            if provider != DATA_PROVIDER_OFFICIAL or not es.get(EMSC_WSS_URL, False):
+                logger.debug("已忽略消息：官方 EMSC WebSocket 已关闭或当前非官方提供者")
                 return False
 
         p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
@@ -1770,21 +1891,30 @@ class MainWindow(QMainWindow):
             "early_est": EARLYEST_HTTP_URL,
             "jma_volcano": JMA_ATOM_LONG_URL,
             "ptwc": PTWC_CAP_URL,
+            "usgs": USGS_HTTP_URL,
+            "hko": HKO_HTTP_URL,
+            "gfz": GFZ_HTTP_URL,
+            "usp": USP_HTTP_URL,
+            "cwa": CWA_REPORT_HTTP_URL,
         }
-        mapped_url = http_source_map.get(st) or http_source_map.get(sn)
-        if mapped_url and not es.get(mapped_url, False):
-            logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」已在设置中关闭")
-            return False
+        # 官方直连 HTTP：未开开关则丢弃；Fan Studio / 无界同名 source_type 带标记，不走此表
+        if not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
+            mapped_url = http_source_map.get(st) or http_source_map.get(sn)
+            if mapped_url:
+                if provider != DATA_PROVIDER_OFFICIAL:
+                    logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」不属于当前提供者")
+                    return False
+                if not es.get(mapped_url, False):
+                    logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」已在设置中关闭")
+                    return False
 
-        use_fs_backup = bool(getattr(self.config.ws_config, "fanstudio_use_backup", False))
         fanstudio_http_map = {
-            "fanstudio_typhoon": fanstudio_active_http_url(FANSTUDIO_TYPHOON_HTTP, use_fs_backup),
-            "fanstudio_aqi": fanstudio_active_http_url(FANSTUDIO_AQI_HTTP, use_fs_backup),
+            "fanstudio_typhoon": FANSTUDIO_TYPHOON_HTTP,
         }
         fs_http_url = fanstudio_http_map.get(sn) or fanstudio_http_map.get(st)
         fs_http_key = fanstudio_http_canonical_key(fs_http_url) if fs_http_url else None
         if fs_http_key and not es.get(fs_http_key, False):
-            logger.debug(f"已忽略消息：Fan Studio HTTP 源「{sn or st}」已关闭")
+            logger.debug(f"已忽略消息：台风 HTTP 源「{sn or st}」已关闭")
             return False
 
         return True
@@ -1796,8 +1926,17 @@ class MainWindow(QMainWindow):
     def _process_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
         """在主线程中处理数据源消息"""
         try:
+            # 过期预警：仅记「已解析」，不上屏
+            if isinstance(parsed_data, dict) and parsed_data.get("_ws_expired"):
+                self._mark_source_parsed(source_name, parsed_data)
+                return
+
             if not self._should_process_data_source_message(source_name, parsed_data):
                 return
+
+            # 适配器已成功解析即记入会话状态（含 Fan Studio initial_all）。
+            # 与是否过期、是否入队展示无关，避免「有数据却一直显示未解析」。
+            self._mark_source_parsed(source_name, parsed_data)
 
             message_type = parsed_data.get('type', 'report')
 
@@ -1870,9 +2009,6 @@ class MainWindow(QMainWindow):
             # 对于预警消息，先检查是否过期，避免将过期消息误报为格式化失败
             if message_type == 'warning':
                 logger.info(f"收到预警消息: source={source_name}, place_name={parsed_data.get('place_name')}, magnitude={parsed_data.get('magnitude')}, source_type={parsed_data.get('source_type')}")
-                startup_sync = bool(parsed_data.get("_suppress_tts"))
-                if startup_sync and parsed_data.get("source_type") == "cea":
-                    self._record_cea_test_history(source_name, parsed_data)
                 # 入口侧统一按发震时间窗口过滤预警：
                 # - 全局默认窗口：warning_shock_validity_seconds
                 # - Wolfx JMA 使用 warning_shock_validity_seconds_nied
@@ -1892,8 +2028,6 @@ class MainWindow(QMainWindow):
                     del parsed_data["intensity_result"]
                 except Exception:
                     pass
-
-            self._record_event_history(source_name, message_type, message, parsed_data)
 
             ac = self.config.alert_config
             feedback_mode = str(getattr(ac, "alert_feedback_mode", "sound") or "sound").strip().lower()
@@ -1982,20 +2116,32 @@ class MainWindow(QMainWindow):
                 message_type == 'report'
                 and (
                     parsed_data.get('source_type') == 'fssn-cmt'
-                    or parsed_data.get('nodal_plane_1')
                     or parsed_data.get('source_type') == 'cenc-ir'
+                    or parsed_data.get('nodal_plane_1')
                 )
             )
             pd_store = None
             if isinstance(parsed_data, dict):
+                # 始终保留提供者溯源字段，供三选一热切换时清理缓冲、拦截窜数据
+                pd_store = {
+                    k: parsed_data[k]
+                    for k in _MSG_PROVENANCE_KEYS
+                    if k in parsed_data
+                }
                 if message_type in ("weather", "warning"):
                     # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
                     pd_store = dict(parsed_data)
                 elif message_type == 'report' and (
-                    parsed_data.get('source_type') in ('fssn-cmt', 'cenc-ir')
+                    parsed_data.get('source_type') == 'fssn-cmt'
+                    or parsed_data.get('source_type') == 'cenc-ir'
                     or parsed_data.get('nodal_plane_1')
                 ):
                     pd_store = dict(parsed_data)
+                elif parsed_data.get("is_tsunami") and parsed_data.get("logo_url"):
+                    # 海啸图标轮播需要 logo_url
+                    pd_store = dict(pd_store)
+                    pd_store["logo_url"] = parsed_data.get("logo_url")
+                    pd_store["is_tsunami"] = True
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -2237,39 +2383,14 @@ class MainWindow(QMainWindow):
                                 thread.start()
                             elif msg.message_type == 'report' and not msg.image_path and msg.parsed_data:
                                 st = msg.parsed_data.get('source_type', '')
-                                if st in ('fssn-cmt', 'cenc-ir') or msg.parsed_data.get('nodal_plane_1'):
+                                if st == 'fssn-cmt' or st == 'cenc-ir' or msg.parsed_data.get('nodal_plane_1'):
                                     self._start_deferred_report_image_render(msg)
                         
                         # 检查是否正在滚动
                         is_scrolling = self.scrolling_text and self.scrolling_text.is_scrolling()
                         
                         # 按数据源批量替换消息
-                        # fanstudio_aqi 需要保留同一数据源的多条独立城市 AQI 报文
-                        multi_message_sources = {'fanstudio_aqi'}
-                        single_source_messages = [msg for msg in all_messages if msg.source not in multi_message_sources]
-                        multi_source_messages = [msg for msg in all_messages if msg.source in multi_message_sources]
-                        if multi_source_messages:
-                            latest_aqi_tp = max(
-                                (m.shock_time or "" for m in multi_source_messages if m.source == "fanstudio_aqi"),
-                                default="",
-                            )
-                            if latest_aqi_tp:
-                                self.report_buffer.purge_fanstudio_aqi_stale(
-                                    "fanstudio_aqi", latest_aqi_tp
-                                )
-                        single_results = self.report_buffer.batch_replace_by_source(single_source_messages) if single_source_messages else []
-                        multi_results = self.report_buffer.batch_replace_or_add(multi_source_messages) if multi_source_messages else []
-                        
-                        update_results = []
-                        single_idx = 0
-                        multi_idx = 0
-                        for msg in all_messages:
-                            if msg.source in multi_message_sources:
-                                update_results.append(multi_results[multi_idx])
-                                multi_idx += 1
-                            else:
-                                update_results.append(single_results[single_idx])
-                                single_idx += 1
+                        update_results = self.report_buffer.batch_replace_by_source(all_messages)
                         
                         # 检查是否有消息更新，并处理当前正在显示的数据源
                         for i, msg in enumerate(all_messages):
@@ -2292,27 +2413,15 @@ class MainWindow(QMainWindow):
                                                                   self._current_displaying_message.source == msg.source)
                                 
                                 if is_currently_displaying_source:
-                                    # 对于多条同一数据源（如 fanstudio_aqi），只在当前展示的事件匹配时才更新
-                                    if msg.source in multi_message_sources and self._current_displaying_message.event_id and msg.event_id:
-                                        if self._current_displaying_message.event_id == msg.event_id:
-                                            updated_msg = self.report_buffer.find_by_event_id(msg.event_id, msg.source)
-                                            if updated_msg:
-                                                self._pending_update_message = updated_msg
-                                                logger.debug(f"[{msg.source}] 等待轮播完成后更新当前事件 {msg.event_id}")
-                                            else:
-                                                logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source} / {msg.event_id}")
-                                        else:
-                                            logger.debug(f"[{msg.source}] 当前正在展示不同事件（{self._current_displaying_message.event_id}），不打断当前轮播")
+                                    # 如果当前正在显示该数据源的消息
+                                    # 从缓冲区中获取更新后的消息（因为已经替换了）
+                                    updated_msg = self.report_buffer.find_by_source(msg.source)
+                                    if updated_msg:
+                                        # 标记为待更新，等待当前数据源轮播完成后替换
+                                        self._pending_update_message = updated_msg
+                                        logger.debug(f"[{msg.source}] 等待轮播完成后更新")
                                     else:
-                                        # 如果当前正在显示该数据源的消息
-                                        # 从缓冲区中获取更新后的消息（因为已经替换了）
-                                        updated_msg = self.report_buffer.find_by_source(msg.source)
-                                        if updated_msg:
-                                            # 标记为待更新，等待当前数据源轮播完成后替换
-                                            self._pending_update_message = updated_msg
-                                            logger.debug(f"[{msg.source}] 等待轮播完成后更新")
-                                        else:
-                                            logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source}")
+                                        logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source}")
                                 else:
                                     # 如果不在显示该数据源的消息，已静默更新缓冲区，不打断当前轮播
                                     logger.debug(f"数据源【{msg.source}】不在显示，已静默更新缓冲区，不打断当前轮播")
@@ -2613,6 +2722,24 @@ class MainWindow(QMainWindow):
             logger.error(f"发送WebSocket消息失败: {e}")
             return False
 
+    def apply_fanstudio_api_key(self, api_key: str) -> bool:
+        """
+        将 Fan Studio API Key 写入配置，并向已连接的 /all 热发送鉴权。
+
+        鉴权通过后服务器会自动下发完整数据流，无需重启。
+        """
+        key = (api_key or "").strip()
+        self.config.ws_config.fanstudio_api_key = key
+        if not key:
+            return False
+        if not self.ws_manager:
+            return False
+        try:
+            return bool(self.ws_manager.send_fanstudio_auth(key))
+        except Exception as e:
+            logger.error(f"热应用 Fan Studio 鉴权失败: {e}")
+            return False
+
     def get_data_source_status(self) -> Dict[str, str]:
         """
         获取各数据源连接状态，供设置窗口显示。
@@ -2626,6 +2753,98 @@ class MainWindow(QMainWindow):
             logger.debug(f"获取数据源连接状态失败: {e}")
         return result
 
+    def get_parsed_status_keys(self) -> Set[str]:
+        """返回本会话已成功解析过的设置页状态键集合。"""
+        return set(self._parsed_status_keys)
+
+    def get_fanstudio_auth_status(self) -> Tuple[str, str]:
+        """返回 Fan Studio /all 主连接鉴权状态：(none|pending|ok|failed, message)。"""
+        try:
+            if self.ws_manager and hasattr(self.ws_manager, "get_fanstudio_auth_status"):
+                return self.ws_manager.get_fanstudio_auth_status()
+        except Exception as e:
+            logger.debug(f"获取 Fan Studio 鉴权状态失败: {e}")
+        return ("none", "")
+
+    @staticmethod
+    def _resolve_parse_status_keys(
+        source_name: str,
+        parsed_data: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """将消息映射到设置页「已解析」状态键。"""
+        pd = parsed_data if isinstance(parsed_data, dict) else {}
+        st = str(pd.get("source_type") or "").strip().lower()
+        sn = str(source_name or "").strip()
+        sn_low = sn.lower()
+        keys: List[str] = []
+
+        try:
+            from adapters.wolfx_adapter import WOLFX_PARSE_FLAG
+            from config import WOLFX_CENC_EQLIST_URL, WOLFX_JMA_EQLIST_URL
+            flag = WOLFX_PARSE_FLAG.get(st)
+            if flag:
+                keys.append(flag)
+            if st == "wolfx_cenc":
+                keys.append(WOLFX_CENC_EQLIST_URL)
+            if st == "wolfx_jma_eqlist":
+                keys.append(WOLFX_JMA_EQLIST_URL)
+        except Exception:
+            pass
+
+        fs_st = st
+        if fs_st in ("海啸信息", "tsunami"):
+            fs_st = "tsunami"
+
+        # 无界科技：状态键为 whews_parse_*（与设置页勾选字段一致）
+        if pd.get("whews") and fs_st and not fs_st.startswith("wolfx_"):
+            try:
+                from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
+                wh_flag = WHEWS_SOURCE_FLAG_FIELD.get(fs_st)
+                if wh_flag:
+                    keys.append(wh_flag)
+            except Exception:
+                pass
+        elif (
+            fs_st
+            and not fs_st.startswith("wolfx_")
+            and not fs_st.startswith("fanstudio_")
+            and fs_st not in ("p2pquake", "p2pquake_tsunami", "cenc-ir")
+        ):
+            # Fan Studio / 同源短名：fanstudio_parse_*
+            keys.append(f"fanstudio_parse_{fs_st.replace('-', '_')}")
+
+        if st == "fanstudio_typhoon" or sn_low == "fanstudio_typhoon":
+            keys.append(FANSTUDIO_TYPHOON_HTTP)
+
+        if st == "p2pquake" or sn_low == "p2pquake":
+            keys.append("p2pquake_parse_551")
+        if st == "p2pquake_tsunami" or sn_low == "p2pquake_tsunami":
+            keys.append("p2pquake_parse_552")
+
+        if sn.startswith(("http://", "https://")):
+            keys.append(sn)
+
+        # 去重并保持顺序
+        seen = set()
+        out: List[str] = []
+        for k in keys:
+            if k and k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
+
+    def _mark_source_parsed(
+        self,
+        source_name: str,
+        parsed_data: Optional[Dict[str, Any]],
+    ) -> None:
+        """记录本会话已成功解析的数据源状态键。"""
+        try:
+            for key in self._resolve_parse_status_keys(source_name, parsed_data):
+                self._parsed_status_keys.add(key)
+        except Exception as e:
+            logger.debug(f"记录解析状态失败: {e}")
+
     def get_data_source_health_snapshot(self) -> Dict[str, Dict[str, Any]]:
         """获取数据源健康状态快照（供设置页/状态页展示）"""
         try:
@@ -2637,7 +2856,7 @@ class MainWindow(QMainWindow):
 
     def send_wolfx_manual_query(self, command: str) -> bool:
         """
-        发送 Wolfx all_eew 手动查询指令（query_sceew/query_jmaeew/...）。
+        发送 Wolfx all_eew 手动查询指令（query_sceew/query_jmaeew/.../query_cenceqlist 等）。
 
         Args:
             command: 查询指令字符串
@@ -2652,9 +2871,11 @@ class MainWindow(QMainWindow):
             "query_fjeew",
             "query_cqeew",
             "query_cenceew",
+            "query_cenceqlist",
+            "query_jmaeqlist",
         }
         if cmd not in allowed:
             logger.warning(f"不支持的 Wolfx 查询指令: {command}")
             return False
-        wolfx_url = "wss://ws-api.wolfx.jp/all_eew"
+        wolfx_url = WOLFX_ALL_EEW_URL
         return self.send_websocket_message(wolfx_url, cmd)

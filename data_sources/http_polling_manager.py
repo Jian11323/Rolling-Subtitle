@@ -18,9 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     Config,  # 读取应用配置
     APP_VERSION,  # 用于设置 User-Agent 的版本号
-    P2PQUAKE_WSS_URL,  # P2PQuake 总开关对应的 WSS 地址
+    P2PQUAKE_HTTP_SOURCE_KEYS,  # P2PQuake 仅启动补拉，不进持续轮询
     FANSTUDIO_HTTP_SOURCE_KEYS,  # Fan Studio HTTP 数据源键集合
-    fanstudio_active_http_url,
     fanstudio_http_canonical_key,
     BMKG_HTTP_URL,  # 印尼 BMKG 地震数据地址
     GEONET_HTTP_URL,  # 新西兰 GeoNet 地震数据地址
@@ -28,6 +27,11 @@ from config import (
     EARLYEST_HTTP_URL,  # INGV Early-est 数据地址
     JMA_ATOM_LONG_URL,  # 日本气象厅火山 XML 地址
     PTWC_CAP_URL,  # PTWC 海啸 CAP 地址
+    USGS_HTTP_URL,
+    HKO_HTTP_URL,
+    GFZ_HTTP_URL,
+    USP_HTTP_URL,
+    CWA_REPORT_HTTP_URL,
 )
 from adapters import (
     FanStudioHttpAdapter,
@@ -40,6 +44,11 @@ from adapters import (
     EarlyEstAdapter,
     JmaAtomAdapter,
     PtwcAdapter,
+    UsgsAdapter,
+    HkoAdapter,
+    GfzAdapter,
+    UspAdapter,
+    CwaReportAdapter,
 )
 from utils.logger import get_logger
 
@@ -55,22 +64,18 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
         return False
     low = url.lower()
     lookup_url = fanstudio_http_canonical_key(url) if "api.fanstudio" in low else url
+    # P2PQuake HTTP：仅由 WebSocketManager 启动时补拉一次，绝不进入持续轮询
+    if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in low:
+        return False
     # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
         return True  # 自定义 HTTP 源只要 URL 匹配就允许轮询
+    # 三选一数据源提供者：不属于当前提供者的 HTTP 源不轮询
+    if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(lookup_url):
+        return False
     if not config.enabled_sources.get(lookup_url, False):
         return False  # 未启用的数据源直接跳过
-    if "api.p2pquake.net" in low:
-        if not config.enabled_sources.get(P2PQUAKE_WSS_URL, False):
-            return False
-        mc = config.message_config
-        if "history" in low and "551" in low:
-            if not getattr(mc, "p2pquake_parse_551", True):
-                return False
-        if "tsunami" in low:
-            if not getattr(mc, "p2pquake_parse_552", True):
-                return False
     return True
 
 
@@ -113,10 +118,13 @@ class HTTPPollingConnection:
         logger.debug(f"[{self.source_name}] 已禁用代理（HTTP数据源）")
 
     def _request_verify_ssl(self) -> bool:
-        """自定义 HTTP 源可配置跳过 SSL 校验；其余源始终校验。"""
+        """自定义 HTTP 源可配置跳过 SSL 校验；适配器可声明 ssl_verify=False。"""
         custom_url = (self.config.custom_data_source_url or "").strip()
         if custom_url and self.url == custom_url:
             return not bool(getattr(self.config, 'custom_data_source_insecure_ssl', False))
+        adapter_verify = getattr(self.adapter, "ssl_verify", True)
+        if adapter_verify is False:
+            return False
         return True
 
     def start(
@@ -329,12 +337,10 @@ class HTTPPollingManager:
         # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
-        # Fan Studio 台风 / AQI HTTP 数据源（主/备用域名）
-        if "api.fanstudio" in url:
+        # Fan Studio 台风 HTTP 数据源
+        if "api.fanstudio.tech" in url:
             if 'typhoon.php' in url:
                 return FanStudioHttpAdapter('fanstudio_typhoon', url)
-            if 'aqi.php' in url:
-                return FanStudioHttpAdapter('fanstudio_aqi', url)
         # P2PQuake 地震情报
         if 'api.p2pquake.net' in url:
             return P2PQuakeAdapter('p2pquake', url)
@@ -350,6 +356,16 @@ class HTTPPollingManager:
             return JmaAtomAdapter('jma_volcano', url)
         if url == PTWC_CAP_URL:
             return PtwcAdapter('ptwc', url)
+        if url == USGS_HTTP_URL:
+            return UsgsAdapter('usgs', url)
+        if url == HKO_HTTP_URL:
+            return HkoAdapter('hko', url)
+        if url == GFZ_HTTP_URL:
+            return GfzAdapter('gfz', url)
+        if url == USP_HTTP_URL:
+            return UspAdapter('usp', url)
+        if url == CWA_REPORT_HTTP_URL:
+            return CwaReportAdapter('cwa', url)
         # 已下线的 Wolfx HTTP 不提供适配器，跳过
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
@@ -357,16 +373,27 @@ class HTTPPollingManager:
     
     def start_all_connections(self):
         """启动所有HTTP轮询连接"""
-        use_backup = bool(getattr(self.config.ws_config, "fanstudio_use_backup", False))
-        # 从配置中获取启用的HTTP数据源
+        http_urls = self._collect_desired_http_urls()
+        if not http_urls:
+            logger.info("没有启用的HTTP数据源")
+            return
+        
+        logger.info(f"开始启动 {len(http_urls)} 个HTTP数据源（错开首包间隔 {HTTP_POLL_STARTUP_STAGGER_SEC}s）...")
+        self._start_urls(http_urls, stagger=True)
+
+    def _collect_desired_http_urls(self) -> list:
+        """按当前配置收集应轮询的 HTTP URL 列表。"""
         http_urls = []
         for url in self.config.enabled_sources.keys():
             if url.startswith('http://') or url.startswith('https://'):
+                # P2PQuake HTTP 键即使残留为 True 也不轮询（启动补拉由 WSS 管理器完成）
+                if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in url.lower():
+                    logger.debug(f"跳过 P2PQuake HTTP 持续轮询（仅启动补拉）: {url}")
+                    continue
                 if url in FANSTUDIO_HTTP_SOURCE_KEYS:
-                    active_url = fanstudio_active_http_url(url, use_backup)
                     if is_http_source_enabled(self.config, url):
-                        http_urls.append(active_url)
-                        logger.debug(f"发现启用的 Fan Studio HTTP 数据源: {active_url}")
+                        http_urls.append(url)
+                        logger.debug(f"发现启用的 Fan Studio HTTP 数据源: {url}")
                     else:
                         logger.debug(f"Fan Studio HTTP 数据源已禁用: {url}")
                 elif is_http_source_enabled(self.config, url):
@@ -374,38 +401,54 @@ class HTTPPollingManager:
                     logger.debug(f"发现启用的HTTP数据源: {url}")
                 else:
                     logger.debug(f"HTTP数据源已禁用: {url}")
-        # 自定义数据源（HTTP/HTTPS）：URL 非空即启用
         custom_url = (self.config.custom_data_source_url or "").strip()
         if custom_url and (custom_url.startswith('http://') or custom_url.startswith('https://')):
             if custom_url not in http_urls:
                 http_urls.append(custom_url)
                 logger.debug(f"发现自定义HTTP数据源: {custom_url}")
-        
-        if not http_urls:
-            logger.info("没有启用的HTTP数据源")
-            return
-        
-        logger.info(f"开始启动 {len(http_urls)} 个HTTP数据源（错开首包间隔 {HTTP_POLL_STARTUP_STAGGER_SEC}s）...")
-        
-        http_started_index = 0
+        return http_urls
+
+    def _start_urls(self, http_urls: list, stagger: bool = True) -> None:
+        """启动给定 URL 列表中尚未运行的连接。"""
+        http_started_index = len(self.connections)
         for url in http_urls:
+            if url in self.connections:
+                continue
             source_name = self.config.get_source_name(url)
             logger.debug(f"正在为 {url} 创建适配器，数据源名称: {source_name}")
             adapter = self.get_adapter(url)
-            
             if adapter is None:
-                # 对于未配置适配器的 HTTP 数据源，直接跳过，不再输出错误日志
                 continue
-            
             poll_interval = self.config.get_http_poll_interval(url)
-            connection = HTTPPollingConnection(url, source_name, adapter, self.config, poll_interval=poll_interval)
+            connection = HTTPPollingConnection(
+                url, source_name, adapter, self.config, poll_interval=poll_interval
+            )
             self.connections[url] = connection
-            
-            startup_delay = HTTP_POLL_STARTUP_STAGGER_SEC * http_started_index  # 为多源首轮请求错峰
+            startup_delay = (
+                HTTP_POLL_STARTUP_STAGGER_SEC * http_started_index if stagger else 0.0
+            )
             http_started_index += 1
             connection.start(self.message_callback, startup_delay=startup_delay)
-            
             logger.info(f"已启动HTTP轮询: {source_name}（首包延迟 {startup_delay:.1f}s）")
+
+    def reload_connections(self) -> None:
+        """根据当前 Config 热启停 HTTP 轮询（无需重启进程）。"""
+        desired = self._collect_desired_http_urls()
+        desired_set = set(desired)
+        for url in list(self.connections.keys()):
+            if url in desired_set:
+                continue
+            conn = self.connections.pop(url, None)
+            if conn is None:
+                continue
+            try:
+                conn.stop()
+                logger.info(f"已热停止HTTP轮询: {conn.source_name}")
+            except Exception as e:
+                logger.error(f"热停止HTTP轮询 {url} 时出错: {e}")
+        self._running = True
+        self._start_urls(desired, stagger=False)
+        self.update_poll_intervals(dict(self.config.http_poll_intervals))
     
     def get_custom_source_status(self, url: str) -> Optional[str]:
         """

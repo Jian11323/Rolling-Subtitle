@@ -24,6 +24,9 @@ beautifulsoup4>=4.11.0
 # 离线 TTS（Windows SAPI）
 pyttsx3>=2.90
 
+# Nowquake CENC 烈度速报 forecast（Base64+Zstd）解压
+zstandard>=0.22.0
+
 # 可选：Windows 系统通知（未安装时使用 PowerShell Toast）
 # win10toast>=0.9
 

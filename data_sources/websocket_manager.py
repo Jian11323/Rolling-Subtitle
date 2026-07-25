@@ -10,7 +10,7 @@ import json
 import re
 import time
 import websockets
-from typing import Dict, Callable, Optional, Any
+from typing import Dict, Callable, Optional, Any, Tuple, List
 from collections import defaultdict
 from queue import Queue, Empty
 import requests
@@ -20,7 +20,19 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config  # 读取全局配置与开关
-from config import FANSTUDIO_ALL_URLS, CENC_IR_WSS_URLS
+from config import (
+    FANSTUDIO_ALL_URLS,
+    fanstudio_ws_url,
+    WHEWS_WS_URLS,
+    is_whews_url,
+    is_whews_dedicated_endpoint,
+    WOLFX_ALL_EEW_URL,
+    WOLFX_CWA_EEW_URL,
+    WOLFX_CENC_EQLIST_URL,
+    WOLFX_JMA_EQLIST_URL,
+    EMSC_WSS_URL,
+    NOWQUAKE_CENCINT_WSS_URL,
+)
 from adapters import (
     FanStudioAdapter,  # Fan Studio WebSocket 适配器
     P2PQuakeWebSocketAdapter,  # P2PQuake WSS 适配器
@@ -28,20 +40,28 @@ from adapters import (
     P2PQuakeAdapter,  # P2PQuake 551 地震情报适配器
     P2PQuakeTsunamiAdapter,  # P2PQuake 552 海啸预报适配器
     WolfxAdapter,  # Wolfx 聚合预警适配器
+    WhewsAdapter,  # 无界科技适配器
+    EmscWsAdapter,  # EMSC standing_order 适配器
+    NowquakeCencintAdapter,  # Nowquake CENC 烈度速报适配器
 )
 from utils.logger import get_logger
 from utils.message_processor import warning_shock_validity_remaining_seconds
+from utils.fanstudio_credentials import (
+    build_fanstudio_auth_message,
+    parse_fanstudio_auth_response,
+)
 
 logger = get_logger()
 
 # P2PQuake HTTP 聚合接口：同时包含 551 地震情报与 552 津波预报
 P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"  # 启动前聚合拉取
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
-WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"  # Wolfx 聚合预警通道
-WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"  # Wolfx CWA 独立通道
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "fanstudio": 45,
+    "whews": 90,
     "wolfx": 90,
+    "emsc": 120,
+    "nowquake": 90,  # 服务端约 60s 发一次 heartbeat
     "p2pquake": 120,
 }
 
@@ -88,20 +108,27 @@ def _dispatch_parsed_message(
     actual_source: str,
     ws_source_name: str,
 ) -> None:
-    """校验预警有效期后，将解析结果通过回调下发至 GUI 层。"""
+    """校验预警有效期后，将解析结果通过回调下发至 GUI 层。
+
+    过期预警仍下发（带 _ws_expired），供设置页记为「已解析」，但不进入展示队列。
+    """
     if not _parsed_warning_still_valid(parsed_data):
         logger.debug(
-            "[%s] 预警已过期，WebSocket 层丢弃: event_id=%s place=%s",
+            "[%s] 预警已过期，WebSocket 层丢弃展示: event_id=%s place=%s",
             actual_source,
             parsed_data.get("event_id"),
             parsed_data.get("place_name"),
         )
+        expired = dict(parsed_data)
+        expired["_ws_expired"] = True
+        manager.message_callback(actual_source, expired)
         return
     msg_type = parsed_data.get("type", "unknown")
     logger.info(f"[{actual_source}] {msg_type}消息")
     manager.message_callback(actual_source, parsed_data)
 
 # all_eew 聚合端：建连后查询各子源（不含 CWA；CWA 有独立 wss …/cwa_eew 端点）
+# 列表速报 query_cenceqlist / query_jmaeqlist 亦发往 all_eew（见 _wolfx_all_eew_query_commands）
 WOLFX_ALL_EEW_QUERY_COMMANDS = (
     "query_sceew",
     "query_jmaeew",
@@ -119,9 +146,28 @@ WOLFX_QUERY_RECV_CHUNK_SEC = 2.0
 WOLFX_EEW_JSON_TYPES = frozenset(
     {"jma_eew", "sc_eew", "fj_eew", "cenc_eew", "cq_eew", "cwa_eew"}
 )
+WOLFX_LIST_JSON_TYPES = frozenset({"cenc_eqlist", "jma_eqlist"})
+WOLFX_DIRECT_SOURCE_TYPES = (
+    "wolfx_jma_eew",
+    "wolfx_sc_eew",
+    "wolfx_fj_eew",
+    "wolfx_cenc_eew",
+    "wolfx_cq_eew",
+    "wolfx_cwa_eew",
+    "wolfx_cenc",
+    "wolfx_jma_eqlist",
+)
 # cwa_eew 建连后等待 all_eew 首轮错峰 query 完成再发 query_cwaeew，避免两条 Wolfx 线并行抢收/抢发
 WOLFX_CWA_WAIT_ALL_EEW_BOOTSTRAP_SEC = 120.0
-
+# 热停连时等待 close / cancel 的上限，避免某路卡死拖住整次重载
+RELOAD_STOP_TIMEOUT_SEC = 5.0
+# 实际建连的 Wolfx 端点：除 CWA 外一律 all_eew
+WOLFX_URLS = frozenset(
+    {
+        WOLFX_ALL_EEW_URL,
+        WOLFX_CWA_EEW_URL,
+    }
+)
 
 class WebSocketManager:
     """WebSocket连接管理器"""
@@ -142,8 +188,14 @@ class WebSocketManager:
         self._connection_tasks: Dict[str, asyncio.Task] = {}  # 连接任务字典
         self._health_status: Dict[str, Dict[str, Any]] = {}  # 心跳/健康状态快照
         self._wolfx_all_eew_bootstrap_done: Optional[asyncio.Event] = None  # Wolfx 启动放行事件
+        self._keepalive_task: Optional[asyncio.Task] = None  # 保持事件循环，供热启停连接
+        self._reload_lock: Optional[asyncio.Lock] = None  # 串行化热重载，避免并发停启打架
         self._running = True  # 全局运行标志
         self._connect_error_log: Dict[str, tuple] = {}  # 连接错误降噪记录
+        # Fan Studio /all：已发鉴权、等待 auth_success 期间，跳过鉴权前的精简 initial_all
+        self._fanstudio_awaiting_auth: Dict[str, bool] = {}
+        # Fan Studio /all 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
+        self._fanstudio_auth_status: Dict[str, Tuple[str, str]] = {}
         config = Config()
         self.max_reconnect_attempts = config.ws_config.max_reconnect_attempts  # 最大重连次数
         self.reconnect_interval = config.ws_config.reconnect_interval  # 基础重连间隔
@@ -155,11 +207,17 @@ class WebSocketManager:
     def _get_source_kind(self, url: str) -> str:
         """按 URL 识别数据源类型（用于心跳策略）"""
         normalized = (url or "").strip().lower().rstrip("/")
-        if "fanstudio.tech" in normalized or "fanstudio.hk" in normalized:
+        if "fanstudio.tech" in normalized:
             return "fanstudio"
-        if normalized in (WOLFX_ALL_EEW_URL, WOLFX_CWA_EEW_URL):
+        if is_whews_url(normalized):
+            return "whews"
+        if normalized in WOLFX_URLS:
             return "wolfx"
-        if normalized == P2PQUAKE_WSS_URL:
+        if normalized == EMSC_WSS_URL:
+            return "emsc"
+        if normalized == NOWQUAKE_CENCINT_WSS_URL:
+            return "nowquake"
+        if normalized == P2PQUAKE_WSS_URL or "p2pquake" in normalized:
             return "p2pquake"
         return "other"
 
@@ -230,7 +288,7 @@ class WebSocketManager:
         entry["heartbeat_state"] = "timeout"
         entry["timeout_count"] = int(entry.get("timeout_count", 0) or 0) + 1
         source_kind = entry.get("source_kind", "other")
-        if source_kind not in ("fanstudio", "wolfx"):
+        if source_kind not in ("fanstudio", "wolfx", "whews"):
             return
         # 防止超时后每个循环都发送 ping：最短间隔取阈值一半，至少 10 秒
         min_retry_gap = max(10, timeout_seconds // 2)
@@ -238,7 +296,10 @@ class WebSocketManager:
         if last_auto_ping > 0 and (now - last_auto_ping) < min_retry_gap:
             return
         try:
-            await websocket.send("ping")
+            if source_kind == "whews":
+                await websocket.send(json.dumps({"type": "ping"}))
+            else:
+                await websocket.send("ping")
             entry["last_ping_ts"] = now
             entry["last_auto_ping_ts"] = now
             entry["auto_ping_count"] = int(entry.get("auto_ping_count", 0) or 0) + 1
@@ -256,8 +317,8 @@ class WebSocketManager:
         Returns:
             适配器实例
         """
-        # Wolfx 聚合预警源
-        if 'ws-api.wolfx.jp' in url:  # 识别 Wolfx 独立/聚合通道
+        # Wolfx：除 CWA 专线外一律走 all_eew（列表速报亦经聚合端）
+        if 'ws-api.wolfx.jp' in url:
             normalized = url.rstrip('/').lower()
             if normalized.endswith('/all_eew'):
                 adapter = WolfxAdapter('wolfx_all_eew', url)
@@ -267,10 +328,31 @@ class WebSocketManager:
                 adapter = WolfxAdapter('wolfx_cwa_eew', url)
                 adapter._manager_source_type = 'wolfx_cwa_eew'
                 return adapter
-        # 检查是否为Fan Studio数据源
-        if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
+            # 旧专线 URL 不再建连；若仍出现在配置中则跳过
+            return None
+        # EMSC standing_order
+        if (url or "").strip().lower().rstrip("/") == EMSC_WSS_URL:
+            adapter = EmscWsAdapter('emsc', url)
+            adapter._manager_source_type = 'emsc'
+            return adapter
+        # Nowquake CENC 烈度速报
+        if (url or "").strip().lower().rstrip("/") == NOWQUAKE_CENCINT_WSS_URL:
+            adapter = NowquakeCencintAdapter('cenc-ir', url)
+            adapter._manager_source_type = 'cenc-ir'
+            return adapter
+        # 无界科技（WHEWS 主站 / 备用）
+        if is_whews_url(url or ""):
+            path = (url or "").rstrip("/").split("?")[0].split("/")[-1] or "all"
+            adapter = WhewsAdapter(f"whews_{path}", url)
+            adapter._manager_source_type = "whews_all" if path == "all" else f"whews_{path}"
+            return adapter
+        # 检查是否为Fan Studio数据源（公开版仅允许 /all）
+        if 'fanstudio.tech' in url:
             parts = url.split('/')
             source_type = parts[-1] if parts[-1] else parts[-2]
+            if (source_type or '').lower() != 'all':
+                logger.warning(f"已拒绝连接已下线的 Fan Studio 路径（仅保留 /all）: {url}")
+                return None
             adapter = FanStudioAdapter(source_type, url)
             adapter._manager_source_type = source_type
             return adapter
@@ -308,29 +390,23 @@ class WebSocketManager:
             # 优先使用source_type字段（适配器已添加）
             source_type = parsed_data.get('source_type', '')
             # Wolfx 与 P2PQuake 子源：直接返回 source_type 参与轮播优先级排序。
-            direct_sub_sources = (
-                'wolfx_jma_eew',
-                'wolfx_sc_eew',
-                'wolfx_fj_eew',
-                'wolfx_cenc_eew',
-                'wolfx_cq_eew',
-                'wolfx_cwa_eew',
-            )
-            if source_type in direct_sub_sources:
+            if source_type in WOLFX_DIRECT_SOURCE_TYPES:
                 return source_type
-            if source_type == 'ptwc':
-                return 'ptwc'
+            if source_type in ("ptwc", "emsc", "cenc-ir"):
+                return source_type
             if source_type:
-                return config.get_source_name(f"wss://ws.fanstudio.tech/{source_type}")
+                if parsed_data.get('whews'):
+                    return source_type
+                return config.get_source_name(fanstudio_ws_url(source_type))
             
             # 尝试从raw_data中获取数据源信息
             raw_data = parsed_data.get('raw_data', {})
             if 'source' in raw_data:
                 source = raw_data['source']
-                return config.get_source_name(f"wss://ws.fanstudio.tech/{source}")
+                return config.get_source_name(fanstudio_ws_url(source))
             elif '_update_source' in raw_data:
                 source = raw_data['_update_source']
-                return config.get_source_name(f"wss://ws.fanstudio.tech/{source}")
+                return config.get_source_name(fanstudio_ws_url(source))
             
             # 根据organization推断
             organization = parsed_data.get('organization', '')
@@ -360,7 +436,7 @@ class WebSocketManager:
                 "自然资源部海啸预警中心": "tsunami",
             }
             source = org_mapping.get(organization, default_source)
-            return config.get_source_name(f"wss://ws.fanstudio.tech/{source}") if source != default_source else default_source
+            return config.get_source_name(fanstudio_ws_url(source)) if source != default_source else default_source
         except Exception as e:
             logger.error(f"获取数据源名称失败: {e}")
             return default_source
@@ -423,6 +499,33 @@ class WebSocketManager:
                     self._mark_heartbeat_received(url, source_name)
                     logger.debug(f"[{source_name}] 收到 P2PQuake 心跳(code=555)")
                     return
+                auth_ok, auth_msg = parse_fanstudio_auth_response(data)
+                if auth_ok is True:
+                    self._fanstudio_awaiting_auth[url] = False
+                    self._fanstudio_auth_status[url] = (
+                        "ok",
+                        auth_msg or "鉴权成功，已接入数据流。",
+                    )
+                    logger.info(f"[{source_name}] Fan Studio 鉴权成功: {auth_msg}")
+                    return
+                if auth_ok is False and msg_type == "error":
+                    was_awaiting = self._fanstudio_awaiting_auth.pop(url, False)
+                    # 鉴权失败或其它服务端错误
+                    if was_awaiting or "鉴权" in auth_msg or "auth" in auth_msg.lower() or "key" in auth_msg.lower() or "appid" in auth_msg.lower():
+                        self._fanstudio_auth_status[url] = (
+                            "failed",
+                            auth_msg or "鉴权失败",
+                        )
+                        logger.warning(f"[{source_name}] Fan Studio 鉴权失败: {auth_msg}")
+                    else:
+                        logger.warning(f"[{source_name}] Fan Studio 错误: {auth_msg}")
+                    return
+                # 已发 Key 鉴权、尚未收到结果：跳过鉴权前的精简 initial_all，等完整流
+                if self._fanstudio_awaiting_auth.get(url) and msg_type == "initial_all":
+                    logger.debug(
+                        f"[{source_name}] 等待 Fan Studio 鉴权完成，暂缓处理鉴权前的 initial_all"
+                    )
+                    return
             
             cfg = Config()
             if not cfg.enabled_sources.get(url, True):
@@ -443,24 +546,31 @@ class WebSocketManager:
                         parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                         _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
+            # 无界科技 /ws/all 首连为 JSON 数组
+            elif isinstance(data, list) and str(data_source_type).startswith("whews"):
+                logger.info(f"[{source_name}] 收到无界科技首连数组，共 {len(data)} 帧")
+                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
+                for parsed_data in all_parsed_data:
+                    if parsed_data:
+                        parsed_data["_suppress_tts"] = True
+                        actual_source = self._get_source_name_from_data(parsed_data, source_name)
+                        _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
             else:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = await asyncio.to_thread(adapter.parse, data)
                 if parsed_data:
-                    # Wolfx / P2PQuake WSS：用 parsed_data 的 source_type 作为 actual_source
+                    # Wolfx / P2PQuake / EMSC / Nowquake：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
-                    direct_sources = (
-                        'wolfx_jma_eew',
-                        'wolfx_sc_eew',
-                        'wolfx_fj_eew',
-                        'wolfx_cenc_eew',
-                        'wolfx_cq_eew',
-                        'wolfx_cwa_eew',
+                    direct_sources = WOLFX_DIRECT_SOURCE_TYPES + (
                         'p2pquake',
                         'p2pquake_tsunami',
+                        'emsc',
+                        'cenc-ir',
                     )
                     if pt and (pt in direct_sources):
                         actual_source = pt
+                    elif parsed_data.get("whews") and pt:
+                        actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     else:
@@ -533,12 +643,23 @@ class WebSocketManager:
             return False
         if int(data.get("code") or 0) == 555:
             return False
-        if msg_type in WOLFX_EEW_JSON_TYPES:
+        if msg_type in WOLFX_EEW_JSON_TYPES or msg_type in WOLFX_LIST_JSON_TYPES:
             return True
         try:
             return adapter.parse(data) is not None
         except Exception:
             return False
+
+    @staticmethod
+    def _wolfx_all_eew_query_commands(enabled_sources: Optional[Dict[str, Any]] = None) -> tuple[str, ...]:
+        """all_eew 建连后查询指令：固定 EEW + 已勾选的列表速报。"""
+        cmds = list(WOLFX_ALL_EEW_QUERY_COMMANDS)
+        es = enabled_sources if isinstance(enabled_sources, dict) else {}
+        if es.get(WOLFX_CENC_EQLIST_URL, False):
+            cmds.append("query_cenceqlist")
+        if es.get(WOLFX_JMA_EQLIST_URL, False):
+            cmds.append("query_jmaeqlist")
+        return tuple(cmds)
 
     async def _wolfx_run_staggered_queries(
         self,
@@ -599,10 +720,8 @@ class WebSocketManager:
             # 检查是否启用
             if not self.enabled_sources.get(url, True):
                 self.connection_states[url] = "unconnected"
-                if not self._running:
-                    break
-                await asyncio.sleep(30)
-                continue
+                # 热停后结束任务；再次启用由 reload_connections 新建任务
+                break
             
             try:
                 norm_url = url.rstrip("/").lower()
@@ -629,9 +748,19 @@ class WebSocketManager:
 
                 logger.debug(f"[{source_name}] 连接中...")
                 self.connection_states[url] = "connecting"
+
+                connect_url = url
+                if is_whews_url(url or ""):
+                    token = (getattr(Config().ws_config, "whews_token", "") or "").strip()
+                    if not token:
+                        logger.warning(f"[{source_name}] 未配置无界科技令牌，暂停连接（请在设置中填写 wat_ 令牌）")
+                        self.connection_states[url] = "unconnected"
+                        await asyncio.sleep(30)
+                        continue
+                    # 鉴权不走 URL 参数：建连后立即发送纯文本 token（须在 5 秒内）
                 
                 async with websockets.connect(
-                    url,
+                    connect_url,
                     ping_interval=self.ping_interval,
                     ping_timeout=self.ping_timeout,
                     close_timeout=self.close_timeout,
@@ -645,10 +774,21 @@ class WebSocketManager:
                     health["heartbeat_state"] = "connected"
                     health["last_message_ts"] = time.time()
 
-                    # Wolfx 建连后按端点错峰发送查询指令（query_cwaeew 仅用于 cwa_eew）
+                    # 无界科技：连接后首帧发送纯文本令牌
+                    if is_whews_url(url or ""):
+                        await self._maybe_send_whews_auth(websocket, url, source_name)
+
+                    # Fan Studio /all：连接后发送鉴权（未填 API Key 则仅公开精简流）
+                    await self._maybe_send_fanstudio_auth(websocket, url, source_name)
+
+                    # Wolfx：all_eew 错峰查询 EEW+列表；CWA 仅走独立端点
                     if norm_url == WOLFX_ALL_EEW_URL:
                         await self._wolfx_run_staggered_queries(
-                            websocket, url, source_name, adapter, WOLFX_ALL_EEW_QUERY_COMMANDS
+                            websocket,
+                            url,
+                            source_name,
+                            adapter,
+                            self._wolfx_all_eew_query_commands(self.enabled_sources),
                         )
                         ev = self._wolfx_all_eew_bootstrap_done
                         if ev is not None and not ev.is_set():
@@ -658,6 +798,10 @@ class WebSocketManager:
                         await self._wolfx_run_staggered_queries(
                             websocket, url, source_name, adapter, WOLFX_CWA_EEW_QUERY_COMMANDS
                         )
+
+                    # Nowquake：建连后 HTTP 拉取最新一条烈度速报（仅一次，后续靠 WS 推送）
+                    if norm_url == NOWQUAKE_CENCINT_WSS_URL and isinstance(adapter, NowquakeCencintAdapter):
+                        await self._nowquake_bootstrap_latest(adapter, source_name)
                     
                     # 创建发送队列（如果不存在）
                     if url not in self._send_queues:
@@ -665,6 +809,10 @@ class WebSocketManager:
                     
                     # 主消息循环
                     while self._running:
+                        # 热重载禁用：主动退出内层循环以关闭连接
+                        if not self.enabled_sources.get(url, True):
+                            logger.info(f"[{source_name}] 数据源已禁用，主动断开连接")
+                            break
                         # 发送待发送的消息
                         await self._send_pending_messages(websocket, url, source_name)
                         
@@ -677,10 +825,17 @@ class WebSocketManager:
                             # 超时：继续循环并执行心跳检查
                             await self._check_heartbeat_timeout(websocket, url, source_name)
                             continue
+                    self._cleanup_connection(url, source_name)
                             
             except websockets.ConnectionClosed as e:
                 logger.warning(f"[{source_name}] 连接断开: code={e.code}, reason={getattr(e, 'reason', 'N/A')}")
                 self._cleanup_connection(url, source_name)
+                # 无界科技鉴权失败（4401）：停止重连，避免刷令牌错误
+                if int(getattr(e, "code", 0) or 0) == 4401 and is_whews_url(url or ""):
+                    logger.error(f"[{source_name}] 无界科技鉴权失败(4401)，已停止重连，请检查令牌")
+                    self.enabled_sources[url] = False
+                    self.connection_states[url] = "auth_failed"
+                    continue
             except TimeoutError as e:
                 logger.warning(f"[{source_name}] 连接超时（握手阶段）: {e}，将按重连间隔重试")
                 self._cleanup_connection(url, source_name)
@@ -716,6 +871,10 @@ class WebSocketManager:
             # 重连逻辑
             if not self._running:
                 break
+            # 已禁用：结束任务（再次启用由 reload_connections 新建）
+            if not self.enabled_sources.get(url, True):
+                self.connection_states[url] = "unconnected"
+                break
             if not await self._should_reconnect(url, source_name):
                 continue
             
@@ -730,18 +889,29 @@ class WebSocketManager:
                 break
             await asyncio.sleep(wait_time)
     
+    async def _run_until_stopped(self) -> None:
+        """保持事件循环存活，直到 stop_all；避免全部连接任务结束后线程退出。"""
+        while self._running:
+            await asyncio.sleep(1.0)
+
     async def stop_all(self):
         """停止所有 WebSocket 连接任务"""
         if not self._running:
             return
         self._running = False
         logger.info("正在停止所有 WebSocket 连接...")
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
         for url, task in list(self._connection_tasks.items()):
             if task and not task.done():
                 task.cancel()
-        if self._connection_tasks:
-            await asyncio.gather(*self._connection_tasks.values(), return_exceptions=True)
+        wait_tasks = list(self._connection_tasks.values())
+        if self._keepalive_task is not None:
+            wait_tasks.append(self._keepalive_task)
+        if wait_tasks:
+            await asyncio.gather(*wait_tasks, return_exceptions=True)
         self._connection_tasks.clear()
+        self._keepalive_task = None
         self.connections.clear()
         logger.info("所有 WebSocket 连接已停止")
     
@@ -774,6 +944,9 @@ class WebSocketManager:
         if url in self.connections:
             del self.connections[url]
             logger.debug(f"[{source_name}] 已从connections字典移除，当前连接数: {len(self.connections)}")
+        self._fanstudio_awaiting_auth.pop(url, None)
+        if self._is_fanstudio_all_url(url):
+            self._fanstudio_auth_status[url] = ("none", "连接已断开")
         self.connection_states[url] = "disconnected"
         entry = self._ensure_health_entry(url, source_name)
         entry["heartbeat_state"] = "disconnected"
@@ -798,17 +971,33 @@ class WebSocketManager:
         result: Dict[str, Dict[str, Any]] = {}
         for url, entry in self._health_status.items():
             copied = dict(entry)
-            timeout_seconds = int(copied.get("timeout_seconds", 0) or 0)
-            last_heartbeat = float(copied.get("last_heartbeat_ts", 0.0) or 0.0)
-            if timeout_seconds > 0 and last_heartbeat > 0 and (now - last_heartbeat) > timeout_seconds:
-                copied["heartbeat_state"] = "timeout"
-            copied["connection_state"] = self.connection_states.get(
+            enabled = bool(self.enabled_sources.get(url, False))
+            connection_state = self.connection_states.get(
                 url,
                 "connected" if url in self.connections else "unconnected",
             )
+            # 已禁用：展示为未连接，勿用过期心跳冒充「心跳超时」
+            if not enabled:
+                connection_state = "unconnected"
+                if copied.get("heartbeat_state") == "timeout":
+                    copied["heartbeat_state"] = "disconnected"
+            timeout_seconds = int(copied.get("timeout_seconds", 0) or 0)
+            last_heartbeat = float(copied.get("last_heartbeat_ts", 0.0) or 0.0)
+            # 仅在仍应保持连接时，才按心跳年龄判定超时
+            if (
+                enabled
+                and connection_state == "connected"
+                and timeout_seconds > 0
+                and last_heartbeat > 0
+                and (now - last_heartbeat) > timeout_seconds
+            ):
+                copied["heartbeat_state"] = "timeout"
+            copied["enabled"] = enabled
+            copied["connection_state"] = connection_state
             copied["heartbeat_age_seconds"] = (now - last_heartbeat) if last_heartbeat > 0 else None
             result[url] = copied
         for url in self.enabled_sources.keys():
+            enabled = bool(self.enabled_sources.get(url, False))
             result.setdefault(
                 url,
                 {
@@ -823,7 +1012,12 @@ class WebSocketManager:
                     "timeout_count": 0,
                     "auto_ping_count": 0,
                     "heartbeat_state": "unknown",
-                    "connection_state": self.connection_states.get(url, "unconnected"),
+                    "enabled": enabled,
+                    "connection_state": (
+                        self.connection_states.get(url, "unconnected")
+                        if enabled
+                        else "unconnected"
+                    ),
                     "heartbeat_age_seconds": None,
                 },
             )
@@ -928,21 +1122,79 @@ class WebSocketManager:
 
     @staticmethod
     def _sort_wolfx_startup_urls(urls: list) -> list:
-        """Wolfx 阶段固定顺序：先 all_eew，再 cwa_eew（与其它自定义 wss 共存时排在后）。"""
-        order = {WOLFX_ALL_EEW_URL: 0, WOLFX_CWA_EEW_URL: 1}
+        """Wolfx 阶段固定顺序：all_eew → cwa_eew。"""
+        order = {
+            WOLFX_ALL_EEW_URL: 0,
+            WOLFX_CWA_EEW_URL: 1,
+        }
 
         def _key(u: str) -> tuple[int, str]:
-            """Wolfx 启动排序键：all_eew 优先于 cwa_eew。"""
+            """Wolfx 启动排序键。"""
             n = (u or "").strip().lower().rstrip("/")
             return (order.get(n, 50), u or "")
 
         return sorted(urls, key=_key)
 
+    @staticmethod
+    def _is_fanstudio_all_url(url: str) -> bool:
+        """判断是否为 Fan Studio /all 聚合通道。"""
+        normalized = (url or "").strip().lower().rstrip("/")
+        if normalized in {u.rstrip("/").lower() for u in FANSTUDIO_ALL_URLS}:
+            return True
+        return normalized.endswith("/all") and "fanstudio" in normalized
+
+    async def _maybe_send_whews_auth(self, websocket: Any, url: str, source_name: str) -> None:
+        """
+        无界科技建连后立即发送纯文本令牌（首帧）。
+
+        若 5 秒内未发送，服务端以关闭码 4401 断开。
+        """
+        if not is_whews_url(url or ""):
+            return
+        token = (getattr(Config().ws_config, "whews_token", "") or "").strip()
+        if not token:
+            logger.warning(f"[{source_name}] 无界科技令牌为空，无法鉴权")
+            return
+        try:
+            await websocket.send(token)
+            logger.info(f"[{source_name}] 已发送无界科技纯文本令牌鉴权")
+        except Exception as e:
+            logger.warning(f"[{source_name}] 发送无界科技令牌失败: {e}")
+
+    async def _maybe_send_fanstudio_auth(self, websocket: Any, url: str, source_name: str) -> None:
+        """
+        Fan Studio /all 建连后发送鉴权。
+
+        未配置 API Key 时不发送：服务器仅返回公开精简数据（如 fssn / fssn-cmt）。
+        配置了 Key 后发送 {"type":"auth","appId":"...","key":"sk-..."}。
+        """
+        if not self._is_fanstudio_all_url(url):
+            return
+        api_key = (getattr(Config().ws_config, "fanstudio_api_key", "") or "").strip()
+        if not api_key:
+            self._fanstudio_awaiting_auth.pop(url, None)
+            self._fanstudio_auth_status[url] = ("none", "未配置 API Key")
+            logger.info(
+                f"[{source_name}] 未配置 Fan Studio API Key，跳过鉴权"
+                "（将仅接收公开精简数据流）"
+            )
+            return
+        try:
+            auth_msg = build_fanstudio_auth_message(api_key)
+            self._fanstudio_awaiting_auth[url] = True
+            self._fanstudio_auth_status[url] = ("pending", "正在连接并鉴权…")
+            await websocket.send(auth_msg)
+            logger.info(f"[{source_name}] 已发送 Fan Studio 鉴权请求")
+        except Exception as e:
+            self._fanstudio_awaiting_auth.pop(url, None)
+            self._fanstudio_auth_status[url] = ("failed", f"发送鉴权失败: {e}")
+            logger.warning(f"[{source_name}] 发送 Fan Studio 鉴权失败: {e}")
+
     def _classify_startup_group(self, url: str) -> str:
         """
         启动分组：
         1) fanstudio(all)
-        2) cenc-ir(wss)
+        2) whews
         3) p2pquake(wss)
         4) wolfx(all_eew)
         5) 其他
@@ -950,31 +1202,64 @@ class WebSocketManager:
         normalized_url = (url or "").strip().lower().rstrip("/")
         if normalized_url in FANSTUDIO_ALL_URLS:
             return "fanstudio"
-        if normalized_url in CENC_IR_WSS_URLS:
-            return "cenc_ir"
+        if is_whews_url(normalized_url) or any(
+            normalized_url == u.rstrip("/").lower() for u in WHEWS_WS_URLS
+        ):
+            return "whews"
         if normalized_url == P2PQUAKE_WSS_URL:
             return "p2pquake"
-        if normalized_url in (WOLFX_ALL_EEW_URL, WOLFX_CWA_EEW_URL):
+        if normalized_url in WOLFX_URLS:
             return "wolfx"
+        if normalized_url == EMSC_WSS_URL:
+            return "other"
+        if normalized_url == NOWQUAKE_CENCINT_WSS_URL:
+            return "other"
         return "other"
     
-    async def start_all_connections(self):
-        """启动所有数据源连接"""
-        config = Config()
+    async def _nowquake_bootstrap_latest(self, adapter: NowquakeCencintAdapter, source_name: str):
+        """Nowquake 建连后拉取最新烈度速报并下发（抑制 TTS）。"""
+        try:
+            parsed = await asyncio.to_thread(adapter.fetch_latest_event)
+            if not parsed:
+                logger.info(f"[{source_name}] Nowquake 首连无可用烈度速报")
+                return
+            parsed["_suppress_tts"] = True
+            actual_source = parsed.get("source_type") or "cenc-ir"
+            logger.info(f"[{source_name}] Nowquake 首连已拉取最新烈度速报: {parsed.get('event_id')}")
+            _dispatch_parsed_message(self, parsed, actual_source, source_name)
+        except Exception as e:
+            logger.warning(f"[{source_name}] Nowquake 首连拉取失败: {e}")
+
+    def _collect_desired_ws_urls(self, config: Config) -> list:
+        """按当前配置收集应连接的 WebSocket URL 列表。"""
+        # 强制关闭无界 cea_all/cenc 专用线，避免旧配置残留导致同时多连
+        if hasattr(config, "_disable_whews_dedicated_endpoints"):
+            config._disable_whews_dedicated_endpoints()
         enabled_urls = []
-        
-        # 获取启用的WebSocket URL
         for url in config.ws_urls:
+            if "fanstudio" in (url or "").lower() and not (url or "").rstrip("/").lower().endswith("/all"):
+                logger.warning(f"跳过已移除的 Fan Studio 路径: {url}")
+                continue
+            if is_whews_dedicated_endpoint(url):
+                logger.debug(f"跳过已废弃的无界科技专用端点: {url}")
+                continue
+            if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(url):
+                continue
             if config.enabled_sources.get(url, True):
                 enabled_urls.append(url)
-                self.enabled_sources[url] = True  # 同步到连接管理器内部状态
-        # 自定义数据源（WS/WSS）：URL 非空即启用
         custom_url = (config.custom_data_source_url or "").strip()
         if custom_url and (custom_url.startswith('ws://') or custom_url.startswith('wss://')):
             if custom_url not in enabled_urls:
                 enabled_urls.append(custom_url)
-                self.enabled_sources[custom_url] = True
                 logger.debug(f"添加自定义WebSocket数据源: {custom_url}")
+        return enabled_urls
+
+    async def start_all_connections(self):
+        """启动所有数据源连接"""
+        config = Config()
+        enabled_urls = self._collect_desired_ws_urls(config)
+        for url in enabled_urls:
+            self.enabled_sources[url] = True
         
         if not enabled_urls:
             logger.warning("ws_urls为空，没有可连接的数据源！")
@@ -986,7 +1271,7 @@ class WebSocketManager:
         # 创建所有连接任务
         grouped_urls: Dict[str, list] = {
             "fanstudio": [],
-            "cenc_ir": [],
+            "whews": [],
             "p2pquake": [],
             "wolfx": [],
             "other": [],
@@ -994,8 +1279,8 @@ class WebSocketManager:
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：fanstudio -> cenc-ir -> p2pquake -> wolfx -> other
-        startup_stages = ("fanstudio", "cenc_ir", "p2pquake", "wolfx", "other")
+        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> other
+        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "other")
         tasks = []
         urls_for_tasks = []
         stagger = float(getattr(config.ws_config, "startup_stagger_seconds", 1.5) or 0.0)
@@ -1045,16 +1330,122 @@ class WebSocketManager:
             await asyncio.sleep(0)
         
         logger.info(f"已创建{len(tasks)}个连接任务，按序异步建连中...")
+        # keepalive：即使连接任务被热停光，事件循环仍保持，供后续热启停
+        self._keepalive_task = asyncio.create_task(self._run_until_stopped())
+        wait_list = list(tasks) + [self._keepalive_task]
+        results = await asyncio.gather(*wait_list, return_exceptions=True)
         
-        # 等待所有任务完成（实际上会一直运行）
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 检查是否有任务异常退出
+        # 检查是否有任务异常退出（忽略 keepalive 的取消）
         for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                url = urls_for_tasks[i] if i < len(urls_for_tasks) else "unknown"
+            if i >= len(urls_for_tasks):
+                continue
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                url = urls_for_tasks[i]
                 logger.error(f"连接任务异常退出: {url}, 错误: {result}", exc_info=True)
-    
+
+    async def reload_connections(self) -> None:
+        """根据当前 Config 热启停 WebSocket（无需重启进程）。并发调用会串行执行。"""
+        if not self._running:
+            logger.warning("WebSocket 管理器未运行，无法热重载连接")
+            return
+        if self._reload_lock is None:
+            self._reload_lock = asyncio.Lock()
+        async with self._reload_lock:
+            await self._reload_connections_unlocked()
+
+    async def _reload_connections_unlocked(self) -> None:
+        """热启停实现（调用方须已持有 _reload_lock）。"""
+        config = Config()
+        desired = self._collect_desired_ws_urls(config)
+        desired_set = set(desired)
+        desired_norm = {(u or "").strip().lower().rstrip("/") for u in desired}
+
+        for url in list(self.enabled_sources.keys()):
+            self.enabled_sources[url] = url in desired_set
+        for url in desired:
+            self.enabled_sources[url] = True
+
+        # 停止不再需要的连接
+        for url in list(self._connection_tasks.keys()):
+            if url in desired_set:
+                continue
+            self.enabled_sources[url] = False
+            source_name = config.get_source_name(url)
+            ws = self.connections.get(url)
+            if ws is not None:
+                try:
+                    await asyncio.wait_for(ws.close(), timeout=RELOAD_STOP_TIMEOUT_SEC)
+                except Exception as e:
+                    logger.debug(f"关闭 WebSocket 失败 [{source_name}]: {e}")
+            task = self._connection_tasks.get(url)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=RELOAD_STOP_TIMEOUT_SEC)
+                except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                    pass
+            self._connection_tasks.pop(url, None)
+            self._cleanup_connection(url, source_name)
+            logger.info(f"已热停止 WebSocket: {source_name} ({url})")
+
+        # 收集需新建的连接（任务已结束或尚未创建）
+        to_start: List[str] = []
+        for url in desired:
+            existing = self._connection_tasks.get(url)
+            if existing is not None and not existing.done():
+                continue
+            adapter = self.get_adapter(url)
+            if adapter is None:
+                logger.debug(f"热重载跳过无适配器的数据源: {url}")
+                continue
+            to_start.append(url)
+
+        # 与冷启动一致：分组顺序 + Wolfx all_eew 优先于 cwa_eew
+        stage_order = {
+            "fanstudio": 0,
+            "whews": 1,
+            "p2pquake": 2,
+            "wolfx": 3,
+            "other": 4,
+        }
+
+        def _start_key(u: str) -> tuple:
+            """热启动排序键：分组 → Wolfx 子顺序 → URL。"""
+            group = self._classify_startup_group(u)
+            wolfx_extra = 0
+            if group == "wolfx":
+                n = (u or "").strip().lower().rstrip("/")
+                wolfx_extra = 0 if n == WOLFX_ALL_EEW_URL else 1
+            return (stage_order.get(group, 9), wolfx_extra, u or "")
+
+        to_start.sort(key=_start_key)
+
+        # 热启 Wolfx：注册 all_eew 放行事件（与 start_all_connections 对齐）
+        wolfx_starting = [u for u in to_start if self._classify_startup_group(u) == "wolfx"]
+        if wolfx_starting:
+            self._wolfx_all_eew_bootstrap_done = asyncio.Event()
+            all_eew_in_desired = WOLFX_ALL_EEW_URL in desired_norm
+            all_eew_task = self._connection_tasks.get(WOLFX_ALL_EEW_URL)
+            all_eew_already_up = (
+                all_eew_task is not None
+                and not all_eew_task.done()
+                and WOLFX_ALL_EEW_URL not in to_start
+            )
+            if (not all_eew_in_desired) or all_eew_already_up:
+                self._wolfx_all_eew_bootstrap_done.set()
+                if not all_eew_in_desired:
+                    logger.debug("热重载 Wolfx：未启用 all_eew，已放行 cwa_eew")
+                else:
+                    logger.debug("热重载 Wolfx：all_eew 已在运行，已放行 cwa_eew")
+
+        for url in to_start:
+            source_name = config.get_source_name(url)
+            self.enabled_sources[url] = True
+            self.reconnect_attempts[url] = 0
+            task = asyncio.create_task(self.connect_to_source(url, source_name))
+            self._connection_tasks[url] = task
+            logger.info(f"已热启动 WebSocket: {source_name} ({url})")
+
     async def send_message_async(self, url: str, message: str) -> bool:
         """
         异步发送消息到指定的WebSocket连接
@@ -1108,10 +1499,64 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"添加消息到发送队列失败: {e}")
             return False
+
+    def send_fanstudio_auth(self, api_key: str) -> bool:
+        """
+        向已连接的 Fan Studio /all 发送鉴权。
+
+        鉴权成功后服务器会自动下发完整数据流，无需重连或重启。
+
+        Returns:
+            是否成功将鉴权消息加入发送队列（连接不存在时返回 False）
+        """
+        key = (api_key or "").strip()
+        if not key:
+            logger.warning("Fan Studio API Key 为空，无法发送鉴权")
+            return False
+        target_url = None
+        for url in list(self.connections.keys()):
+            if self._is_fanstudio_all_url(url):
+                target_url = url
+                break
+        if not target_url:
+            logger.info("Fan Studio /all 尚未连接，鉴权将在下次建连时自动发送")
+            return False
+        try:
+            auth_msg = build_fanstudio_auth_message(key)
+            self._fanstudio_awaiting_auth[target_url] = True
+            self._fanstudio_auth_status[target_url] = ("pending", "正在连接并鉴权…")
+            ok = self.send_message(target_url, auth_msg)
+            if ok:
+                logger.info(f"已向 Fan Studio /all 热发送鉴权请求: {target_url}")
+            else:
+                self._fanstudio_awaiting_auth.pop(target_url, None)
+                self._fanstudio_auth_status[target_url] = ("failed", "鉴权消息发送失败")
+            return ok
+        except Exception as e:
+            if target_url:
+                self._fanstudio_awaiting_auth.pop(target_url, None)
+                self._fanstudio_auth_status[target_url] = ("failed", f"热发送鉴权失败: {e}")
+            logger.error(f"热发送 Fan Studio 鉴权失败: {e}")
+            return False
+
+    def get_fanstudio_auth_status(self) -> Tuple[str, str]:
+        """
+        返回 Fan Studio /all 当前鉴权状态。
+
+        Returns:
+            (state, message)：state 为 none/pending/ok/failed
+        """
+        for url in list(self.connections.keys()):
+            if self._is_fanstudio_all_url(url):
+                return self._fanstudio_auth_status.get(url, ("none", ""))
+        for url, status in self._fanstudio_auth_status.items():
+            if self._is_fanstudio_all_url(url):
+                return status
+        return ("none", "")
     
     def update_enabled_sources(self, enabled_sources: Dict[str, bool]):
         """
-        更新启用的数据源
+        更新启用的数据源（仅更新标志；完整热启停请用 reload_connections）
         
         Args:
             enabled_sources: 数据源启用状态字典

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""跨数据源事件去重（仅程序内部合并展示，不对外转发）。"""
+"""跨数据源事件去重（告警反馈等内部比对）。"""
 
 import time
 from typing import Any, Dict, List, Optional
@@ -68,13 +68,3 @@ def find_duplicate_index(
                 continue
         return idx
     return None
-
-
-def merge_sources(existing: Dict[str, Any], source_name: str) -> None:
-    """将新数据源名称合并到已有记录的 merged_sources 列表。"""
-    merged = existing.setdefault("merged_sources", [])
-    if not isinstance(merged, list):  # 历史数据可能不是列表，重置
-        existing["merged_sources"] = merged = []
-    display = source_name
-    if display and display not in merged:  # 去重追加数据源显示名
-        merged.append(display)

@@ -14,9 +14,13 @@ from config import (
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     FANSTUDIO_ALL_URL,
-    CENC_IR_URL,
     FANSTUDIO_TYPHOON_HTTP,
-    FANSTUDIO_AQI_HTTP,
+    WOLFX_ALL_EEW_URL,
+    WOLFX_CWA_EEW_URL,
+    WOLFX_CENC_EQLIST_URL,
+    WOLFX_JMA_EQLIST_URL,
+    EMSC_WSS_URL,
+    NOWQUAKE_CENCINT_WSS_URL,
 )
 
 PERFORMANCE_MODE_LOW = "low"
@@ -39,28 +43,25 @@ PERFORMANCE_MODE_LABELS: Dict[str, str] = {
     PERFORMANCE_MODE_CUSTOM: "自定义（未跟随预设）",
 }
 
-FANSTUDIO_WEATHER_URL = "wss://ws.fanstudio.tech/weatheralarm"
-WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"
-WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"
 # Fan Studio HTTP 辅助数据源
 TYPHOON_HTTP = FANSTUDIO_TYPHOON_HTTP
-AQI_HTTP = FANSTUDIO_AQI_HTTP
 
 
 def _base_enabled_sources() -> Dict[str, bool]:
     """与 Config._apply_default_config 对齐的基础数据源开关。"""
     sources: Dict[str, bool] = {
         FANSTUDIO_ALL_URL: True,
-        FANSTUDIO_WEATHER_URL: True,
     }
-    for url in P2PQUAKE_HTTP_SOURCE_KEYS:  # 默认关闭 P2PQuake HTTP 源
+    for url in P2PQUAKE_HTTP_SOURCE_KEYS:  # HTTP 键仅兼容旧配置，永不作为持续轮询源
         sources[url] = False
     sources[TYPHOON_HTTP] = True
-    sources[AQI_HTTP] = True
     sources[WOLFX_ALL_EEW_URL] = True
     sources[WOLFX_CWA_EEW_URL] = False
+    sources[WOLFX_CENC_EQLIST_URL] = False
+    sources[WOLFX_JMA_EQLIST_URL] = False
+    sources[EMSC_WSS_URL] = False
+    sources[NOWQUAKE_CENCINT_WSS_URL] = False
     sources[P2PQUAKE_WSS_URL] = False
-    sources[CENC_IR_URL] = True
     for url in NEW_HTTP_SOURCE_KEYS:  # 默认关闭国际 HTTP 源
         sources[url] = False
     return sources
@@ -69,12 +70,11 @@ def _base_enabled_sources() -> Dict[str, bool]:
 def _low_enabled_sources() -> Dict[str, bool]:
     """低配模式：关闭次要 HTTP/WSS 数据源以减轻负载。"""
     sources = _base_enabled_sources()
-    sources[FANSTUDIO_WEATHER_URL] = False
     sources[TYPHOON_HTTP] = False
-    sources[AQI_HTTP] = False
-    sources[CENC_IR_URL] = False
     sources[WOLFX_CWA_EEW_URL] = False
     sources[P2PQUAKE_WSS_URL] = False
+    sources[EMSC_WSS_URL] = False
+    sources[NOWQUAKE_CENCINT_WSS_URL] = False
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = False
     for url in NEW_HTTP_SOURCE_KEYS:
@@ -86,9 +86,13 @@ def _high_enabled_sources() -> Dict[str, bool]:
     """高配模式：启用全部可选 HTTP/WSS 数据源。"""
     sources = _base_enabled_sources()
     sources[WOLFX_CWA_EEW_URL] = True  # 高配启用台湾 CWA 独立 WebSocket
+    sources[WOLFX_CENC_EQLIST_URL] = True
+    sources[WOLFX_JMA_EQLIST_URL] = True
+    sources[EMSC_WSS_URL] = True
+    sources[NOWQUAKE_CENCINT_WSS_URL] = True
     sources[P2PQUAKE_WSS_URL] = True
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:
-        sources[url] = True
+        sources[url] = False  # 仍不持续轮询；启动补拉由 WSS 管理器完成
     for url in NEW_HTTP_SOURCE_KEYS:
         sources[url] = True
     return sources
@@ -105,7 +109,6 @@ def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
 def _message_fields_low() -> Dict[str, Any]:
     """低配模式消息相关配置覆盖项。"""
     return {
-        "event_history_max_entries": 100,
         "message_queue_maxsize": 100,
         "message_buffer_max_size": 50,
         "enable_china_intensity": False,
@@ -150,7 +153,6 @@ def _message_fields_low() -> Dict[str, Any]:
 def _message_fields_high() -> Dict[str, Any]:
     """高配模式消息相关配置覆盖项。"""
     return {
-        "event_history_max_entries": 1000,
         "message_queue_maxsize": 300,
         "message_buffer_max_size": 100,
         "enable_china_intensity": True,
@@ -303,7 +305,7 @@ def get_preset_payload(mode: str) -> Dict[str, Any]:
 
 
 def _data_source_snapshot(config) -> tuple:
-    """采集当前数据源开关与解析标志的快照，用于检测预设应用后是否需重启。"""
+    """采集当前数据源开关与解析标志的快照，用于检测预设应用后连接范围是否变化。"""
     mc = config.message_config
     flags = (
         getattr(mc, "use_custom_text", False),
@@ -343,7 +345,7 @@ def _data_source_snapshot(config) -> tuple:
         tuple(config.ws_urls),
         tuple(sorted(config.enabled_sources.items())),
         (config.custom_data_source_url or "").strip(),
-        bool(getattr(config.ws_config, "fanstudio_use_backup", False)),
+        getattr(config, "data_provider", "fanstudio"),
         flags,
     )
 
@@ -353,7 +355,7 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
     将性能预设写入 Config 实例。
 
     Returns:
-        dict: render_backend_changed, sources_changed, needs_restart
+        dict: render_backend_changed, sources_changed, needs_restart（恒为 False，已改为热重载）
     """
     if mode not in (
         PERFORMANCE_MODE_LOW,
@@ -380,7 +382,6 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
         defaults_msg = MessageConfig()
         defaults_alert = AlertConfig()
         for field_name in (
-            "event_history_max_entries",
             "message_queue_maxsize",
             "message_buffer_max_size",
             "enable_china_intensity",
@@ -474,6 +475,6 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
     return {
         "render_backend_changed": render_backend_changed,
         "sources_changed": sources_changed,
-        "needs_restart": render_backend_changed or sources_changed,
+        "needs_restart": False,
         "mode": mode,
     }

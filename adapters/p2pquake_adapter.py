@@ -61,7 +61,7 @@ class P2PQuakeAdapter(BaseAdapter):
             return None
             
         except json.JSONDecodeError as e:
-            logger.error(f"【P2PQuake适配器】 JSON解析失败: {e}")
+            logger.debug(f"【P2PQuake适配器】 JSON解析失败: {e}")
             return None
         except Exception as e:
             logger.error(f"【P2PQuake适配器】 解析数据时出错: {e}")
@@ -98,7 +98,7 @@ class P2PQuakeAdapter(BaseAdapter):
             return results
             
         except json.JSONDecodeError as e:
-            logger.error(f"【P2PQuake适配器】 JSON解析失败: {e}")
+            logger.debug(f"【P2PQuake适配器】 JSON解析失败: {e}")
             return []
         except Exception as e:
             logger.error(f"【P2PQuake适配器】 解析数据时出错: {e}")

@@ -23,7 +23,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
 from utils import timezone_utils
-from config import CENC_IR_URL
+from config import FANSTUDIO_ALL_URL
 
 logger = get_logger()
 
@@ -89,8 +89,8 @@ class FanStudioAdapter(BaseAdapter):
 
     # Fan Studio All 时按配置决定解析范围
     FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew']
-    FANSTUDIO_REPORT_SOURCES = ['cenc', 'cenc-ir', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa', 'hko',
-                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt', 'weatheralarm', 'tsunami']
+    FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa', 'hko',
+                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt', 'weatheralarm', 'tsunami', 'typhoon']
 
     # 映射 Fan Studio 子源 → Config.message_config 中的细粒度开关字段名
     FANSTUDIO_SOURCE_FLAG_FIELD = {
@@ -178,10 +178,15 @@ class FanStudioAdapter(BaseAdapter):
         """
         try:
             if isinstance(raw_data, str):
-                data = json.loads(raw_data)
+                try:
+                    data = json.loads(raw_data)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    return []
             else:
                 data = raw_data
-            
+            if not isinstance(data, dict):
+                return []
+
             if data.get('type') != 'initial_all':
                 return []
             
@@ -193,8 +198,7 @@ class FanStudioAdapter(BaseAdapter):
                 config = Config()
                 enabled_sources = config.enabled_sources
             
-            base_domain = "fanstudio.tech"
-            all_url = f"wss://ws.{base_domain}/all"
+            all_url = FANSTUDIO_ALL_URL
             # 由配置 fanstudio_parse_* 细粒度开关决定解析范围（不合并单项 URL）
             enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
             logger.info(f"[FanStudio适配器] 启用的数据源名称集合: {sorted(enabled_source_names)}")
@@ -254,16 +258,26 @@ class FanStudioAdapter(BaseAdapter):
         """
         try:
             if isinstance(raw_data, str):
-                data = json.loads(raw_data)
+                try:
+                    data = json.loads(raw_data)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    logger.debug("[FanStudio] 非 JSON 字符串，跳过")
+                    return None
             else:
                 data = raw_data
-            
-            # 处理错误消息
+            if not isinstance(data, dict):
+                return None
+
+            # 处理错误 / 鉴权消息
             if data.get('type') == 'error':
                 error_message = data.get('message', '未知错误')
                 logger.warning(f"[FanStudio] 错误: {error_message}")
                 return None
-            
+
+            if data.get('type') == 'auth_success':
+                logger.info(f"[FanStudio] 鉴权成功: {data.get('message', '')}")
+                return None
+
             # 处理心跳数据
             if data.get('type') == 'heartbeat':
                 return None
@@ -290,8 +304,7 @@ class FanStudioAdapter(BaseAdapter):
                         from config import Config
                         config = Config()
                         enabled_sources = config.enabled_sources
-                    base_domain = "fanstudio.tech"
-                    all_url = f"wss://ws.{base_domain}/all"
+                    all_url = FANSTUDIO_ALL_URL
                     enabled_source_names = self._get_fanstudio_enabled_source_names(enabled_sources, config, all_url)
                     # 按优先级查找第一个有效数据（只查找启用的数据源）
                     for source_type in priority_sources:
@@ -328,11 +341,9 @@ class FanStudioAdapter(BaseAdapter):
                     if config is None:
                         from config import Config
                         config = Config()
-                    # 烈度速报独立 WSS 已关闭时，/all 仍可能推送同源 update，此处与 main_window 入口过滤一致
-                    if source == 'cenc-ir' and not config.enabled_sources.get(
-                        CENC_IR_URL, False
-                    ):
-                        logger.debug("[FanStudio] update cenc-ir：独立数据源已关闭，跳过")
+                    # 烈度速报独立通道已移除，丢弃同源 update
+                    if source == 'cenc-ir':
+                        logger.debug("[FanStudio] update cenc-ir：独立连接已移除，跳过")
                         return None
                     # All 通道转发的 P2PQuake 地震情報：与消息配置开关一致
                     if source == 'p2pquake' and not getattr(
@@ -381,18 +392,18 @@ class FanStudioAdapter(BaseAdapter):
             logger.error(f"【FanStudio适配器】 解析数据时出错: {e}")
             return None
     
-    def _parse_specific_source(self, data: Dict[str, Any], source_type: str, update_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    def _parse_specific_source(self, data: Any, source_type: str, update_source: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         解析特定数据源的数据
         
         Args:
-            data: 数据字典（通常是Data字段的内容）
+            data: 数据（通常是Data字段的内容；台风等源可能为 list）
             source_type: 数据源类型
             update_source: 如果是update类型，传入原始的source字段（用于保存到raw_data）
         """
         try:
             # 检查数据是否为空
-            if not data or (isinstance(data, dict) and len(data) == 0):
+            if data is None or data == {} or data == []:
                 return None
             
             # 根据数据源类型选择不同的解析方法
@@ -400,17 +411,32 @@ class FanStudioAdapter(BaseAdapter):
                 result = self._parse_weather(data)
             elif source_type == 'tsunami':
                 result = self._parse_tsunami(data)
+            elif source_type == 'typhoon':
+                # All 通道会推送 source=typhoon，Data 常为 list；复用 HTTP 台风解析
+                from adapters.fanstudio_http_adapter import FanStudioHttpAdapter
+                result = FanStudioHttpAdapter(
+                    'fanstudio_typhoon', self.source_url
+                )._parse_typhoon(data)
             elif source_type == 'fssn-cmt':
                 result = self._parse_fssn_cmt(data)
             elif source_type == 'cenc-ir':
                 result = self._parse_cenc_ir(data)
             elif source_type in ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
                                 'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn']:
+                if not isinstance(data, dict):
+                    logger.debug(f"[FanStudio] {source_type} Data 非 dict，跳过: {type(data).__name__}")
+                    return None
                 result = self._parse_earthquake_report(data, source_type)
             elif source_type in ['cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew']:
+                if not isinstance(data, dict):
+                    logger.debug(f"[FanStudio] {source_type} Data 非 dict，跳过: {type(data).__name__}")
+                    return None
                 result = self._parse_earthquake_warning(data, source_type)
             else:
-                # 默认按速报处理
+                # 默认按速报处理（须为 dict，避免 list 误走 .get）
+                if not isinstance(data, dict):
+                    logger.debug(f"[FanStudio] 未知源 {source_type} Data 非 dict，跳过: {type(data).__name__}")
+                    return None
                 result = self._parse_earthquake_report(data, source_type)
             
             # 如果是update类型，确保raw_data包含source字段，以便后续提取source_name

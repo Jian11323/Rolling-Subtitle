@@ -18,17 +18,16 @@ logger = get_logger()
 
 # 数据源优先级定义（数字越小优先级越高）
 # 注意：这是速报消息的优先级，预警消息（除气象预警外）永远优先于速报
-# 速报播放顺序：气象预警、海啸信息、cenc-ir、cenc、ningxia、guangxi、shanxi、beijing、yunnan、cwa、p2pquake、p2pquake_tsunami、jma_volcano、hko、usgs、emsc、bcsf、gfz、usp、kma、fssn
+# 速报播放顺序：气象预警、海啸信息、cenc、ningxia、guangxi、shanxi、beijing、yunnan、cwa、p2pquake、p2pquake_tsunami、jma_volcano、hko、usgs、emsc、bcsf、gfz、usp、kma、fssn
 SOURCE_PRIORITY: Dict[str, int] = {
     'weatheralarm': 1,
-    'fanstudio_aqi': 2,
-    'fanstudio_typhoon': 3,
-    'tsunami': 4,
-    '海啸信息': 4,
+    'fanstudio_typhoon': 2,
+    'tsunami': 3,
+    '海啸信息': 3,
     
     # 速报数据源 - 按指定顺序设置优先级
-    'cenc-ir': 3,
     'cenc': 4,
+    'cenc-ir': 4,
     'ningxia': 5,
     'guangxi': 6,
     'shanxi': 7,
@@ -65,6 +64,9 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'wolfx_cenc_eew': 0,
     'wolfx_cq_eew': 0,
     'wolfx_cwa_eew': 0,
+    # Wolfx 列表速报
+    'wolfx_cenc': 4,
+    'wolfx_jma_eqlist': 11,
     'early_est': 0,
     # 默认优先级（未知数据源）
     'default': 99,
@@ -77,9 +79,9 @@ SOURCE_FIXED_ORDER: List[str] = [
     'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
     'early_est',
     # 速报
-    'weatheralarm', 'fanstudio_aqi', 'fanstudio_typhoon', 'tsunami', '海啸信息',
-    'cenc-ir', 'cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
-    'p2pquake', 'p2pquake_tsunami', 'jma_volcano',
+    'weatheralarm', 'fanstudio_typhoon', 'tsunami', '海啸信息',
+    'cenc', 'cenc-ir', 'wolfx_cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
+    'p2pquake', 'wolfx_jma_eqlist', 'p2pquake_tsunami', 'jma_volcano',
     'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma',
     'bmkg', 'geonet', 'ingv', 'ptwc', 'fssn', 'fssn-cmt',
 ]
@@ -436,28 +438,6 @@ class MessageBuffer:
                 self._sort_by_priority()
         
         return results
-    
-    def purge_fanstudio_aqi_stale(self, source: str, keep_time_point: str) -> int:
-        """
-        移除 fanstudio_aqi 中 shock_time 早于 keep_time_point 的消息（新小时批次到达时调用）。
-        """
-        if not source or not keep_time_point:
-            return 0
-        removed = 0
-        with self._lock:
-            kept = []
-            for msg in self.buffer:
-                if msg.source == source and msg.shock_time and msg.shock_time < keep_time_point:
-                    removed += 1
-                    continue
-                kept.append(msg)
-            if removed:
-                self.buffer = kept
-        if removed:
-            logger.debug(
-                f"[{source}] 已清理 {removed} 条旧时段 AQI 消息，保留 time_point>={keep_time_point}"
-            )
-        return removed
     
     def find_by_event_id(self, event_id: str, source: str) -> Optional[MessageItem]:
         """
@@ -911,6 +891,44 @@ class MessageBuffer:
         """获取缓冲区大小"""
         with self._lock:
             return len(self.buffer)
+
+    def remove_where(self, predicate) -> int:
+        """
+        按条件移除缓冲消息。
+
+        Args:
+            predicate: 接受 MessageItem，返回 True 表示应移除
+
+        Returns:
+            移除条数
+        """
+        with self._lock:
+            if not self.buffer:
+                return 0
+            kept: List[MessageItem] = []
+            removed = 0
+            for msg in self.buffer:
+                if predicate(msg):
+                    msg_id = id(msg)
+                    self._message_add_order.pop(msg_id, None)
+                    if self._current_displaying_msg_id == msg_id:
+                        self._current_displaying_msg_id = None
+                    removed += 1
+                    continue
+                kept.append(msg)
+            if removed:
+                self.buffer = kept
+                if self.current_index >= len(self.buffer):
+                    self.current_index = max(0, len(self.buffer) - 1)
+                if self._current_displaying_msg_id is not None:
+                    for i, msg in enumerate(self.buffer):
+                        if id(msg) == self._current_displaying_msg_id:
+                            self.current_index = i
+                            break
+                    else:
+                        self._current_displaying_msg_id = None
+                        self.current_index = 0
+            return removed
     
     def clear(self):
         """清空缓冲区"""

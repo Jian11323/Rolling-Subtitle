@@ -28,6 +28,7 @@ from config import (
     APP_VERSION,
     APP_DECLARATION_TEXT,
     P2PQUAKE_HTTP_SOURCE_KEYS,
+    P2PQUAKE_WSS_URL,
     p2pquake_master_enabled,
     BMKG_HTTP_URL,
     GEONET_HTTP_URL,
@@ -35,11 +36,31 @@ from config import (
     EARLYEST_HTTP_URL,
     JMA_ATOM_LONG_URL,
     PTWC_CAP_URL,
+    USGS_HTTP_URL,
+    HKO_HTTP_URL,
+    GFZ_HTTP_URL,
+    USP_HTTP_URL,
+    CWA_REPORT_HTTP_URL,
     DEFAULT_HTTP_POLL_INTERVALS,
     FANSTUDIO_ALL_URL,
-    CENC_IR_URL,
     FANSTUDIO_TYPHOON_HTTP,
-    FANSTUDIO_AQI_HTTP,
+    WHEWS_ALL_URL,
+    WHEWS_WS_URLS,
+    WHEWS_HOST_PRIMARY,
+    WHEWS_HOST_BACKUP,
+    DATA_PROVIDER_FANSTUDIO,
+    DATA_PROVIDER_WHEWS,
+    DATA_PROVIDER_OFFICIAL,
+    normalize_data_provider,
+    normalize_whews_host,
+    is_whews_url,
+    is_whews_dedicated_endpoint,
+    WOLFX_ALL_EEW_URL,
+    WOLFX_CWA_EEW_URL,
+    WOLFX_CENC_EQLIST_URL,
+    WOLFX_JMA_EQLIST_URL,
+    EMSC_WSS_URL,
+    NOWQUAKE_CENCINT_WSS_URL,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path, get_resource_path
@@ -229,11 +250,14 @@ _AUDIO_TIER_TTS = (
 
 class SettingsWindow(QDialog):
     """设置窗口"""
-    
+
+    # 后台线程鉴权结果回主线程（勿在非 GUI 线程直接改控件）
+    fanstudio_auth_test_finished = pyqtSignal(bool, str, str)
+
     def __init__(self, parent=None):
         """
         初始化设置窗口
-        
+
         Args:
             parent: 父窗口
         """
@@ -254,9 +278,11 @@ class SettingsWindow(QDialog):
         self._is_all_selected = False  # 标记当前是否处于全选状态
         # 初始化基础URL（必须在初始化列表之后调用，因为创建标签页时会使用这些列表）
         self._update_base_urls()
-        
+
         # 设置UI（只在初始化时调用一次）
         self._settings_dirty = False
+        self._fanstudio_auth_testing = False
+        self.fanstudio_auth_test_finished.connect(self._on_fanstudio_auth_test_finished)
         self._setup_ui()
         self._wire_dirty_tracking()
         self._auto_save_running = False
@@ -265,11 +291,153 @@ class SettingsWindow(QDialog):
         self._auto_save_timer.setInterval(800)
         self._auto_save_timer.timeout.connect(self._perform_auto_save)
         self.auto_save_settings_cb = None
-    
+
     def _update_base_urls(self):
-        """更新基础 URL（固定使用 fanstudio.tech 主站）"""
+        """更新基础 URL（固定使用 Fan Studio /all）"""
         self.all_source_url = FANSTUDIO_ALL_URL
-        self.base_domain = "fanstudio.tech"
+
+    def _on_fanstudio_auth_test_clicked(self):
+        """测试 Fan Studio API Key：连接 /all 发送 auth，等待 auth_success 或 error。"""
+        api_key = ""
+        if hasattr(self, "fanstudio_api_key_entry"):
+            api_key = self.fanstudio_api_key_entry.text().strip()
+        if not api_key:
+            show_warning(self, "提示", "请先填写 Fan Studio API Key（sk- 开头）。")
+            return
+        if getattr(self, "_fanstudio_auth_testing", False):
+            return
+
+        self._fanstudio_auth_testing = True
+        if hasattr(self, "fanstudio_auth_btn"):
+            self.fanstudio_auth_btn.setEnabled(False)
+        if hasattr(self, "fanstudio_auth_status_label"):
+            self.fanstudio_auth_status_label.setText("正在连接并鉴权…")
+            self.fanstudio_auth_status_label.setStyleSheet("color: #666666; font-size: 14px;")
+
+        import threading
+        from utils.fanstudio_credentials import test_fanstudio_auth
+
+        def _worker():
+            try:
+                ok, message = test_fanstudio_auth(api_key)
+            except Exception as e:
+                ok, message = False, f"鉴权异常: {e}"
+            # 必须经信号回主线程；后台线程里 QTimer.singleShot 可能永不触发
+            self.fanstudio_auth_test_finished.emit(bool(ok), str(message or ""), api_key)
+
+        threading.Thread(target=_worker, daemon=True, name="FanStudioAuthTest").start()
+
+    def _on_fanstudio_auth_test_finished(self, ok: bool, message: str, api_key: str):
+        """鉴权测试完成后更新 UI；成功则写入配置并对主连接热鉴权（无需重启）。"""
+        self._fanstudio_auth_testing = False
+        if hasattr(self, "fanstudio_auth_btn"):
+            self.fanstudio_auth_btn.setEnabled(True)
+        if ok:
+            self.config.ws_config.fanstudio_api_key = api_key
+            live_applied = self._hot_apply_fanstudio_auth(api_key)
+            self._mark_settings_dirty()
+            status = message or "鉴权成功，已接入数据流。"
+            if live_applied:
+                status = status + " 已对当前连接生效，完整数据流将自动下发。"
+            else:
+                status = status + " Key 已保存，Fan Studio 下次建连时将自动鉴权。"
+            if hasattr(self, "fanstudio_auth_status_label"):
+                self.fanstudio_auth_status_label.setText(status)
+                self.fanstudio_auth_status_label.setStyleSheet("color: #2E7D32; font-size: 14px;")
+            show_info(self, "鉴权成功", status)
+        else:
+            if hasattr(self, "fanstudio_auth_status_label"):
+                self.fanstudio_auth_status_label.setText(message or "鉴权失败")
+                self.fanstudio_auth_status_label.setStyleSheet("color: #C62828; font-size: 14px;")
+            show_warning(self, "鉴权失败", message or "鉴权失败，请检查 API Key。")
+        self._refresh_fanstudio_auth_status_label(force=False)
+
+    def _fanstudio_api_key_text(self) -> str:
+        """读取设置页当前填写的 Fan Studio API Key。"""
+        if hasattr(self, "fanstudio_api_key_entry") and self.fanstudio_api_key_entry is not None:
+            return (self.fanstudio_api_key_entry.text() or "").strip()
+        return (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip()
+
+    def _set_fanstudio_auth_status_text(self, text: str, color: str = "#888888") -> None:
+        """设置鉴权状态行文案（始终非空）。"""
+        if not hasattr(self, "fanstudio_auth_status_label") or self.fanstudio_auth_status_label is None:
+            return
+        msg = (text or "").strip() or "请输入 Key"
+        self.fanstudio_auth_status_label.setText(msg)
+        self.fanstudio_auth_status_label.setStyleSheet(f"color: {color}; font-size: 14px;")
+
+    def _refresh_fanstudio_auth_status_label(self, force: bool = False) -> None:
+        """
+        刷新 API Key 下方状态行，保证始终有可见文案。
+        优先级：测试进行中 > 主连接鉴权结果 > 是否已填写 Key。
+        """
+        if not hasattr(self, "fanstudio_auth_status_label") or self.fanstudio_auth_status_label is None:
+            return
+        if getattr(self, "_fanstudio_auth_testing", False) and not force:
+            self._set_fanstudio_auth_status_text("正在连接并鉴权…", "#666666")
+            return
+
+        key = self._fanstudio_api_key_text()
+        if not key:
+            self._set_fanstudio_auth_status_text("请输入 Key", "#888888")
+            return
+
+        parent = self.parent()
+        getter = getattr(parent, "get_fanstudio_auth_status", None) if parent is not None else None
+        state, message = "none", ""
+        if callable(getter):
+            try:
+                state, message = getter()
+            except Exception:
+                state, message = "none", ""
+        state = str(state or "none").strip().lower()
+        message = str(message or "").strip()
+        current = (self.fanstudio_auth_status_label.text() or "").strip()
+
+        if state == "ok":
+            text = message or "鉴权成功，已接入数据流。"
+            if force or current.startswith("正在连接并鉴权") or not current or current in (
+                "请输入 Key",
+                "已填写，点击「连接」进行鉴权",
+            ) or "鉴权成功" in current:
+                self._set_fanstudio_auth_status_text(text, "#2E7D32")
+            return
+        if state == "pending":
+            self._set_fanstudio_auth_status_text(message or "正在连接并鉴权…", "#666666")
+            return
+        if state == "failed":
+            if force or current.startswith("正在连接并鉴权") or "鉴权失败" in current or current in (
+                "请输入 Key",
+                "已填写，点击「连接」进行鉴权",
+                "",
+            ):
+                self._set_fanstudio_auth_status_text(message or "鉴权失败", "#C62828")
+            return
+
+        # 无主连接鉴权结果：保留最近一次成功/失败提示，否则提示去点连接
+        if current and current not in ("请输入 Key",) and (
+            "鉴权成功" in current or "鉴权失败" in current or current.startswith("正在连接并鉴权")
+        ):
+            return
+        self._set_fanstudio_auth_status_text("已填写，点击「连接」进行鉴权", "#666666")
+
+    def _sync_fanstudio_auth_status_label(self, force: bool = False) -> None:
+        """兼容旧调用：转交到统一刷新逻辑。"""
+        self._refresh_fanstudio_auth_status_label(force=force)
+
+    def _hot_apply_fanstudio_auth(self, api_key: str) -> bool:
+        """向主窗口已连接的 Fan Studio /all 热发送鉴权；返回是否已发出。"""
+        parent = self.parent()
+        if parent is None:
+            return False
+        apply_fn = getattr(parent, "apply_fanstudio_api_key", None)
+        if not callable(apply_fn):
+            ws_manager = getattr(parent, "ws_manager", None)
+            if ws_manager is None or not hasattr(ws_manager, "send_fanstudio_auth"):
+                return False
+            self.config.ws_config.fanstudio_api_key = (api_key or "").strip()
+            return bool(ws_manager.send_fanstudio_auth(api_key))
+        return bool(apply_fn(api_key))
     
     def _setup_ui(self):
         """设置UI（只在初始化时调用一次）"""
@@ -341,6 +509,7 @@ class SettingsWindow(QDialog):
                 self._status_refresh_timer.start()
             if index == self._data_source_tab_index:
                 self._update_parse_status_labels()
+                self._sync_fanstudio_auth_status_label()
             else:
                 self._update_data_source_health_table()
         else:
@@ -360,25 +529,45 @@ class SettingsWindow(QDialog):
         current_index = self.notebook.currentIndex()
         if current_index == self._data_source_tab_index:
             self._update_parse_status_labels()
+            self._sync_fanstudio_auth_status_label()
         elif current_index == self._data_source_status_tab_index:
             self._update_data_source_health_table()
 
     def _update_parse_status_labels(self):
-        """根据配置刷新解析/连接状态标签。"""
+        """根据本会话实际解析记录刷新「已解析」；「已启用」仍跟开关。"""
         try:
+            parent = self.parent()
+            parsed_keys = set()
+            if parent is not None and hasattr(parent, "get_parsed_status_keys"):
+                try:
+                    parsed_keys = set(parent.get_parsed_status_keys() or [])
+                except Exception:
+                    parsed_keys = set()
             mc = self.config.message_config
             for key, lbl in self.source_parse_labels.items():
                 if not lbl:
                     continue
-                cb = self.source_vars.get(key) or getattr(self, f"{key}_cb", None)
-                if cb is not None and hasattr(cb, "isChecked"):
-                    enabled = bool(cb.isChecked())
-                else:
-                    enabled = bool(getattr(mc, key, False))
-                status_texts = self.source_status_texts.get(key, ("已解析", "未解析", "解析状态：已解析 / 未解析"))
+                status_texts = self.source_status_texts.get(
+                    key, ("已解析", "未解析", "解析状态：已解析 / 未解析")
+                )
                 connected_text, disconnected_text, tooltip = status_texts
                 lbl.setToolTip(tooltip)
-                if enabled:
+                # 「已启用/未启用」表示开关；「已解析/未解析」表示本会话是否收到过可解析数据
+                # （含 Fan Studio initial_all；过期未上屏也会记为已解析）
+                if connected_text == "已启用" or disconnected_text == "未启用":
+                    cb = self.source_vars.get(key) or getattr(self, f"{key}_cb", None)
+                    if cb is not None and hasattr(cb, "isChecked"):
+                        enabled = bool(cb.isChecked())
+                    else:
+                        enabled = bool(getattr(mc, key, False))
+                    if enabled:
+                        lbl.setText(connected_text)
+                        lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
+                    else:
+                        lbl.setText(disconnected_text)
+                        lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
+                    continue
+                if key in parsed_keys:
                     lbl.setText(connected_text)
                     lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
                 else:
@@ -452,6 +641,7 @@ class SettingsWindow(QDialog):
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
             self._update_parse_status_labels()
+            self._sync_fanstudio_auth_status_label()
         elif self.notebook.currentIndex() == self._data_source_status_tab_index:
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
@@ -638,9 +828,9 @@ class SettingsWindow(QDialog):
                 self.fanstudio_all_connect_cb.setChecked(
                     self.config.enabled_sources.get(self.all_source_url, True)
                 )
-            if hasattr(self, 'fanstudio_backup_cb'):
-                self.fanstudio_backup_cb.setChecked(
-                    getattr(self.config.ws_config, 'fanstudio_use_backup', False)
+            if hasattr(self, 'fanstudio_api_key_entry'):
+                self.fanstudio_api_key_entry.setText(
+                    getattr(self.config.ws_config, 'fanstudio_api_key', '') or ''
                 )
             for attr, cfg_name in [
                 ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
@@ -709,48 +899,6 @@ class SettingsWindow(QDialog):
             logger.debug(f"刷新设置控件时部分项失败: {e}")
         finally:
             self._clear_settings_dirty()
-        """采集影响数据源连接/解析范围的配置快照，用于判断保存后是否必须重启"""
-        mc = self.config.message_config
-        flags = (
-            getattr(mc, 'use_custom_text', False),
-            getattr(mc, 'fanstudio_parse_cea', True),
-            getattr(mc, 'fanstudio_parse_cea_pr', True),
-            getattr(mc, 'fanstudio_parse_cwa_eew', True),
-            getattr(mc, 'fanstudio_parse_jma', True),
-            getattr(mc, 'fanstudio_parse_sa', True),
-            getattr(mc, 'fanstudio_parse_kma_eew', True),
-            getattr(mc, 'fanstudio_parse_cenc', True),
-            getattr(mc, 'fanstudio_parse_ningxia', True),
-            getattr(mc, 'fanstudio_parse_guangxi', True),
-            getattr(mc, 'fanstudio_parse_shanxi', True),
-            getattr(mc, 'fanstudio_parse_beijing', True),
-            getattr(mc, 'fanstudio_parse_yunnan', True),
-            getattr(mc, 'fanstudio_parse_cwa', True),
-            getattr(mc, 'fanstudio_parse_hko', True),
-            getattr(mc, 'fanstudio_parse_usgs', True),
-            getattr(mc, 'fanstudio_parse_emsc', True),
-            getattr(mc, 'fanstudio_parse_bcsf', True),
-            getattr(mc, 'fanstudio_parse_gfz', True),
-            getattr(mc, 'fanstudio_parse_usp', True),
-            getattr(mc, 'fanstudio_parse_kma', True),
-            getattr(mc, 'fanstudio_parse_fssn', True),
-            getattr(mc, 'fanstudio_parse_fssn_cmt', True),
-            getattr(mc, 'fanstudio_parse_weatheralarm', True),
-            getattr(mc, 'fanstudio_parse_tsunami', True),
-            getattr(mc, 'ali_all_parse_nied', True),
-            getattr(mc, 'ali_all_parse_early_est', True),
-            getattr(mc, 'ali_all_parse_jma_volcano', True),
-            getattr(mc, 'ali_all_parse_bmkg', True),
-            getattr(mc, 'ali_all_parse_cq_eew', True),
-            getattr(mc, 'p2pquake_parse_551', True),
-            getattr(mc, 'p2pquake_parse_552', True),
-        )
-        return (
-            tuple(self.config.ws_urls),
-            tuple(sorted(self.config.enabled_sources.items())),
-            (self.config.custom_data_source_url or '').strip(),
-            flags,
-        )
     
     def _adjust_window_to_screen(self):
         """调整窗口大小和位置，确保不超出屏幕"""
@@ -908,7 +1056,7 @@ class SettingsWindow(QDialog):
         timezone_combo.setCurrentIndex(max(0, idx))
         timezone_combo.setStyleSheet(STYLE_COMBOBOX)
         timezone_combo.setFixedWidth(120)
-        timezone_hint = QLabel("修改时区后需重启软件生效。")
+        timezone_hint = QLabel("修改时区后立即生效（新消息按新时区显示）。")
         timezone_hint.setStyleSheet(STYLE_HINT)
         timezone_hint.setWordWrap(True)
         tz_row = QWidget()
@@ -1170,7 +1318,7 @@ class SettingsWindow(QDialog):
         block3_layout.addLayout(preset_row)
         preset_hint = QLabel(
             "切换性能模式会覆盖渲染、数据源与告警等相关设置；预警显示能力保留。"
-            "应用后若变更渲染或数据源，需重启生效。"
+            "应用后立即热重载生效。"
         )
         preset_hint.setWordWrap(True)
         preset_hint.setStyleSheet(STYLE_HINT)
@@ -1185,8 +1333,8 @@ class SettingsWindow(QDialog):
             opengl_radio.setChecked(True)
         else:
             cpu_radio.setChecked(True)
-        cpu_radio.setToolTip("兼容性更好，修改后需重启软件生效")
-        opengl_radio.setToolTip("硬件加速（OpenGL），修改后需重启软件生效")
+        cpu_radio.setToolTip("兼容性更好，修改后立即热切换生效")
+        opengl_radio.setToolTip("硬件加速（OpenGL），修改后立即热切换生效")
         render_row.addWidget(cpu_radio)
         render_row.addWidget(opengl_radio)
         render_row.addStretch()
@@ -1407,7 +1555,7 @@ class SettingsWindow(QDialog):
         self.radio_custom_text.setStyleSheet(STYLE_LABEL + " padding: 2px 0;")
         gm_layout.addWidget(self.radio_report)
         gm_layout.addWidget(self.radio_custom_text)
-        mode_hint = QLabel("提示：切换「地震速报」/「自定义文本」需重启软件后生效。自定义文本内容请在下方「自定义文本」区块编辑。")
+        mode_hint = QLabel("提示：切换「地震速报」/「自定义文本」保存后立即生效。自定义文本内容请在下方「自定义文本」区块编辑。")
         mode_hint.setStyleSheet(STYLE_HINT)
         mode_hint.setWordWrap(True)
         gm_layout.addWidget(mode_hint)
@@ -2199,23 +2347,15 @@ class SettingsWindow(QDialog):
         tts_test_v.addLayout(tts_test_row1)
         tts_test_v.addLayout(tts_test_row2)
 
-        def _get_tts_test_history() -> List[Dict[str, Any]]:
-            """从主窗口读取事件历史，供 TTS 测试朗读使用。"""
-            mw = self.parent()
-            if mw is not None and hasattr(mw, "get_full_event_history"):
-                rows = mw.get_full_event_history()
-                return list(rows) if rows else []
-            return []
-
         def _test_tts_kind(kind: str, label: str) -> None:
-            """保存音频设置后，用最近一条指定类型历史测试 TTS。"""
+            """保存音频设置后，用内置样例测试 TTS。"""
             from utils.tts_alert import test_tts_from_latest
             self._save_audio_settings()
-            if not test_tts_from_latest(self.config, _get_tts_test_history(), kind):
+            if not test_tts_from_latest(self.config, kind):
                 show_info(
                     self,
                     "测试朗读",
-                    f"暂无{label}数据，请先接收后再试。",
+                    f"暂无{label}样例，请稍后再试。",
                 )
 
         def _test_tts_warning():
@@ -2368,7 +2508,7 @@ class SettingsWindow(QDialog):
             show_warning(self, "错误", "音频设置保存失败")
 
     def _create_data_source_tab(self):
-        """创建数据源设置标签页"""
+        """创建数据源设置标签页（顶部三选一：Fan Studio / 无界科技 / 官方+Wolfx）。"""
         scroll_area = QScrollArea()  # 可滚动容器
         scroll_area.setWidgetResizable(True)  # 内容区随窗口宽度自适应
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 禁用横向滚动条
@@ -2381,18 +2521,62 @@ class SettingsWindow(QDialog):
 
         fanstudio_http_poll_sources = [
             (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
-            (FANSTUDIO_AQI_HTTP, "城市空气质量指数"),
         ]
-        intl_sources = [  # 国际/独立 HTTP 数据源：(URL, 显示名, 默认是否启用)
+        intl_sources = [  # 国际/独立 HTTP/WS 数据源：(URL, 显示名, 默认是否启用)
             (BMKG_HTTP_URL, "BMKG 印尼地震速报", False),
             (GEONET_HTTP_URL, "GeoNet 新西兰地震速报", False),
             (INGV_HTTP_URL, "INGV 意大利地震速报", False),
             (EARLYEST_HTTP_URL, "Early-est 地震预警", False),
             (JMA_ATOM_LONG_URL, "JMA-Atom 火山情报（长周期）", False),
             (PTWC_CAP_URL, "PTWC 太平洋海啸预警", False),
+            (USGS_HTTP_URL, "USGS 美国地质调查局", False),
+            (EMSC_WSS_URL, "EMSC 欧洲地中海地震中心（WebSocket）", False),
+            (HKO_HTTP_URL, "HKO 香港天文台", False),
+            (GFZ_HTTP_URL, "GFZ 德国地学研究中心", False),
+            (USP_HTTP_URL, "USP 巴西圣保罗大学", False),
+            (CWA_REPORT_HTTP_URL, "CWA 台湾中央气象署速报（ExpTech）", False),
         ]
 
-        # Fan Studio（QGroupBox）
+        # 顶部：主数据源提供者三选一（并排）
+        group_provider = QGroupBox("主数据源")
+        group_provider.setStyleSheet(STYLE_GROUPBOX)
+        gp_layout = QVBoxLayout(group_provider)
+        gp_layout.setContentsMargins(12, 14, 12, 12)
+        gp_layout.setSpacing(12)
+        provider_row = QHBoxLayout()
+        provider_row.setSpacing(24)
+        self.data_provider_group = QButtonGroup(self)
+        self.radio_provider_fanstudio = QRadioButton("Fan Studio")
+        self.radio_provider_whews = QRadioButton("无界科技")
+        self.radio_provider_official = QRadioButton("官方数据源+Wolfx")
+        for rb in (
+            self.radio_provider_fanstudio,
+            self.radio_provider_whews,
+            self.radio_provider_official,
+        ):
+            rb.setStyleSheet("font-size: 16px; font-weight: bold; padding: 6px 4px;")
+            provider_row.addWidget(rb)
+        self.data_provider_group.addButton(self.radio_provider_fanstudio, 0)
+        self.data_provider_group.addButton(self.radio_provider_whews, 1)
+        self.data_provider_group.addButton(self.radio_provider_official, 2)
+        provider_row.addStretch()
+        gp_layout.addLayout(provider_row)
+        provider_hint = QLabel(
+            "三者只能选其一：保存后仅连接当前提供者，不会同时连接 Fan Studio / 无界 / 官方+Wolfx。"
+            "切换提供者会清空全部缓冲，并由新数据源重新拉取。"
+            "下方台风 / CENC 烈度速报 / P2PQuake 为全局辅助项，切换后仍会重新接入。"
+        )
+        provider_hint.setStyleSheet(STYLE_HINT)
+        provider_hint.setWordWrap(True)
+        gp_layout.addWidget(provider_hint)
+        scroll_layout.addWidget(group_provider)
+
+        # ---------- Fan Studio 面板 ----------
+        self.ds_panel_fanstudio = QWidget()
+        fs_panel_layout = QVBoxLayout(self.ds_panel_fanstudio)
+        fs_panel_layout.setContentsMargins(0, 0, 0, 0)
+        fs_panel_layout.setSpacing(12)
+
         group_warning = QGroupBox("Fan Studio")
         group_warning.setStyleSheet(STYLE_GROUPBOX)
         gw_layout = QVBoxLayout(group_warning)
@@ -2401,85 +2585,83 @@ class SettingsWindow(QDialog):
         fs_all_label = QLabel("Fan Studio")
         fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
         gw_layout.addWidget(fs_all_label)
+        fs_apply_hint = QLabel(
+            'Fan Studio 数据源需要 API Key 鉴权。'
+            '<a href="https://api.fanstudio.tech/dev-platform/" style="color: #4A90E2;">前往申请</a>'
+            '（应用列表选择「地震情报实况栏」，填写信息等待审核即可）'
+        )
+        fs_apply_hint.setOpenExternalLinks(True)
+        fs_apply_hint.setStyleSheet(STYLE_HINT)
+        fs_apply_hint.setWordWrap(True)
+        gw_layout.addWidget(fs_apply_hint)
         fs_hint = QLabel(
-            "勾选「Fan Studio」后连接；下方子源决定解析范围"
+            "勾选「Fan Studio」后连接；填写 API Key 点「连接」鉴权后即可接入完整数据流（无需重启）。"
+            "未鉴权时服务器仅返回公开精简数据（如 FSSN）。下方子源决定解析范围。"
         )
         fs_hint.setStyleSheet(STYLE_HINT)
         fs_hint.setWordWrap(True)
         gw_layout.addWidget(fs_hint)
-        self.fanstudio_backup_cb = QCheckBox("启用备用服务器 (fanstudio.hk)")
-        self.fanstudio_backup_cb.setChecked(
-            getattr(self.config.ws_config, "fanstudio_use_backup", False)
+
+        api_key_label = QLabel("Fan Studio API Key：")
+        api_key_label.setStyleSheet(STYLE_LABEL)
+        gw_layout.addWidget(api_key_label)
+        api_key_row = QHBoxLayout()
+        api_key_row.setSpacing(8)
+        self.fanstudio_api_key_entry = QLineEdit()
+        self.fanstudio_api_key_entry.setPlaceholderText("sk- 开头的 API 密钥")
+        self.fanstudio_api_key_entry.setEchoMode(QLineEdit.Password)
+        self.fanstudio_api_key_entry.setText(
+            getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
         )
-        self.fanstudio_backup_cb.setToolTip(
-            "主服务器：wss://ws.fanstudio.tech / https://api.fanstudio.tech\n"
-            "备用服务器：wss://ws.fanstudio.hk / https://api.fanstudio.hk\n"
-            "勾选后改用备用服务器（含 WebSocket 聚合、烈度速报及 HTTP 台风/AQI）；"
-            "与主站互斥、不会同时连接；保存后需重启生效。"
+        self.fanstudio_api_key_entry.setStyleSheet(STYLE_LINEEDIT)
+        self.fanstudio_api_key_entry.setToolTip(
+            "连接 /all 后发送鉴权；未填写时仍可连接，但仅接收公开精简数据流。"
         )
-        self.fanstudio_backup_cb.setStyleSheet("font-size: 14px; line-height: 20pt; padding: 2px 0;")
-        gw_layout.addWidget(self.fanstudio_backup_cb)
+        self.fanstudio_api_key_entry.textChanged.connect(
+            lambda _text: self._refresh_fanstudio_auth_status_label(force=True)
+        )
+        api_key_row.addWidget(self.fanstudio_api_key_entry, 1)
+        self.fanstudio_auth_btn = QPushButton("连接")
+        self.fanstudio_auth_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        self.fanstudio_auth_btn.setToolTip("测试 API Key 鉴权（发送 auth 并等待 auth_success / error）")
+        self.fanstudio_auth_btn.clicked.connect(self._on_fanstudio_auth_test_clicked)
+        api_key_row.addWidget(self.fanstudio_auth_btn)
+        gw_layout.addLayout(api_key_row)
+        self.fanstudio_auth_status_label = QLabel("请输入 Key")
+        self.fanstudio_auth_status_label.setStyleSheet("color: #888888; font-size: 14px;")
+        self.fanstudio_auth_status_label.setWordWrap(True)
+        gw_layout.addWidget(self.fanstudio_auth_status_label)
+        self._refresh_fanstudio_auth_status_label(force=True)
+
         self.fanstudio_all_connect_cb = QCheckBox("Fan Studio")  # /all 聚合 WebSocket 总开关
         self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
         self.fanstudio_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         gw_layout.addWidget(self.fanstudio_all_connect_cb)
-        # CENC 烈度速报（cenc-ir）为 Fan Studio 独立连接，不在 /all 通道中
-        self._add_source_checkbox(
-            group_warning,
-            CENC_IR_URL,
-            "中国地震台网中心地震烈度速报",
-            default_value=False,
-            status_key=CENC_IR_URL,
-            status_tooltip="连接状态：已连接 / 未连接",
-            status_connected_text="已连接",
-            status_disconnected_text="未连接",
-        )
-        self._add_source_checkbox(
-            group_warning,
-            FANSTUDIO_TYPHOON_HTTP,
-            "台风实时与历史数据",
-            default_value=True,
-            status_key=FANSTUDIO_TYPHOON_HTTP,
-            status_tooltip="解析状态：已解析 / 未解析",
-            status_connected_text="已解析",
-            status_disconnected_text="未解析",
-        )
-        self._add_source_checkbox(
-            group_warning,
-            FANSTUDIO_AQI_HTTP,
-            "城市空气质量指数",
-            default_value=True,
-            status_key=FANSTUDIO_AQI_HTTP,
-            status_tooltip="解析状态：已解析 / 未解析",
-            status_connected_text="已解析",
-            status_disconnected_text="未解析",
-        )
-        # Fan Studio 所有子源纵向排列
+
         def _fs_cb(cfg_name: str, text: str) -> QCheckBox:
             """创建 Fan Studio 子源复选框行（含解析状态标签）。"""
-            cb = QCheckBox(text)  # 子源解析范围开关
-            cb.setChecked(getattr(self.config.message_config, cfg_name, True))  # 从 message_config 读取默认勾选
+            cb = QCheckBox(text)
+            cb.setChecked(getattr(self.config.message_config, cfg_name, True))
             cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-            status_label = QLabel("已解析")  # 右侧解析状态标签
-            status_label.setStyleSheet(STYLE_STATUS_CONNECTED)
+            status_label = QLabel("未解析")
+            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
             status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            status_label.setToolTip("解析状态：已解析 / 未解析")
-            self.source_parse_labels[cfg_name] = status_label  # 注册供 _update_parse_status_labels 刷新
-            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：已解析 / 未解析")
+            status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            self.source_parse_labels[cfg_name] = status_label
+            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             row_layout = QHBoxLayout()
             row_layout.addWidget(cb)
             row_layout.addStretch()
             row_layout.addWidget(status_label)
             gw_layout.addLayout(row_layout)
             return cb
-        # 预警子源
+
         self.fanstudio_parse_cea_cb = _fs_cb('fanstudio_parse_cea', "中国地震预警网")
         self.fanstudio_parse_cea_pr_cb = _fs_cb('fanstudio_parse_cea_pr', "中国地震预警省网")
         self.fanstudio_parse_cwa_eew_cb = _fs_cb('fanstudio_parse_cwa_eew', "台湾气象署地震预警")
         self.fanstudio_parse_jma_cb = _fs_cb('fanstudio_parse_jma', "日本气象厅地震预警")
         self.fanstudio_parse_sa_cb = _fs_cb('fanstudio_parse_sa', "美国ShakeAlert地震预警")
         self.fanstudio_parse_kma_eew_cb = _fs_cb('fanstudio_parse_kma_eew', "韩国气象厅地震预警")
-        # 速报 / 气象 / 海啸子源
         self.fanstudio_parse_weatheralarm_cb = _fs_cb('fanstudio_parse_weatheralarm', "中国气象局气象预警")
         self.fanstudio_parse_tsunami_cb = _fs_cb('fanstudio_parse_tsunami', "自然资源部海啸预警中心")
         self.fanstudio_parse_cenc_cb = _fs_cb('fanstudio_parse_cenc', "中国地震台网中心")
@@ -2498,36 +2680,169 @@ class SettingsWindow(QDialog):
         self.fanstudio_parse_kma_cb = _fs_cb('fanstudio_parse_kma', "韩国气象厅速报")
         self.fanstudio_parse_fssn_cb = _fs_cb('fanstudio_parse_fssn', "FSSN")
         self.fanstudio_parse_fssn_cmt_cb = _fs_cb('fanstudio_parse_fssn_cmt', "FSSN 矩心矩张量解")
-        scroll_layout.addWidget(group_warning)
+        fs_panel_layout.addWidget(group_warning)
+        scroll_layout.addWidget(self.ds_panel_fanstudio)
 
-        # Wolfx 聚合源 (wss://ws-api.wolfx.jp/all_eew)
+        # ---------- 无界科技面板 ----------
+        self.ds_panel_whews = QWidget()
+        wh_panel_layout = QVBoxLayout(self.ds_panel_whews)
+        wh_panel_layout.setContentsMargins(0, 0, 0, 0)
+        wh_panel_layout.setSpacing(12)
+
+        group_whews = QGroupBox("无界科技")
+        group_whews.setStyleSheet(STYLE_GROUPBOX)
+        wh_layout = QVBoxLayout(group_whews)
+        wh_layout.setContentsMargins(12, 14, 12, 12)
+        wh_layout.setSpacing(12)
+        wh_apply_hint = QLabel(
+            '无界科技数据源需要 WAuth 令牌鉴权。'
+            '<a href="https://auth.beecld.com/login?redirect=%2Fprofile" style="color: #4A90E2;">前往申请</a>'
+            '（登录/注册后在个人中心获取 wat_ 开头的令牌）'
+        )
+        wh_apply_hint.setOpenExternalLinks(True)
+        wh_apply_hint.setStyleSheet(STYLE_HINT)
+        wh_apply_hint.setWordWrap(True)
+        wh_layout.addWidget(wh_apply_hint)
+        wh_hint = QLabel(
+            "填写 WAuth 令牌后勾选连接；建连后以纯文本发送令牌（须在 5 秒内）。"
+            "CEA / CENC 等子源均经 /ws/all 聚合流解析，由下方勾选控制。"
+            "JMA 预警/情报请使用下方 P2PQuake。"
+        )
+        wh_hint.setStyleSheet(STYLE_HINT)
+        wh_hint.setWordWrap(True)
+        wh_layout.addWidget(wh_hint)
+
+        host_row = QHBoxLayout()
+        host_row.setSpacing(16)
+        host_label = QLabel("API 主机：")
+        host_label.setStyleSheet(STYLE_LABEL)
+        host_row.addWidget(host_label)
+        self.whews_host_group = QButtonGroup(self)
+        self.radio_whews_host_primary = QRadioButton("主站")
+        self.radio_whews_host_backup = QRadioButton("备站")
+        for rb in (self.radio_whews_host_primary, self.radio_whews_host_backup):
+            rb.setStyleSheet("font-size: 16px; padding: 2px 0;")
+            host_row.addWidget(rb)
+        self.whews_host_group.addButton(self.radio_whews_host_primary, 0)
+        self.whews_host_group.addButton(self.radio_whews_host_backup, 1)
+        host_row.addStretch()
+        wh_layout.addLayout(host_row)
+        cur_host = normalize_whews_host(getattr(self.config.ws_config, "whews_host", WHEWS_HOST_PRIMARY))
+        if cur_host == WHEWS_HOST_BACKUP:
+            self.radio_whews_host_backup.setChecked(True)
+        else:
+            self.radio_whews_host_primary.setChecked(True)
+
+        token_label = QLabel("无界科技令牌：")
+        token_label.setStyleSheet(STYLE_LABEL)
+        wh_layout.addWidget(token_label)
+        self.whews_token_entry = QLineEdit()
+        self.whews_token_entry.setPlaceholderText("wat_ 开头的令牌")
+        self.whews_token_entry.setEchoMode(QLineEdit.Password)
+        self.whews_token_entry.setText(getattr(self.config.ws_config, "whews_token", "") or "")
+        self.whews_token_entry.setStyleSheet(STYLE_LINEEDIT)
+        self.whews_token_entry.setToolTip("建连后以纯文本首帧发送；5 秒内未发送则断开；鉴权失败关闭码 4401")
+        wh_layout.addWidget(self.whews_token_entry)
+
+        whews_urls = self.config.get_whews_endpoint_urls(cur_host)
+        self.whews_all_connect_cb = QCheckBox("无界科技（/ws/all）")
+        self.whews_all_connect_cb.setChecked(
+            self.config.enabled_sources.get(whews_urls.get("all", WHEWS_ALL_URL), False)
+        )
+        self.whews_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        wh_layout.addWidget(self.whews_all_connect_cb)
+
+        def _wh_cb(cfg_name: str, text: str) -> QCheckBox:
+            """创建无界科技子源复选框行。"""
+            cb = QCheckBox(text)
+            cb.setChecked(getattr(self.config.message_config, cfg_name, True))
+            cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+            status_label = QLabel("未解析")
+            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            self.source_parse_labels[cfg_name] = status_label
+            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            row = QHBoxLayout()
+            row.addWidget(cb)
+            row.addStretch()
+            row.addWidget(status_label)
+            wh_layout.addLayout(row)
+            return cb
+
+        self.whews_parse_jma_eew_cb = _wh_cb("whews_parse_jma_eew", "日本气象厅地震预警")
+        self.whews_parse_cwa_eew_cb = _wh_cb("whews_parse_cwa_eew", "台湾气象署地震预警")
+        self.whews_parse_sa_eew_cb = _wh_cb("whews_parse_sa_eew", "美国 ShakeAlert 地震预警")
+        self.whews_parse_cea_cb = _wh_cb("whews_parse_cea", "中国地震预警网")
+        self.whews_parse_cea_pr_cb = _wh_cb("whews_parse_cea_pr", "中国地震预警省网")
+        self.whews_parse_weatheralarm_cb = _wh_cb("whews_parse_weatheralarm", "中国气象局气象预警")
+        self.whews_parse_tsunami_cb = _wh_cb("whews_parse_tsunami", "自然资源部海啸预警中心")
+        self.whews_parse_cenc_cb = _wh_cb("whews_parse_cenc", "中国地震台网中心")
+        self.whews_parse_cwa_cb = _wh_cb("whews_parse_cwa", "台湾气象署速报")
+        self.whews_parse_hko_cb = _wh_cb("whews_parse_hko", "香港天文台速报")
+        self.whews_parse_usgs_cb = _wh_cb("whews_parse_usgs", "美国地质调查局速报")
+        self.whews_parse_emsc_cb = _wh_cb("whews_parse_emsc", "欧洲地中海地震中心速报")
+        self.whews_parse_bcsf_cb = _wh_cb("whews_parse_bcsf", "法国中央地震研究所速报")
+        self.whews_parse_gfz_cb = _wh_cb("whews_parse_gfz", "德国地学研究中心速报")
+        self.whews_parse_usp_cb = _wh_cb("whews_parse_usp", "巴西圣保罗大学速报")
+        self.whews_parse_kma_cb = _wh_cb("whews_parse_kma", "韩国气象厅速报")
+        self.whews_parse_bmkg_cb = _wh_cb("whews_parse_bmkg", "BMKG 印尼地震速报")
+        self.whews_parse_geonet_cb = _wh_cb("whews_parse_geonet", "GeoNet 新西兰地震速报")
+        self.whews_parse_tmd_cb = _wh_cb("whews_parse_tmd", "泰国地震局速报")
+        self.whews_parse_ingv_cb = _wh_cb("whews_parse_ingv", "INGV 意大利地震速报")
+
+        def _update_whews_host_ui():
+            """切换主站/备用时显示或隐藏 CEA 解析项（备用站无 CEA）。"""
+            use_cea = self.radio_whews_host_primary.isChecked()
+            self.whews_parse_cea_cb.setVisible(use_cea)
+            self.whews_parse_cea_pr_cb.setVisible(use_cea)
+            for cfg in ("whews_parse_cea", "whews_parse_cea_pr"):
+                lbl = self.source_parse_labels.get(cfg)
+                if lbl is not None:
+                    lbl.setVisible(use_cea)
+
+        self.radio_whews_host_primary.toggled.connect(lambda _: _update_whews_host_ui())
+        self.radio_whews_host_backup.toggled.connect(lambda _: _update_whews_host_ui())
+        _update_whews_host_ui()
+
+        wh_panel_layout.addWidget(group_whews)
+        scroll_layout.addWidget(self.ds_panel_whews)
+
+        # ---------- 官方数据源+Wolfx 面板 ----------
+        self.ds_panel_official = QWidget()
+        of_panel_layout = QVBoxLayout(self.ds_panel_official)
+        of_panel_layout.setContentsMargins(0, 0, 0, 0)
+        of_panel_layout.setSpacing(12)
+
         group_ali = QGroupBox("Wolfx")
         group_ali.setStyleSheet(STYLE_GROUPBOX)
         ga_layout = QVBoxLayout(group_ali)
         ga_layout.setContentsMargins(12, 14, 12, 12)
         ga_layout.setSpacing(12)
         ali_hint = QLabel(
-            "勾选「Wolfx」后连接"
+            "勾选「Wolfx」后连接 all_eew；台湾中央气象署走独立通道；"
+            "中国地震台网/JMA 地震情報经 all_eew 推送（需同时勾选下方对应项）。"
         )
         ali_hint.setStyleSheet(STYLE_HINT)
         ali_hint.setWordWrap(True)
         ga_layout.addWidget(ali_hint)
-        wolfx_url = "wss://ws-api.wolfx.jp/all_eew"  # Wolfx 聚合 WebSocket 地址
-        self.wolfx_all_connect_cb = QCheckBox("Wolfx")  # all_eew 总连接开关
+        wolfx_url = WOLFX_ALL_EEW_URL
+        self.wolfx_all_connect_cb = QCheckBox("Wolfx")
         self.wolfx_all_connect_cb.setChecked(self.config.enabled_sources.get(wolfx_url, True))
         self.wolfx_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         ga_layout.addWidget(self.wolfx_all_connect_cb)
 
         def _wolfx_row(parse_key: str, title: str):
             """创建 Wolfx 子源复选框行（含解析状态标签）。"""
-            cb = QCheckBox(title)  # 子源解析范围开关
-            cb.setChecked(getattr(self.config.message_config, parse_key, True))  # 从 message_config 读取默认勾选
+            cb = QCheckBox(title)
+            cb.setChecked(getattr(self.config.message_config, parse_key, True))
             cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-            st = QLabel("未解析")  # 右侧解析状态标签（初始未解析）
+            st = QLabel("未解析")
             st.setStyleSheet(STYLE_STATUS_NEUTRAL)
             st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            st.setToolTip("解析状态：已解析 / 未解析")
-            self.source_parse_labels[parse_key] = st  # 注册供 _update_parse_status_labels 刷新
+            st.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            self.source_parse_labels[parse_key] = st
+            self.source_status_texts[parse_key] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             row = QHBoxLayout()
             row.addWidget(cb)
             row.addStretch()
@@ -2535,91 +2850,162 @@ class SettingsWindow(QDialog):
             ga_layout.addLayout(row)
             return cb
 
-        self.ali_all_parse_nied_cb = _wolfx_row('ali_all_parse_nied', "緊急地震速報（JMA）")  # JMA 紧急地震速报
-        self.ali_all_parse_early_est_cb = _wolfx_row('ali_all_parse_early_est', "四川省地震局")  # 四川地震局预警
-        self.ali_all_parse_jma_volcano_cb = _wolfx_row('ali_all_parse_jma_volcano', "福建省地震局")  # 福建地震局预警
-        self.ali_all_parse_bmkg_cb = _wolfx_row('ali_all_parse_bmkg', "中国地震台网地震预警")  # CENC 地震预警
-        self.ali_all_parse_cq_eew_cb = _wolfx_row('ali_all_parse_cq_eew', "重庆市地震局")  # 重庆地震局预警
-        wolfx_cwa_url = "wss://ws-api.wolfx.jp/cwa_eew"  # 台湾 CWA 独立 WebSocket（非 all_eew 通道）
+        self.ali_all_parse_nied_cb = _wolfx_row('ali_all_parse_nied', "緊急地震速報（JMA）")
+        self.ali_all_parse_early_est_cb = _wolfx_row('ali_all_parse_early_est', "四川省地震局")
+        self.ali_all_parse_jma_volcano_cb = _wolfx_row('ali_all_parse_jma_volcano', "福建省地震局")
+        self.ali_all_parse_bmkg_cb = _wolfx_row('ali_all_parse_bmkg', "中国地震台网地震预警")
+        self.ali_all_parse_cq_eew_cb = _wolfx_row('ali_all_parse_cq_eew', "重庆市地震局")
+        wolfx_cwa_url = WOLFX_CWA_EEW_URL
         self._add_source_checkbox(
             group_ali,
             wolfx_cwa_url,
             "台湾中央气象署",
-            default_value=False  # 默认不连接，需用户手动启用
+            default_value=False
         )
-        scroll_layout.addWidget(group_ali)
+        self._add_source_checkbox(
+            group_ali,
+            WOLFX_CENC_EQLIST_URL,
+            "中国地震台网地震信息",
+            default_value=False,
+            status_key=WOLFX_CENC_EQLIST_URL,
+            status_tooltip="解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析",
+            status_connected_text="已解析",
+            status_disconnected_text="未解析",
+        )
+        self._add_source_checkbox(
+            group_ali,
+            WOLFX_JMA_EQLIST_URL,
+            "JMA 地震情報",
+            default_value=False,
+            status_key=WOLFX_JMA_EQLIST_URL,
+            status_tooltip="解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析",
+            status_connected_text="已解析",
+            status_disconnected_text="未解析",
+        )
+        of_panel_layout.addWidget(group_ali)
 
-        # 国际/独立 HTTP 数据源（开关与访问间隔分开展示）
         group_intl = QGroupBox("国际数据源")
         group_intl.setStyleSheet(STYLE_GROUPBOX)
         gi_layout = QVBoxLayout(group_intl)
         gi_layout.setContentsMargins(12, 14, 12, 12)
         gi_layout.setSpacing(12)
-        intl_hint = QLabel("勾选后启用对应 HTTP 拉取。")
+        intl_hint = QLabel("勾选后启用对应 HTTP 拉取或 WebSocket 连接。")
         intl_hint.setStyleSheet(STYLE_HINT)
         intl_hint.setWordWrap(True)
         gi_layout.addWidget(intl_hint)
-        for url, label, default_on in intl_sources:  # 逐项添加国际 HTTP 源复选框
+        for url, label, default_on in intl_sources:
+            is_ws = str(url).startswith(("ws://", "wss://"))
             self._add_source_checkbox(
                 group_intl,
                 url,
                 label,
                 default_value=default_on,
                 status_key=url,
-                status_tooltip="拉取状态：已启用 / 未启用",
+                status_tooltip=(
+                    "连接状态：已启用 / 未启用" if is_ws else "拉取状态：已启用 / 未启用"
+                ),
                 status_connected_text="已启用",
                 status_disconnected_text="未启用",
             )
-        scroll_layout.addWidget(group_intl)
+        of_panel_layout.addWidget(group_intl)
 
-        # 地震历史（QGroupBox）
         group_history = QGroupBox("P2PQuake")
         group_history.setStyleSheet(STYLE_GROUPBOX)
         gh_layout = QVBoxLayout(group_history)
         gh_layout.setContentsMargins(12, 14, 12, 12)
         gh_layout.setSpacing(12)
         p2p_hint = QLabel(
-            "勾选「P2PQuake」将同时启用 HTTP 数据Get与 WebSocket；"
-            "取消勾选则两者均关闭。下方两项决定地震情報 / 津波予報是否参与解析。"
+            "勾选后连接 P2PQuake WebSocket；启动时 HTTP 补拉一次最新地震/海啸情报，之后仅靠 WSS 推送。"
+            "下方两项决定地震情報 / 津波予報是否参与解析。"
         )
         p2p_hint.setStyleSheet(STYLE_HINT)
         p2p_hint.setWordWrap(True)
         gh_layout.addWidget(p2p_hint)
-        p2p_wss_url = P2PQUAKE_WSS_URL  # P2PQuake WebSocket 地址
-        p2p_status_col_w = 88  # 解析状态标签固定列宽，与上方对齐
-        self.p2pquake_connect_cb = QCheckBox("P2PQuake（HTTP + WebSocket）")  # HTTP + WSS 总开关
+        p2p_wss_url = P2PQUAKE_WSS_URL
+        p2p_status_col_w = 88
+        self.p2pquake_connect_cb = QCheckBox("P2PQuake（启动 HTTP 补拉 + WebSocket）")
         self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
         self.p2pquake_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
         gh_layout.addWidget(self.p2pquake_connect_cb)
         if p2p_wss_url not in self.individual_source_urls:
-            self.individual_source_urls.append(p2p_wss_url)  # 纳入单项 URL 列表供全选/恢复默认
+            self.individual_source_urls.append(p2p_wss_url)
+
         def _p2p_parse_row(parse_key: str, title: str) -> QCheckBox:
-            """创建 P2PQuake 解析范围复选框行（含解析状态标签）。"""
-            cb = QCheckBox(title)  # 551/552 解析范围开关
-            cb.setChecked(getattr(self.config.message_config, parse_key, True))  # 从 message_config 读取默认勾选
+            """创建 P2PQuake 解析范围复选框行。"""
+            cb = QCheckBox(title)
+            cb.setChecked(getattr(self.config.message_config, parse_key, True))
             cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
-            st = QLabel("未解析")  # 右侧解析状态标签
+            st = QLabel("未解析")
             st.setMinimumWidth(p2p_status_col_w)
             st.setFixedWidth(p2p_status_col_w)
             st.setStyleSheet(STYLE_STATUS_NEUTRAL)
             st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            st.setToolTip("解析状态：已解析 / 未解析")
-            self.source_parse_labels[parse_key] = st  # 注册供 _update_parse_status_labels 刷新
+            st.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            self.source_parse_labels[parse_key] = st
+            self.source_status_texts[parse_key] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
             row.addWidget(cb)
             row.addStretch()
             row.addWidget(st)
             gh_layout.addLayout(row)
-            cb.stateChanged.connect(self._update_parse_status_labels)  # 勾选变更时即时刷新状态文字
+            cb.stateChanged.connect(self._update_parse_status_labels)
             return cb
 
-        self.p2pquake_parse_551_cb = _p2p_parse_row("p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報")  # 地震情報
-        self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")  # 津波予報
-        scroll_layout.addWidget(group_history)
+        self.p2pquake_parse_551_cb = _p2p_parse_row("p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報")
+        self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")
+        # P2PQuake 不放入 official 面板：固定在数据源页最下方，切换提供者时始终可见
 
-        poll_interval_sources = fanstudio_http_poll_sources + [  # 合并 Fan Studio 与国际 HTTP 源的轮询间隔项
-            (url, label) for url, label, _ in intl_sources
+        # CENC 烈度速报（Nowquake）：与 P2P / 台风一样固定在提供者面板下方，任意提供者均可启用
+        group_cenc_ir = QGroupBox("CENC 烈度速报")
+        group_cenc_ir.setStyleSheet(STYLE_GROUPBOX)
+        gci_layout = QVBoxLayout(group_cenc_ir)
+        gci_layout.setContentsMargins(12, 14, 12, 12)
+        gci_layout.setSpacing(12)
+        cenc_ir_hint = QLabel(
+            "通过 Nowquake 接入中国地震台网烈度速报（WebSocket 推送；建连时 HTTP 拉取最新一条）。"
+            "数据仅供参考，请遵循接口使用说明与免责声明。"
+        )
+        cenc_ir_hint.setStyleSheet(STYLE_HINT)
+        cenc_ir_hint.setWordWrap(True)
+        gci_layout.addWidget(cenc_ir_hint)
+        self._add_source_checkbox(
+            group_cenc_ir,
+            NOWQUAKE_CENCINT_WSS_URL,
+            "CENC 烈度速报（Nowquake）",
+            default_value=False,
+            status_key=NOWQUAKE_CENCINT_WSS_URL,
+            status_tooltip="连接状态：已启用 / 未启用",
+            status_connected_text="已启用",
+            status_disconnected_text="未启用",
+        )
+
+        # 台风 HTTP：全局辅助源，任意主提供者下均可启用
+        group_typhoon = QGroupBox("台风实时与历史数据")
+        group_typhoon.setStyleSheet(STYLE_GROUPBOX)
+        gt_layout = QVBoxLayout(group_typhoon)
+        gt_layout.setContentsMargins(12, 14, 12, 12)
+        gt_layout.setSpacing(12)
+        typhoon_hint = QLabel(
+            "通过 Fan Studio HTTP 轮询台风路径与强度（与上方主数据源提供者无关，切换 Fan Studio / 无界 / 官方时均生效）。"
+        )
+        typhoon_hint.setStyleSheet(STYLE_HINT)
+        typhoon_hint.setWordWrap(True)
+        gt_layout.addWidget(typhoon_hint)
+        self._add_source_checkbox(
+            group_typhoon,
+            FANSTUDIO_TYPHOON_HTTP,
+            "台风实时与历史数据",
+            default_value=True,
+            status_key=FANSTUDIO_TYPHOON_HTTP,
+            status_tooltip="解析状态：本会话已解析到该源数据 / 尚未解析",
+            status_connected_text="已解析",
+            status_disconnected_text="未解析",
+        )
+        self._add_http_poll_interval_grid(gt_layout, fanstudio_http_poll_sources)
+
+        poll_interval_sources = [
+            (url, label) for url, label, _ in intl_sources if not str(url).startswith(("ws://", "wss://"))
         ]
         group_poll = QGroupBox("数据源访问间隔")
         group_poll.setStyleSheet(STYLE_GROUPBOX)
@@ -2631,15 +3017,44 @@ class SettingsWindow(QDialog):
         poll_hint.setWordWrap(True)
         gp_layout.addWidget(poll_hint)
         self._add_http_poll_interval_grid(gp_layout, poll_interval_sources)
-        scroll_layout.addWidget(group_poll)
-        
-        scroll_layout.addStretch()  # 底部留白，避免按钮贴边
-        
+        of_panel_layout.addWidget(group_poll)
+        scroll_layout.addWidget(self.ds_panel_official)
+
+        # 台风 / CENC 烈度速报 / P2PQuake：固定在三个提供者面板下方（切换提供者时始终可见）
+        scroll_layout.addWidget(group_typhoon)
+        scroll_layout.addWidget(group_cenc_ir)
+        scroll_layout.addWidget(group_history)
+
+        # 按配置选中提供者并切换可见性（参考百度翻译区域 setVisible）
+        provider = normalize_data_provider(getattr(self.config, "data_provider", DATA_PROVIDER_FANSTUDIO))
+        if provider == DATA_PROVIDER_WHEWS:
+            self.radio_provider_whews.setChecked(True)
+        elif provider == DATA_PROVIDER_OFFICIAL:
+            self.radio_provider_official.setChecked(True)
+        else:
+            self.radio_provider_fanstudio.setChecked(True)
+
+        def _update_data_provider_panels_visible():
+            """切换数据源提供者时显示/隐藏对应配置面板（台风 / 烈度速报 / P2PQuake 始终可见）。"""
+            show_fs = self.radio_provider_fanstudio.isChecked()
+            show_wh = self.radio_provider_whews.isChecked()
+            show_of = self.radio_provider_official.isChecked()
+            self.ds_panel_fanstudio.setVisible(show_fs)
+            self.ds_panel_whews.setVisible(show_wh)
+            self.ds_panel_official.setVisible(show_of)
+
+        self.radio_provider_fanstudio.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.radio_provider_whews.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.radio_provider_official.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        _update_data_provider_panels_visible()
+
+        scroll_layout.addStretch()
+
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
         button_layout.setContentsMargins(0, 10, 0, 0)
         button_layout.addStretch()
-        self.select_all_btn = QPushButton("全选")  # 全选/恢复默认切换按钮
+        self.select_all_btn = QPushButton("全选")
         self.select_all_btn.setMinimumWidth(100)
         self.select_all_btn.setMinimumHeight(35)
         self.select_all_btn.setStyleSheet(STYLE_SELECT_ALL_BTN)
@@ -2650,15 +3065,29 @@ class SettingsWindow(QDialog):
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
         save_btn.setStyleSheet(STYLE_SAVE_BTN)
-        save_btn.clicked.connect(self._save_data_source_settings)  # 保存并视情况重启
+        save_btn.clicked.connect(self._save_data_source_settings)
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
         scroll_layout.addWidget(button_frame)
-        
+
         scroll_area.setWidget(scrollable_widget)
-        self.notebook.addTab(scroll_area, "数据源")  # 注册为第 3 个标签页
-        self._update_parse_status_labels()  # 初次打开时刷新各源解析/连接状态
-    
+        self.notebook.addTab(scroll_area, "数据源")
+        self._update_parse_status_labels()
+
+    def _current_whews_host_from_ui(self) -> str:
+        """从设置页读取无界科技主机。"""
+        if hasattr(self, "radio_whews_host_backup") and self.radio_whews_host_backup.isChecked():
+            return WHEWS_HOST_BACKUP
+        return WHEWS_HOST_PRIMARY
+
+    def _current_data_provider_from_ui(self) -> str:
+        """从设置页单选框读取当前数据源提供者。"""
+        if hasattr(self, "radio_provider_whews") and self.radio_provider_whews.isChecked():
+            return DATA_PROVIDER_WHEWS
+        if hasattr(self, "radio_provider_official") and self.radio_provider_official.isChecked():
+            return DATA_PROVIDER_OFFICIAL
+        return DATA_PROVIDER_FANSTUDIO
+
     def _make_http_poll_spinbox(self, url: str) -> QSpinBox:
         """为 HTTP 数据源创建 Get 间隔 SpinBox（最低 1 秒）。"""
         spin = QSpinBox()
@@ -2726,12 +3155,12 @@ class SettingsWindow(QDialog):
             self.individual_source_urls.append(url)
         poll_spin = self._make_http_poll_spinbox(url)  # 同行展示 Get 间隔
         sk = status_key or url
-        status_label = QLabel("已解析" if initial_value else "未解析")
-        status_label.setStyleSheet(STYLE_STATUS_CONNECTED if initial_value else STYLE_STATUS_NEUTRAL)
+        status_label = QLabel("未解析")
+        status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
         status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        status_label.setToolTip("解析状态：已解析 / 未解析")
+        status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
         self.source_parse_labels[sk] = status_label
-        self.source_status_texts[sk] = ("已解析", "未解析", "解析状态：已解析 / 未解析")
+        self.source_status_texts[sk] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
         row_layout = QHBoxLayout()
         row_layout.addWidget(checkbox)
         row_layout.addWidget(QLabel("Get"))
@@ -2781,8 +3210,8 @@ class SettingsWindow(QDialog):
         # 如果不是All源，记录到单项数据源列表
         if not is_all_source and url and url not in ["fanstudio_warning", "fanstudio_report"]:
             self.individual_source_urls.append(url)
-            # 如果是Fan Studio数据源（WebSocket URL），记录到Fan Studio列表
-            if 'fanstudio.tech' in url or 'fanstudio.hk' in url:
+            # 仅 Fan Studio WebSocket 计入 fanstudio_source_urls（台风 HTTP 为全局源）
+            if url.startswith(("ws://", "wss://")) and "fanstudio.tech" in url:
                 self.fanstudio_source_urls.append(url)
 
         if status_key:
@@ -2841,6 +3270,8 @@ class SettingsWindow(QDialog):
         """全选所有数据源"""
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.fanstudio_all_connect_cb.setChecked(True)
+        if hasattr(self, "whews_all_connect_cb"):
+            self.whews_all_connect_cb.setChecked(True)
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(True)
         if hasattr(self, "p2pquake_connect_cb"):
@@ -2848,7 +3279,7 @@ class SettingsWindow(QDialog):
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:  # 跳过空URL和all数据源
                 checkbox.setChecked(True)
-        # Fan Studio 细粒度子源也一起全选
+        # Fan Studio / 无界科技细粒度子源也一起全选
         for attr in [
             'fanstudio_parse_cea_cb',
             'fanstudio_parse_cea_pr_cb',
@@ -2874,6 +3305,26 @@ class SettingsWindow(QDialog):
             'fanstudio_parse_fssn_cmt_cb',
             'fanstudio_parse_weatheralarm_cb',
             'fanstudio_parse_tsunami_cb',
+            'whews_parse_jma_eew_cb',
+            'whews_parse_cwa_eew_cb',
+            'whews_parse_sa_eew_cb',
+            'whews_parse_cea_cb',
+            'whews_parse_cea_pr_cb',
+            'whews_parse_cenc_cb',
+            'whews_parse_cwa_cb',
+            'whews_parse_hko_cb',
+            'whews_parse_usgs_cb',
+            'whews_parse_emsc_cb',
+            'whews_parse_bcsf_cb',
+            'whews_parse_gfz_cb',
+            'whews_parse_usp_cb',
+            'whews_parse_kma_cb',
+            'whews_parse_bmkg_cb',
+            'whews_parse_geonet_cb',
+            'whews_parse_tmd_cb',
+            'whews_parse_ingv_cb',
+            'whews_parse_tsunami_cb',
+            'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
             'p2pquake_parse_552_cb',
         ]:
@@ -2889,13 +3340,16 @@ class SettingsWindow(QDialog):
                 checkbox.setChecked(bool(self.config.enabled_sources.get(url, False)))
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
+        if hasattr(self, "whews_all_connect_cb"):
+            urls = self.config.get_whews_endpoint_urls()
+            self.whews_all_connect_cb.setChecked(self.config.enabled_sources.get(urls.get("all", WHEWS_ALL_URL), False))
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(
-                self.config.enabled_sources.get("wss://ws-api.wolfx.jp/all_eew", True)
+                self.config.enabled_sources.get(WOLFX_ALL_EEW_URL, True)
             )
         if hasattr(self, "p2pquake_connect_cb"):
             self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
-        # Fan Studio 细粒度子源：恢复为默认勾选
+        # Fan Studio / 无界科技细粒度子源：恢复为配置值
         for attr, cfg_name in [
             ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
             ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
@@ -2921,6 +3375,26 @@ class SettingsWindow(QDialog):
             ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
+            ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
+            ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
+            ('whews_parse_cea_cb', 'whews_parse_cea'),
+            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
+            ('whews_parse_cenc_cb', 'whews_parse_cenc'),
+            ('whews_parse_cwa_cb', 'whews_parse_cwa'),
+            ('whews_parse_hko_cb', 'whews_parse_hko'),
+            ('whews_parse_usgs_cb', 'whews_parse_usgs'),
+            ('whews_parse_emsc_cb', 'whews_parse_emsc'),
+            ('whews_parse_bcsf_cb', 'whews_parse_bcsf'),
+            ('whews_parse_gfz_cb', 'whews_parse_gfz'),
+            ('whews_parse_usp_cb', 'whews_parse_usp'),
+            ('whews_parse_kma_cb', 'whews_parse_kma'),
+            ('whews_parse_bmkg_cb', 'whews_parse_bmkg'),
+            ('whews_parse_geonet_cb', 'whews_parse_geonet'),
+            ('whews_parse_tmd_cb', 'whews_parse_tmd'),
+            ('whews_parse_ingv_cb', 'whews_parse_ingv'),
+            ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
+            ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
             ('p2pquake_parse_552_cb', 'p2pquake_parse_552'),
         ]:
@@ -3554,17 +4028,9 @@ class SettingsWindow(QDialog):
                 return False
             self._save_config_with_data_source_toggles()
             self._clear_settings_dirty()
+            self.config._notify_config_changed()
             if show_message:
-                msg = styled_message_box(self)
-                msg.setWindowTitle("成功")
-                msg.setText("高级设置已保存。\n数据源与日志相关设置需重启程序后生效。")
-                msg.setIcon(QMessageBox.Information)
-                cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
-                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
-                msg.exec_()
-                if msg.clickedButton() == restart_btn:
-                    logger.debug("用户选择重启，正在重启软件...")
-                    self._restart_application()
+                show_info(self, "成功", "高级设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("高级设置已保存")
             return True
         except Exception as e:
@@ -3763,10 +4229,13 @@ class SettingsWindow(QDialog):
             return "正常"
         if connection_state == "connecting":
             return "重连中"
-        if heartbeat_state == "timeout":
-            return "心跳超时"
+        # 断开/未启用优先于心跳超时，避免热停用后误报「心跳超时」
         if connection_state == "disconnected":
             return "断开"
+        if connection_state == "unconnected":
+            return "未连接"
+        if heartbeat_state == "timeout":
+            return "心跳超时"
         return "未连接"
 
     def _status_chip_color(self, connection_state: str, heartbeat_state: str) -> str:
@@ -3775,9 +4244,11 @@ class SettingsWindow(QDialog):
             return "#2ECC71"
         if connection_state == "connecting":
             return "#F39C12"
-        if heartbeat_state == "timeout":
-            return "#E74C3C"
+        if connection_state == "unconnected":
+            return "#95A5A6"
         if connection_state == "disconnected":
+            return "#E74C3C"
+        if heartbeat_state == "timeout":
             return "#E74C3C"
         return "#95A5A6"
 
@@ -3812,10 +4283,18 @@ class SettingsWindow(QDialog):
             return "Wolfx all"
         if "ws-api.wolfx.jp/cwa_eew" in low:
             return "Wolfx cwa"
-        if "ws.fanstudio.tech/all" in low or "ws.fanstudio.hk/all" in low:
-            return "Fan Studio (备用)" if "fanstudio.hk" in low else "Fan Studio"
-        if "ws.fanstudio.tech/cenc-ir" in low or "ws.fanstudio.hk/cenc-ir" in low:
-            return "Fan Studio Cenc-IR (备用)" if "fanstudio.hk" in low else "Fan Studio Cenc-IR"
+        if "ws-api.wolfx.jp/cenc_eqlist" in low:
+            return "Wolfx cenc"
+        if "ws-api.wolfx.jp/jma_eqlist" in low:
+            return "Wolfx jma list"
+        if "seismicportal.eu/standing_order" in low:
+            return "EMSC"
+        if "nowquake.cn" in low:
+            return "CENC烈度"
+        if "ws.fanstudio.tech/all" in low:
+            return "Fan Studio"
+        if "api.2v8.cn/ws/all" in low or "api.beecld.com/ws/all" in low:
+            return "无界科技 all"
         return source_name or url
 
     def _compute_health_percent(self, connection_state: str, heartbeat_state: str, timeout_count: int, heartbeat_age: Any, timeout_threshold: float) -> float:
@@ -3865,6 +4344,8 @@ class SettingsWindow(QDialog):
                 health_map = parent.get_data_source_health_snapshot() or {}
 
             urls = sorted(set(list(status_map.keys()) + list(health_map.keys())))
+            # 不展示已废弃的无界科技 cea_all / cenc 专用线
+            urls = [u for u in urls if not is_whews_dedicated_endpoint(u)]
             self._clear_status_cards()
             if not urls:
                 empty_label = QLabel("暂无可展示的数据源状态")
@@ -3878,14 +4359,21 @@ class SettingsWindow(QDialog):
                 compact_name = self._compact_source_label(url, source_name)
                 connection_state = health.get("connection_state") or status_map.get(url, "unconnected")
                 heartbeat_state = health.get("heartbeat_state", "unknown")
+                enabled = health.get("enabled")
+                if enabled is None:
+                    enabled = connection_state not in ("unconnected",)
 
                 status_text = self._status_chip_text(connection_state, heartbeat_state)
                 status_color = self._status_chip_color(connection_state, heartbeat_state)
-                is_ok = connection_state == "connected" and heartbeat_state != "timeout"  # 本分钟是否健康
                 minute_key = datetime.datetime.now().strftime("%Y%m%d%H%M")  # 按分钟去重，每分钟最多追加一条
                 if self._status_last_minute_key.get(url) != minute_key:
                     history = self._status_minute_bars.setdefault(url, [])
-                    history.append(bool(is_ok))  # True=绿，False=红
+                    if enabled and connection_state in ("connected", "connecting", "disconnected"):
+                        # 仅对仍启用的源记绿/红；禁用源记灰色，避免热停用后刷红
+                        is_ok = connection_state == "connected" and heartbeat_state != "timeout"
+                        history.append(bool(is_ok))
+                    else:
+                        history.append(None)
                     if len(history) > 60:
                         del history[:-60]  # 仅保留最近 60 分钟
                     self._status_last_minute_key[url] = minute_key
@@ -4014,7 +4502,7 @@ class SettingsWindow(QDialog):
             )
     
     def _restore_default_and_confirm(self):
-        """恢复默认数据源选中，弹窗提供「保存」与「取消」；点保存则保存并重启。"""
+        """恢复默认数据源选中，弹窗提供「保存」与「取消」；点保存则保存并热重载。"""
         if hasattr(self, '_restore_default_selection') and hasattr(self, 'source_vars'):
             self._restore_default_selection()
             self._is_all_selected = False
@@ -4023,15 +4511,15 @@ class SettingsWindow(QDialog):
             msg = styled_message_box(self)
             msg.setWindowTitle("提示")
             msg.setIcon(QMessageBox.Information)
-            msg.setText("数据源已恢复为默认选中（日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并重启软件。")
+            msg.setText("数据源已恢复为默认选中（日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并立即生效。")
             save_btn = msg.addButton("保存", QMessageBox.AcceptRole)
             msg.addButton("取消", QMessageBox.RejectRole)
             msg.exec_()
             if msg.clickedButton() == save_btn:
                 try:
-                    self._save_data_source_settings(silent_restart=True)
+                    self._save_data_source_settings()
                 except Exception as e:
-                    logger.error(f"保存并重启失败: {e}")
+                    logger.error(f"保存数据源默认选中失败: {e}")
                     show_critical(self, "错误", f"保存失败：{e}")
         else:
             show_info(self, "提示", "当前页面无数据源选项，请切换到「数据源」标签页使用恢复默认。")
@@ -4072,11 +4560,26 @@ class SettingsWindow(QDialog):
     def _apply_data_source_settings_to_config(self) -> None:
         """将数据源页控件写入内存 Config（不写盘、不重启）。"""
         self._update_base_urls()
+        if hasattr(self, "_current_data_provider_from_ui"):
+            self.config.data_provider = self._current_data_provider_from_ui()
         all_url = self.all_source_url
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
-        if hasattr(self, "fanstudio_backup_cb"):
-            self.config.ws_config.fanstudio_use_backup = self.fanstudio_backup_cb.isChecked()
+        if hasattr(self, "fanstudio_api_key_entry"):
+            self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        if hasattr(self, "whews_token_entry"):
+            self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
+        if hasattr(self, "_current_whews_host_from_ui"):
+            self.config.ws_config.whews_host = self._current_whews_host_from_ui()
+        # 按当前主机写入无界科技连接开关；仅 /ws/all，强制关闭已废弃的专用线
+        if hasattr(self, "whews_all_connect_cb"):
+            host = self.config.get_whews_host()
+            urls = self.config.get_whews_endpoint_urls(host)
+            for u in WHEWS_WS_URLS:
+                self.config.enabled_sources[u] = False
+            self.config.enabled_sources[urls["all"]] = self.whews_all_connect_cb.isChecked()
+            if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
+                self.config._disable_whews_dedicated_endpoints()
         for attr, cfg_name in [
             ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
             ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
@@ -4102,10 +4605,33 @@ class SettingsWindow(QDialog):
             ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
+            ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
+            ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
+            ('whews_parse_cea_cb', 'whews_parse_cea'),
+            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
+            ('whews_parse_cenc_cb', 'whews_parse_cenc'),
+            ('whews_parse_cwa_cb', 'whews_parse_cwa'),
+            ('whews_parse_hko_cb', 'whews_parse_hko'),
+            ('whews_parse_usgs_cb', 'whews_parse_usgs'),
+            ('whews_parse_emsc_cb', 'whews_parse_emsc'),
+            ('whews_parse_bcsf_cb', 'whews_parse_bcsf'),
+            ('whews_parse_gfz_cb', 'whews_parse_gfz'),
+            ('whews_parse_usp_cb', 'whews_parse_usp'),
+            ('whews_parse_kma_cb', 'whews_parse_kma'),
+            ('whews_parse_bmkg_cb', 'whews_parse_bmkg'),
+            ('whews_parse_geonet_cb', 'whews_parse_geonet'),
+            ('whews_parse_tmd_cb', 'whews_parse_tmd'),
+            ('whews_parse_ingv_cb', 'whews_parse_ingv'),
+            ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
+            ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
                 setattr(self.config.message_config, cfg_name, cb.isChecked())
+        # JMA 情报仅走 P2PQuake：强制关闭无界科技情报解析（若配置残留）
+        if hasattr(self.config.message_config, "whews_parse_jma"):
+            self.config.message_config.whews_parse_jma = False
         if hasattr(self, 'ali_all_parse_nied_cb'):
             self.config.message_config.ali_all_parse_nied = self.ali_all_parse_nied_cb.isChecked()
         if hasattr(self, 'ali_all_parse_early_est_cb'):
@@ -4299,25 +4825,13 @@ class SettingsWindow(QDialog):
         return True
     
     def _save_all_settings(self, show_success_message: bool = True) -> bool:
-        """保存全部标签页设置（单次写盘，统一决定是否重启）。"""
+        """保存全部标签页设置（单次写盘，全部热重载生效）。"""
         try:
-            ds_restart_before = self._get_data_source_restart_snapshot()
-            old_custom_url = (self.config.custom_data_source_url or "").strip()
-
             if hasattr(self, 'source_vars'):
                 self._apply_data_source_settings_to_config()
-            timezone_changed, render_changed = self._apply_appearance_settings_to_config()
+            self._apply_appearance_settings_to_config()
             advanced_ok = self._apply_advanced_settings_to_config(
                 show_url_warning=show_success_message
-            )
-
-            ds_restart_after = self._get_data_source_restart_snapshot()
-            needs_ds_restart = ds_restart_before != ds_restart_after
-            custom_url_changed = (
-                (self.config.custom_data_source_url or "").strip() != old_custom_url
-            )
-            needs_restart = (
-                needs_ds_restart or timezone_changed or render_changed or custom_url_changed
             )
 
             if not self._save_config_with_data_source_toggles():
@@ -4328,34 +4842,11 @@ class SettingsWindow(QDialog):
             self._clear_settings_dirty()
             self.config._notify_config_changed()
 
-            if not needs_restart:
-                parent = self.parent()
-                if parent is not None and getattr(parent, 'data_sources', None):
-                    http_mgr = parent.data_sources.get('http_polling')
-                    if http_mgr is not None and hasattr(http_mgr, 'update_poll_intervals'):
-                        http_mgr.update_poll_intervals(dict(self.config.http_poll_intervals))
-
             if show_success_message:
-                if needs_restart:
-                    msg = styled_message_box(self)
-                    msg.setWindowTitle("成功")
-                    msg.setText(
-                        "所有设置已保存。\n"
-                        "数据源、时区/渲染方式或自定义数据源 URL 已变更，需重启程序后完全生效。"
-                    )
-                    msg.setIcon(QMessageBox.Information)
-                    msg.addButton("稍后", QMessageBox.RejectRole)
-                    restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
-                    msg.exec_()
-                    if msg.clickedButton() == restart_btn:
-                        self._restart_application()
-                else:
-                    hint = ""
-                    if not advanced_ok:
-                        hint = "\n部分高级设置未写入（请检查日志配置）。"
-                    show_info(self, "成功", f"所有设置已保存！{hint}\n已生效项无需重启。")
-            elif needs_restart:
-                logger.info("设置已自动保存；部分项需重启程序后完全生效。")
+                hint = ""
+                if not advanced_ok:
+                    hint = "\n部分高级设置未写入（请检查日志配置）。"
+                show_info(self, "成功", f"所有设置已保存！{hint}\n设置已立即生效，无需重启。")
             logger.debug("所有设置已保存（save_all）")
             return True
         except Exception as e:
@@ -4384,23 +4875,47 @@ class SettingsWindow(QDialog):
         if not hasattr(self, "source_vars"):
             return
         self._update_base_urls()  # 确保 all_source_url 与当前域名一致
+        if hasattr(self, "_current_data_provider_from_ui"):
+            self.config.data_provider = self._current_data_provider_from_ui()
         all_url = self.all_source_url
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
-        if hasattr(self, "fanstudio_backup_cb"):
-            self.config.ws_config.fanstudio_use_backup = self.fanstudio_backup_cb.isChecked()
+        if hasattr(self, "fanstudio_api_key_entry"):
+            self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        if hasattr(self, "whews_token_entry"):
+            self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
+        if hasattr(self, "_current_whews_host_from_ui"):
+            self.config.ws_config.whews_host = self._current_whews_host_from_ui()
+        if hasattr(self, "whews_all_connect_cb"):
+            host = self.config.get_whews_host()
+            urls = self.config.get_whews_endpoint_urls(host)
+            for u in WHEWS_WS_URLS:
+                self.config.enabled_sources[u] = False
+            self.config.enabled_sources[urls["all"]] = self.whews_all_connect_cb.isChecked()
+            if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
+                self.config._disable_whews_dedicated_endpoints()
         for url, checkbox in self.source_vars.items():
-            if url and url != all_url:
+            if url and url != all_url and not is_whews_url(url):
                 self.config.enabled_sources[url] = checkbox.isChecked()  # 逐项同步单项源开关
         if hasattr(self, "p2pquake_connect_cb"):
             p2p_master = self.p2pquake_connect_cb.isChecked()
-            self.config.enabled_sources[P2PQUAKE_WSS_URL] = p2p_master  # WSS 与 HTTP 共用总开关
+            self.config.enabled_sources[P2PQUAKE_WSS_URL] = p2p_master  # 总开关只控制 WSS
             for http_u in P2PQUAKE_HTTP_SOURCE_KEYS:
-                self.config.enabled_sources[http_u] = p2p_master
+                # HTTP 仅启动补拉，不进入 HTTPPollingManager 持续轮询
+                self.config.enabled_sources[http_u] = False
+            if hasattr(self.config, "_sync_p2pquake_http_with_wss"):
+                self.config._sync_p2pquake_http_with_wss()
         if hasattr(self, "wolfx_all_connect_cb"):
-            self.config.enabled_sources["wss://ws-api.wolfx.jp/all_eew"] = (
-                self.wolfx_all_connect_cb.isChecked()
-            )
+            wolfx_on = self.wolfx_all_connect_cb.isChecked()
+            # 中国地震台网/JMA 列表经 all_eew，勾选时自动打开 Wolfx 聚合连接
+            if self.config.enabled_sources.get(WOLFX_CENC_EQLIST_URL, False) or self.config.enabled_sources.get(
+                WOLFX_JMA_EQLIST_URL, False
+            ):
+                wolfx_on = True
+                self.wolfx_all_connect_cb.setChecked(True)
+            self.config.enabled_sources[WOLFX_ALL_EEW_URL] = wolfx_on
+        if hasattr(self.config, "_ensure_whews_source_defaults"):
+            self.config._ensure_whews_source_defaults()
         removed_ws = self.config._enforce_public_ws_sources()  # 移除非公开版允许的 WS 地址
         if removed_ws:
             logger.debug(f"同步数据源连接开关时已清理非公开 WebSocket: {removed_ws}")
@@ -4412,9 +4927,9 @@ class SettingsWindow(QDialog):
         return bool(self.config.save_config())
     
     def _save_data_source_settings(self, silent_restart=False):
-        """保存数据源设置。silent_restart=True 时不弹「已保存」提示，直接重启。"""
+        """保存数据源设置并热重载。silent_restart 参数已废弃，保留仅为兼容调用。"""
         try:
-            restart_snapshot_before = self._get_data_source_restart_snapshot()
+            _ = silent_restart
             self._apply_data_source_settings_to_config()
             logger.info(
                 f"已更新ws_urls，包含{len(self.config.ws_urls)}个WebSocket数据源: {self.config.ws_urls}"
@@ -4425,30 +4940,13 @@ class SettingsWindow(QDialog):
                 return
 
             self._clear_settings_dirty()
+            self.config._notify_config_changed()
             logger.debug("数据源设置已保存")
-
-            needs_restart = restart_snapshot_before != self._get_data_source_restart_snapshot()  # 连接范围变更需重启
-            if not needs_restart:
-                parent = self.parent()
-                if parent is not None and getattr(parent, 'data_sources', None):
-                    http_mgr = parent.data_sources.get('http_polling')
-                    if http_mgr is not None and hasattr(http_mgr, 'update_poll_intervals'):
-                        http_mgr.update_poll_intervals(dict(self.config.http_poll_intervals))  # 仅间隔变更可热更新
-                if not silent_restart:
-                    show_info(
-                        self,
-                        "提示",
-                        "数据源设置已保存。\n仅轮询间隔等项已热更新，无需重启。",
-                    )
-                return
-            
-            if not silent_restart:
-                show_info(
-                    self,
-                    "提示",
-                    "数据源设置已保存，程序将自动重启以应用更改。\n切换「地震速报」/「自定义文本」需重启后生效。"
-                )
-            self._restart_application()
+            show_info(
+                self,
+                "成功",
+                "数据源设置已保存！\n设置已立即生效，无需重启程序。",
+            )
             return
             
         except Exception as e:
@@ -4601,26 +5099,17 @@ class SettingsWindow(QDialog):
             self._save_config_with_data_source_toggles()
             self.config._notify_config_changed()
             label = PERFORMANCE_MODE_LABELS.get(mode, mode)
-            if result.get("needs_restart"):
-                msg = styled_message_box(self)
-                msg.setWindowTitle("成功")
-                msg.setText(
-                    f"已应用{label}。\n"
-                    "渲染方式或数据源连接范围已变更，请重启软件后完全生效。"
-                )
-                msg.setIcon(QMessageBox.Information)
-                msg.addButton("取消", QMessageBox.RejectRole)
-                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
-                msg.exec_()
-                if msg.clickedButton() == restart_btn:
-                    self._restart_application()
-            else:
-                show_info(
-                    self,
-                    "成功",
-                    f"已应用{label}，相关设置已保存并立即生效。",
-                )
-            logger.info("用户已应用性能模式: %s", mode)
+            show_info(
+                self,
+                "成功",
+                f"已应用{label}，相关设置已保存并立即生效。",
+            )
+            logger.info(
+                "用户已应用性能模式: %s (render_changed=%s, sources_changed=%s)",
+                mode,
+                result.get("render_backend_changed"),
+                result.get("sources_changed"),
+            )
         except Exception as e:
             logger.error(f"应用性能模式失败: {e}", exc_info=True)
             show_critical(self, "错误", f"应用性能模式失败：{e}")
@@ -4687,10 +5176,7 @@ class SettingsWindow(QDialog):
             # 通知主窗口更新（热更新，立即生效）
             self.config._notify_config_changed()
 
-            if timezone_changed:
-                show_info(self, "成功", "显示设置已保存。\n时区已变更，请重启软件后生效。")
-            else:
-                show_info(self, "成功", "显示设置已保存！\n设置已立即生效，无需重启程序。")
+            show_info(self, "成功", "显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("显示设置已保存（热更新）")
             
         except Exception as e:
@@ -4713,17 +5199,8 @@ class SettingsWindow(QDialog):
             self._mark_performance_mode_custom()
             self._save_config_with_data_source_toggles()
             self.config._notify_config_changed()
-            msg = styled_message_box(self)
-            msg.setWindowTitle("成功")
-            msg.setText("渲染方式已保存，请重启软件后生效。")
-            msg.setIcon(QMessageBox.Information)
-            cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
-            restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
-            msg.exec_()
-            if msg.clickedButton() == restart_btn:
-                logger.debug("用户选择重启，正在重启软件...")
-                self._restart_application()
-            logger.debug("渲染方式已保存")
+            show_info(self, "成功", "渲染方式已保存！\n设置已立即生效，无需重启程序。")
+            logger.debug("渲染方式已保存（热更新）")
         except Exception as e:
             logger.error(f"保存渲染方式失败: {e}")
             show_critical(self, "错误", f"保存设置失败: {e}")
@@ -4776,7 +5253,7 @@ class SettingsWindow(QDialog):
             minutes_spin.setEnabled(False)
     
     def _save_appearance_settings(self):
-        """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），统一提示是否需重启。"""
+        """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），保存后热重载生效。"""
         try:
             display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position', 'auto_update_check_on_startup', 'warning_min_display_seconds', 'custom_text_return_seconds')
             render_required = ('cpu_radio', 'opengl_radio')
@@ -4890,20 +5367,7 @@ class SettingsWindow(QDialog):
             self.config._notify_config_changed()
             self._clear_settings_dirty()
             
-            need_restart = timezone_changed or render_changed
-            if need_restart:
-                msg = styled_message_box(self)
-                msg.setWindowTitle("成功")
-                msg.setText("外观与显示设置已保存。\n时区或渲染方式已变更，请重启软件后生效。")
-                msg.setIcon(QMessageBox.Information)
-                cancel_btn = msg.addButton("取消", QMessageBox.RejectRole)
-                restart_btn = msg.addButton("重启", QMessageBox.AcceptRole)
-                msg.exec_()
-                if msg.clickedButton() == restart_btn:
-                    logger.debug("用户选择重启，正在重启软件...")
-                    self._restart_application()
-            else:
-                show_info(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
+            show_info(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
             logger.debug("外观与显示设置已保存")
         except Exception as e:
             logger.error(f"保存外观与显示设置失败: {e}")

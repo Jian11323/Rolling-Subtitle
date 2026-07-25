@@ -914,73 +914,65 @@ def trigger_alert_feedback(
     threading.Thread(target=_run, daemon=True, name="TtsAlert").start()
 
 
-def _entry_is_tsunami(entry: Dict[str, Any]) -> bool:
-    """判断历史条目是否为海啸类速报。"""
-    pd = entry.get("parsed_data") or {}
-    if not isinstance(pd, dict):
-        return False
-    if pd.get("is_tsunami"):
-        return True
-    source_type = str(pd.get("source_type") or "").strip().lower()
-    return source_type in ("tsunami", "p2pquake_tsunami")
-
-
-def _entry_is_cenc(entry: Dict[str, Any]) -> bool:
-    """是否为 Fan Studio CENC 地震速报（不含 cenc-ir 烈度速报）。"""
-    pd = entry.get("parsed_data") or {}
-    if not isinstance(pd, dict):
-        return False
-    source_type = str(pd.get("source_type") or "").strip().lower()
-    if source_type == "cenc":
-        return True
-    source_name = str(entry.get("source_name") or "").strip().lower()
-    if source_name == "cenc":
-        return True
-    org = str(pd.get("organization") or "")
-    if "中国地震台网中心" in org and "烈度速报" not in org:
-        return True
-    return False
-
-
-def find_latest_tts_entry(
-    history: Optional[List[Dict[str, Any]]],
-    kind: str,
-) -> Optional[Dict[str, Any]]:
-    """从历史记录中查找指定类型的最新一条（预警/速报/气象/海啸）。"""
+def _tts_test_sample_entry(kind: str) -> Optional[Dict[str, Any]]:
+    """内置 TTS 测试样例。"""
     target = (kind or "").strip().lower()
-    if not history or not target:
-        return None
     if target == "warning":
-        fallback: Optional[Dict[str, Any]] = None
-        for entry in reversed(history):
-            if not isinstance(entry, dict):
-                continue
-            if str(entry.get("message_type") or "").lower() != "warning":
-                continue
-            pd = entry.get("parsed_data") or {}
-            if isinstance(pd, dict) and (
-                pd.get("_cea_test_seed")
-                or str(pd.get("source_type") or "").strip() == "cea"
-            ):
-                return entry
-            if fallback is None:
-                fallback = entry
-        return fallback
-    for entry in reversed(history):
-        if not isinstance(entry, dict):
-            continue
-        mt = str(entry.get("message_type") or "").lower()
-        if target == "weather" and mt == "weather":
-            return entry
-        if target == "tsunami" and mt == "report" and _entry_is_tsunami(entry):
-            return entry
-        if (
-            target == "report"
-            and mt == "report"
-            and not _entry_is_tsunami(entry)
-            and _entry_is_cenc(entry)
-        ):
-            return entry
+        return {
+            "message_type": "warning",
+            "scroll_text": "【中国地震预警网】第1报，测试地点发生5.2级地震，震源深度10公里。",
+            "parsed_data": {
+                "type": "warning",
+                "source_type": "cea",
+                "organization": "中国地震预警网",
+                "place_name": "测试地点",
+                "magnitude": 5.2,
+                "depth": 10,
+                "updates": 1,
+                "shock_time": "2026-01-01 12:00:00",
+            },
+        }
+    if target == "report":
+        return {
+            "message_type": "report",
+            "scroll_text": "【中国地震台网中心正式测定】2026-01-01 12:00:00，测试地点发生5.0级地震，震源深度10公里。",
+            "parsed_data": {
+                "type": "report",
+                "source_type": "cenc",
+                "organization": "中国地震台网中心正式测定",
+                "place_name": "测试地点",
+                "magnitude": 5.0,
+                "depth": 10,
+                "shock_time": "2026-01-01 12:00:00",
+            },
+        }
+    if target == "weather":
+        text = "【气象预警】测试市发布暴雨黄色预警信号。"
+        return {
+            "message_type": "weather",
+            "scroll_text": text,
+            "message_text": text,
+            "parsed_data": {
+                "type": "weather",
+                "source_type": "weatheralarm",
+                "organization": "气象预警",
+                "place_name": "测试市",
+            },
+        }
+    if target == "tsunami":
+        text = "【自然资源部海啸预警中心】测试海域发生地震，发布海啸警报。"
+        return {
+            "message_type": "report",
+            "scroll_text": text,
+            "message_text": text,
+            "parsed_data": {
+                "type": "report",
+                "source_type": "tsunami",
+                "organization": "自然资源部海啸预警中心",
+                "place_name": "测试海域",
+                "is_tsunami": True,
+            },
+        }
     return None
 
 
@@ -1017,10 +1009,11 @@ def _start_tts_test_from_entry(
     entry: Dict[str, Any],
     kind: str,
 ) -> bool:
-    """根据历史条目启动测试朗读；脚本与正式播报一致。"""
+    """根据样例条目启动测试朗读；脚本与正式播报一致。"""
     ac = getattr(config, "alert_config", None)
     pd = dict(entry.get("parsed_data") or {}) if isinstance(entry.get("parsed_data"), dict) else {}
     target = (kind or "").strip().lower()
+    display = ""
 
     if target == "warning":
         script = build_warning_tts_script(pd, config)
@@ -1068,47 +1061,30 @@ def _start_tts_test_from_entry(
     return True
 
 
-def test_tts_from_latest(
-    config: Any,
-    history: Optional[List[Dict[str, Any]]],
-    kind: str,
-) -> bool:
-    """设置页测试：朗读历史中最新的预警/速报/气象/海啸条目。"""
-    entry = find_latest_tts_entry(history, kind)
+def test_tts_from_latest(config: Any, kind: str) -> bool:
+    """设置页测试：用内置样例朗读预警/速报/气象/海啸。"""
+    entry = _tts_test_sample_entry(kind)
     if entry is None:
         return False
     return _start_tts_test_from_entry(config, entry, kind)
 
 
-def test_tts_alert(
-    config: Any,
-    history: Optional[List[Dict[str, Any]]] = None,
-    tier: str = "felt",
-) -> bool:
-    """设置页测试：朗读历史中最新的预警条目。"""
+def test_tts_alert(config: Any, tier: str = "felt") -> bool:
+    """设置页测试：朗读预警样例。"""
     _ = tier
-    return test_tts_from_latest(config, history, "warning")
+    return test_tts_from_latest(config, "warning")
 
 
-def test_tts_report(
-    config: Any,
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """设置页测试：朗读历史中最新的 CENC 速报条目。"""
-    return test_tts_from_latest(config, history, "report")
+def test_tts_report(config: Any) -> bool:
+    """设置页测试：朗读速报样例。"""
+    return test_tts_from_latest(config, "report")
 
 
-def test_tts_weather(
-    config: Any,
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """设置页测试：朗读历史中最新的气象预警条目。"""
-    return test_tts_from_latest(config, history, "weather")
+def test_tts_weather(config: Any) -> bool:
+    """设置页测试：朗读气象样例。"""
+    return test_tts_from_latest(config, "weather")
 
 
-def test_tts_tsunami(
-    config: Any,
-    history: Optional[List[Dict[str, Any]]] = None,
-) -> bool:
-    """设置页测试：朗读历史中最新的海啸条目。"""
-    return test_tts_from_latest(config, history, "tsunami")
+def test_tts_tsunami(config: Any) -> bool:
+    """设置页测试：朗读海啸样例。"""
+    return test_tts_from_latest(config, "tsunami")

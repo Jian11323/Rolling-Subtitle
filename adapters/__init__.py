@@ -13,12 +13,20 @@ from .p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
 from .p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
 from .custom_adapter import CustomAdapter
 from .wolfx_adapter import WolfxAdapter
+from .whews_adapter import WhewsAdapter
 from .bmkg_adapter import BMKGAdapter
 from .geonet_adapter import GeoNetAdapter
 from .ingv_adapter import INGVAdapter
 from .earlyest_adapter import EarlyEstAdapter
 from .jma_atom_adapter import JmaAtomAdapter
 from .ptwc_adapter import PtwcAdapter
+from .usgs_adapter import UsgsAdapter
+from .hko_adapter import HkoAdapter
+from .gfz_adapter import GfzAdapter
+from .usp_adapter import UspAdapter
+from .cwa_report_adapter import CwaReportAdapter
+from .emsc_ws_adapter import EmscWsAdapter
+from .nowquake_cencint_adapter import NowquakeCencintAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -29,10 +37,18 @@ __all__ = [
     'P2PQuakeWebSocketAdapter',
     'CustomAdapter',
     'WolfxAdapter',
+    'WhewsAdapter',
     'BMKGAdapter',
     'GeoNetAdapter',
     'INGVAdapter',
     'EarlyEstAdapter',
     'JmaAtomAdapter',
     'PtwcAdapter',
+    'UsgsAdapter',
+    'HkoAdapter',
+    'GfzAdapter',
+    'UspAdapter',
+    'CwaReportAdapter',
+    'EmscWsAdapter',
+    'NowquakeCencintAdapter',
 ]
