@@ -212,19 +212,20 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.7.0"  # 当前程序版本
+APP_VERSION = "2.7.0-pre"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.7.0
+CHANGELOG_TEXT = """版本 2.7.0-pre
 
 1、新增无界科技数据源，与 Fan Studio / 官方直连三选一
 2、新增 USGS、香港天文台、GFZ、USP、台湾地震报告、EMSC、CENC 烈度等数据源
 3、优化数据源热切换：切换时清空缓冲并重新拉取，避免窜数据
-4、移除历史记录窗口"""
+4、移除历史记录窗口
+5、修复无界科技火山情报（va）解析"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -431,7 +432,8 @@ class MessageConfig:
     whews_parse_geonet: bool = True
     whews_parse_tmd: bool = True
     whews_parse_ingv: bool = True
-    whews_parse_jma: bool = True
+    whews_parse_jma: bool = True  # 残留项：JMA 情报仅走 P2PQuake，保存时强制 False
+    whews_parse_jma_volcano: bool = True  # 无界科技 source=va 火山情报
     whews_parse_tsunami: bool = True
     whews_parse_weatheralarm: bool = True
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報）；HTTP 聚合拉取逻辑不变
@@ -944,6 +946,7 @@ class Config:
                 'whews_parse_tmd': getattr(self.message_config, 'whews_parse_tmd', True),
                 'whews_parse_ingv': getattr(self.message_config, 'whews_parse_ingv', True),
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
+                'whews_parse_jma_volcano': getattr(self.message_config, 'whews_parse_jma_volcano', True),
                 'whews_parse_tsunami': getattr(self.message_config, 'whews_parse_tsunami', True),
                 'whews_parse_weatheralarm': getattr(self.message_config, 'whews_parse_weatheralarm', True),
                 'min_report_magnitude': getattr(self.message_config, 'min_report_magnitude', 0.0),

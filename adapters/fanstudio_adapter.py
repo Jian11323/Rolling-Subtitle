@@ -411,6 +411,11 @@ class FanStudioAdapter(BaseAdapter):
                 result = self._parse_weather(data)
             elif source_type == 'tsunami':
                 result = self._parse_tsunami(data)
+            elif source_type == 'jma_volcano':
+                if not isinstance(data, dict):
+                    logger.debug(f"[FanStudio] jma_volcano Data 非 dict，跳过: {type(data).__name__}")
+                    return None
+                result = self._parse_jma_volcano(data)
             elif source_type == 'typhoon':
                 # All 通道会推送 source=typhoon，Data 常为 list；复用 HTTP 台风解析
                 from adapters.fanstudio_http_adapter import FanStudioHttpAdapter
@@ -927,6 +932,52 @@ class FanStudioAdapter(BaseAdapter):
             'event_id': event_id,  # 添加event_id用于去重
             'source_type': 'weatheralarm',  # 添加数据源类型
             'raw_data': data,
+        }
+
+    def _parse_jma_volcano(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        解析日本气象厅火山情报（无界科技 source=va；字段与 JMA Atom 展示层对齐）。
+        """
+        if not data or not isinstance(data, dict):
+            return None
+        volcano = str(data.get("volcanoName") or "").strip()
+        title = str(
+            data.get("kindName") or data.get("title") or data.get("infoKind") or ""
+        ).strip()
+        description = str(
+            data.get("observation")
+            or data.get("headline")
+            or data.get("activity")
+            or ""
+        ).strip()
+        name = str(data.get("publishingOffice") or "日本气象厅").strip()
+        report_time = data.get("reportTime") or data.get("targetTime") or ""
+        shock_time = ""
+        if report_time:
+            try:
+                shock_time = timezone_utils.jst_to_display(str(report_time))
+            except Exception:
+                shock_time = str(report_time).strip()
+        if not volcano and not title and not description:
+            return None
+        if self.data_source_type == "all":
+            organization = self._get_organization_name_by_type("jma_volcano")
+        else:
+            organization = self.get_organization_name()
+        return {
+            "type": "volcano",
+            "source_type": "jma_volcano",
+            "title": title,
+            "volcano": volcano,
+            "description": description,
+            "name": name,
+            "shock_time": shock_time,
+            "place_name": volcano or title,
+            "organization": organization,
+            "event_id": str(data.get("id") or ""),
+            "latitude": self._safe_float(data.get("latitude"), 0),
+            "longitude": self._safe_float(data.get("longitude"), 0),
+            "raw_data": data,
         }
 
     def _parse_tsunami(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:

@@ -103,6 +103,7 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "ingv": "whews_parse_ingv",
     "tsunami": "whews_parse_tsunami",
     "weatheralarm": "whews_parse_weatheralarm",
+    "jma_volcano": "whews_parse_jma_volcano",
 }
 
 WHEWS_WARNING_INTERNAL = {"jma", "cwa-eew", "sa", "cea", "cea-pr"}

@@ -2771,6 +2771,7 @@ class SettingsWindow(QDialog):
             return cb
 
         self.whews_parse_jma_eew_cb = _wh_cb("whews_parse_jma_eew", "日本气象厅地震预警")
+        self.whews_parse_jma_volcano_cb = _wh_cb("whews_parse_jma_volcano", "日本气象厅火山情报")
         self.whews_parse_cwa_eew_cb = _wh_cb("whews_parse_cwa_eew", "台湾气象署地震预警")
         self.whews_parse_sa_eew_cb = _wh_cb("whews_parse_sa_eew", "美国 ShakeAlert 地震预警")
         self.whews_parse_cea_cb = _wh_cb("whews_parse_cea", "中国地震预警网")
@@ -3306,6 +3307,7 @@ class SettingsWindow(QDialog):
             'fanstudio_parse_weatheralarm_cb',
             'fanstudio_parse_tsunami_cb',
             'whews_parse_jma_eew_cb',
+            'whews_parse_jma_volcano_cb',
             'whews_parse_cwa_eew_cb',
             'whews_parse_sa_eew_cb',
             'whews_parse_cea_cb',
@@ -3376,6 +3378,7 @@ class SettingsWindow(QDialog):
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_cea_cb', 'whews_parse_cea'),
@@ -4606,6 +4609,7 @@ class SettingsWindow(QDialog):
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_cea_cb', 'whews_parse_cea'),
