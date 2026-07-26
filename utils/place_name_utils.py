@@ -10,7 +10,9 @@ from typing import Any
 # 数据源本身提供中文地名，无需修正或翻译
 CHINESE_SOURCE_TYPES = frozenset({
     "cea", "cea-pr", "cwa-eew", "cwa", "cenc", "cenc-ir",
-    "ningxia", "guangxi", "shanxi", "beijing", "yunnan", "hko",
+    "ningxia", "guangxi", "shanxi", "beijing", "yunnan",
+    "fujian", "sichuan", "shaanxi", "hubei",
+    "hko",
     "wolfx_sc", "wolfx_fj", "wolfx_cenc", "wolfx_cwa", "wolfx_cq",
     "wolfx_sc_eew", "wolfx_cenc_eew",
     "nmefc", "nmefc-tsunami",

@@ -61,6 +61,7 @@ class PlaceNameFixer:
         self.supported_sources = {
             "usgs", "emsc", "bcsf", "gfz", "usp", "kma",
             "bmkg", "geonet", "ingv", "early_est",
+            "tmd", "mmd", "nrcan",
             "p2pquake", "p2pquake_tsunami",
         }
 

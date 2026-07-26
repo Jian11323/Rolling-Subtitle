@@ -449,9 +449,10 @@ class FanStudioAdapter(BaseAdapter):
                 if isinstance(result['raw_data'], dict):
                     result['raw_data']['_update_source'] = update_source
 
-            # 供消息格式化层识别 Fan Studio 子源，使用统一标头（与 Wolfx/P2P 等区分）
+            # 供消息格式化层识别 Fan Studio 子源，使用统一标头（与 Wolfx/P2P / 无界等区分）
             if result and isinstance(result, dict):
                 result['fanstudio'] = True
+                result['whews'] = False
 
             return result
         except Exception as e:

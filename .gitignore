@@ -101,6 +101,9 @@ test_timezone.py
 启动日志.txt
 debug/
 *.log
+.pytest_cache/
+_tmp*
+.cursor/
 
 # 系统/IDE
 .idea/

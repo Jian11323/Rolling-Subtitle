@@ -14,7 +14,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy, QStyle, QShortcut, QFileDialog, QAbstractButton,
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
-from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics
+from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics, QPixmap
 from typing import Optional, Dict, Any, List, Tuple
 import re
 import datetime
@@ -41,6 +41,13 @@ from config import (
     GFZ_HTTP_URL,
     USP_HTTP_URL,
     CWA_REPORT_HTTP_URL,
+    EMSC_HTTP_URL,
+    TMD_HTTP_URL,
+    BCSF_HTTP_URL,
+    KMA_HTTP_URL,
+    MMD_HTTP_URL,
+    NRCAN_HTTP_URL,
+    CENC_HTTP_URL,
     DEFAULT_HTTP_POLL_INTERVALS,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
@@ -2535,6 +2542,13 @@ class SettingsWindow(QDialog):
             (GFZ_HTTP_URL, "GFZ 德国地学研究中心", False),
             (USP_HTTP_URL, "USP 巴西圣保罗大学", False),
             (CWA_REPORT_HTTP_URL, "CWA 台湾中央气象署速报（ExpTech）", False),
+            (EMSC_HTTP_URL, "EMSC 欧洲地中海地震中心（HTTP）", False),
+            (TMD_HTTP_URL, "TMD 泰国地震局", False),
+            (BCSF_HTTP_URL, "BCSF 法国中央地震研究所", False),
+            (KMA_HTTP_URL, "KMA 韩国气象厅（HTTP）", False),
+            (MMD_HTTP_URL, "MMD 马来西亚气象局", False),
+            (NRCAN_HTTP_URL, "NRCan 加拿大自然资源部", False),
+            (CENC_HTTP_URL, "CENC 中国地震台网（个推 HTTP）", False),
         ]
 
         # 顶部：主数据源提供者三选一（并排）
@@ -2774,6 +2788,7 @@ class SettingsWindow(QDialog):
         self.whews_parse_jma_volcano_cb = _wh_cb("whews_parse_jma_volcano", "日本气象厅火山情报")
         self.whews_parse_cwa_eew_cb = _wh_cb("whews_parse_cwa_eew", "台湾气象署地震预警")
         self.whews_parse_sa_eew_cb = _wh_cb("whews_parse_sa_eew", "美国 ShakeAlert 地震预警")
+        self.whews_parse_kma_eew_cb = _wh_cb("whews_parse_kma_eew", "韩国气象厅地震预警")
         self.whews_parse_cea_cb = _wh_cb("whews_parse_cea", "中国地震预警网")
         self.whews_parse_cea_pr_cb = _wh_cb("whews_parse_cea_pr", "中国地震预警省网")
         self.whews_parse_weatheralarm_cb = _wh_cb("whews_parse_weatheralarm", "中国气象局气象预警")
@@ -2791,6 +2806,15 @@ class SettingsWindow(QDialog):
         self.whews_parse_geonet_cb = _wh_cb("whews_parse_geonet", "GeoNet 新西兰地震速报")
         self.whews_parse_tmd_cb = _wh_cb("whews_parse_tmd", "泰国地震局速报")
         self.whews_parse_ingv_cb = _wh_cb("whews_parse_ingv", "INGV 意大利地震速报")
+        self.whews_parse_nrcan_cb = _wh_cb("whews_parse_nrcan", "加拿大自然资源部速报")
+        self.whews_parse_mmd_cb = _wh_cb("whews_parse_mmd", "马来西亚气象局速报")
+        self.whews_parse_fujian_cb = _wh_cb("whews_parse_fujian", "福建地震局速报")
+        self.whews_parse_beijing_cb = _wh_cb("whews_parse_beijing", "北京地震局速报")
+        self.whews_parse_sichuan_cb = _wh_cb("whews_parse_sichuan", "四川地震局速报")
+        self.whews_parse_yunnan_cb = _wh_cb("whews_parse_yunnan", "云南地震局速报")
+        self.whews_parse_ningxia_cb = _wh_cb("whews_parse_ningxia", "宁夏地震局速报")
+        self.whews_parse_shaanxi_cb = _wh_cb("whews_parse_shaanxi", "陕西地震局速报")
+        self.whews_parse_hubei_cb = _wh_cb("whews_parse_hubei", "湖北地震局速报")
 
         def _update_whews_host_ui():
             """切换主站/备用时显示或隐藏 CEA 解析项（备用站无 CEA）。"""
@@ -3310,6 +3334,7 @@ class SettingsWindow(QDialog):
             'whews_parse_jma_volcano_cb',
             'whews_parse_cwa_eew_cb',
             'whews_parse_sa_eew_cb',
+            'whews_parse_kma_eew_cb',
             'whews_parse_cea_cb',
             'whews_parse_cea_pr_cb',
             'whews_parse_cenc_cb',
@@ -3325,6 +3350,15 @@ class SettingsWindow(QDialog):
             'whews_parse_geonet_cb',
             'whews_parse_tmd_cb',
             'whews_parse_ingv_cb',
+            'whews_parse_nrcan_cb',
+            'whews_parse_mmd_cb',
+            'whews_parse_fujian_cb',
+            'whews_parse_beijing_cb',
+            'whews_parse_sichuan_cb',
+            'whews_parse_yunnan_cb',
+            'whews_parse_ningxia_cb',
+            'whews_parse_shaanxi_cb',
+            'whews_parse_hubei_cb',
             'whews_parse_tsunami_cb',
             'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
@@ -3381,6 +3415,7 @@ class SettingsWindow(QDialog):
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
+            ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
             ('whews_parse_cea_cb', 'whews_parse_cea'),
             ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
@@ -3396,6 +3431,15 @@ class SettingsWindow(QDialog):
             ('whews_parse_geonet_cb', 'whews_parse_geonet'),
             ('whews_parse_tmd_cb', 'whews_parse_tmd'),
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
+            ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
+            ('whews_parse_mmd_cb', 'whews_parse_mmd'),
+            ('whews_parse_fujian_cb', 'whews_parse_fujian'),
+            ('whews_parse_beijing_cb', 'whews_parse_beijing'),
+            ('whews_parse_sichuan_cb', 'whews_parse_sichuan'),
+            ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
+            ('whews_parse_ningxia_cb', 'whews_parse_ningxia'),
+            ('whews_parse_shaanxi_cb', 'whews_parse_shaanxi'),
+            ('whews_parse_hubei_cb', 'whews_parse_hubei'),
             ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
@@ -4180,6 +4224,65 @@ class SettingsWindow(QDialog):
             tl.setStyleSheet(STYLE_ABOUT_ITEM + " line-height: 1.4;")
             thanks_layout.addWidget(tl)
         layout.addWidget(thanks_frame)
+        layout.addSpacing(SPACING_BLOCK - 4)
+        sep_thanks = QFrame()
+        sep_thanks.setFrameShape(QFrame.HLine)
+        sep_thanks.setFrameShadow(QFrame.Sunken)
+        sep_thanks.setStyleSheet(sep_style)
+        layout.addWidget(sep_thanks)
+        layout.addSpacing(4)
+
+        # 支持我们（支付宝收款码 / 微信赞赏码）
+        support_label = QLabel("支持我们")
+        support_label.setStyleSheet(STYLE_SECTION_TITLE)
+        layout.addWidget(support_label)
+        support_hint = QLabel("如果本软件对你有帮助，欢迎扫码支持开发者继续维护。")
+        support_hint.setWordWrap(True)
+        support_hint.setStyleSheet(body_style)
+        layout.addWidget(support_hint)
+
+        qr_row = QWidget()
+        qr_layout = QHBoxLayout(qr_row)
+        qr_layout.setContentsMargins(10, 8, 10, 4)
+        qr_layout.setSpacing(24)
+        qr_size = 180
+        for caption, rel_path in (
+            ("支付宝", "logo/donate_alipay.png"),
+            ("微信赞赏", "logo/donate_wechat.png"),
+        ):
+            col = QVBoxLayout()
+            col.setSpacing(8)
+            col.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+            img = QLabel()
+            img.setAlignment(Qt.AlignCenter)
+            img.setFixedSize(qr_size, qr_size)
+            img.setStyleSheet(
+                "background-color: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 4px;"
+            )
+            path = get_resource_path(rel_path)
+            pixmap = QPixmap(str(path))
+            if not pixmap.isNull():
+                img.setPixmap(
+                    pixmap.scaled(
+                        qr_size - 8,
+                        qr_size - 8,
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+            else:
+                img.setText("图片缺失")
+                img.setStyleSheet(
+                    body_style + " background-color: #FAFAFA; border: 1px dashed #CCCCCC;"
+                )
+            name_lb = QLabel(caption)
+            name_lb.setAlignment(Qt.AlignCenter)
+            name_lb.setStyleSheet(STYLE_ABOUT_ITEM + " font-weight: bold;")
+            col.addWidget(img)
+            col.addWidget(name_lb)
+            qr_layout.addLayout(col)
+        qr_layout.addStretch()
+        layout.addWidget(qr_row)
         layout.addStretch()
 
         scroll_area.setWidget(scrollable_widget)
@@ -4612,6 +4715,7 @@ class SettingsWindow(QDialog):
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
+            ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
             ('whews_parse_cea_cb', 'whews_parse_cea'),
             ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
@@ -4627,6 +4731,15 @@ class SettingsWindow(QDialog):
             ('whews_parse_geonet_cb', 'whews_parse_geonet'),
             ('whews_parse_tmd_cb', 'whews_parse_tmd'),
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
+            ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
+            ('whews_parse_mmd_cb', 'whews_parse_mmd'),
+            ('whews_parse_fujian_cb', 'whews_parse_fujian'),
+            ('whews_parse_beijing_cb', 'whews_parse_beijing'),
+            ('whews_parse_sichuan_cb', 'whews_parse_sichuan'),
+            ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
+            ('whews_parse_ningxia_cb', 'whews_parse_ningxia'),
+            ('whews_parse_shaanxi_cb', 'whews_parse_shaanxi'),
+            ('whews_parse_hubei_cb', 'whews_parse_hubei'),
             ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
         ]:

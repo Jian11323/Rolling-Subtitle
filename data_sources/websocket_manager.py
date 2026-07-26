@@ -368,10 +368,9 @@ class WebSocketManager:
                 adapter = CustomAdapter('custom', url)
                 adapter._manager_source_type = 'custom'
                 return adapter
-        # 默认使用Fan Studio适配器
-        adapter = FanStudioAdapter('unknown', url)
-        adapter._manager_source_type = 'unknown'
-        return adapter
+        # 未知 URL：不回落到 Fan Studio，避免非 Fan 通道被错误解析
+        logger.warning(f"未识别的 WebSocket URL，跳过建连: {url}")
+        return None
     
     def _get_source_name_from_data(self, parsed_data: Dict, default_source: str) -> str:
         """
@@ -419,6 +418,10 @@ class WebSocketManager:
                 "山西地震局": "shanxi",
                 "北京地震局": "beijing",
                 "云南地震局": "yunnan",
+                "福建地震局": "fujian",
+                "四川地震局": "sichuan",
+                "陕西地震局": "shaanxi",
+                "湖北地震局": "hubei",
                 "台湾中央气象署": "cwa",
                 "台湾中央气象署地震预警": "cwa-eew",
                 "日本气象厅": "jma",

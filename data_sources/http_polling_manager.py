@@ -32,6 +32,13 @@ from config import (
     GFZ_HTTP_URL,
     USP_HTTP_URL,
     CWA_REPORT_HTTP_URL,
+    EMSC_HTTP_URL,
+    TMD_HTTP_URL,
+    BCSF_HTTP_URL,
+    KMA_HTTP_URL,
+    MMD_HTTP_URL,
+    NRCAN_HTTP_URL,
+    CENC_HTTP_URL,
 )
 from adapters import (
     FanStudioHttpAdapter,
@@ -49,6 +56,13 @@ from adapters import (
     GfzAdapter,
     UspAdapter,
     CwaReportAdapter,
+    EmscHttpAdapter,
+    TmdAdapter,
+    BcsfAdapter,
+    KmaHttpAdapter,
+    MmdAdapter,
+    NrcanAdapter,
+    CencHttpAdapter,
 )
 from utils.logger import get_logger
 
@@ -170,26 +184,31 @@ class HTTPPollingConnection:
                 logger.debug(f"[{self.source_name}] 数据源已关闭，跳过 Get: {self.url}")
                 return
             logger.debug(f"[{self.source_name}] 开始轮询: {self.url}")
-            
-            # 发送HTTP请求，失败时重试最多3次，每次间隔2秒
+
+            timeout = int(getattr(self.adapter, "fetch_timeout", 30) or 30)
+            fetch_raw = getattr(self.adapter, "fetch_raw", None)
+            data = None
             response = None
+
             for attempt in range(1, 4):
                 try:
-                    req_headers = dict(getattr(self.adapter, "fetch_headers", None) or {})
-                    response = self._session.get(
-                        self.url,
-                        timeout=30,
-                        proxies={'http': None, 'https': None},
-                        headers=req_headers if req_headers else None,
-                        verify=self._request_verify_ssl(),
-                    )
-                    response.raise_for_status()
+                    if callable(fetch_raw):
+                        data = fetch_raw(self._session, self.url)
+                    else:
+                        req_headers = dict(getattr(self.adapter, "fetch_headers", None) or {})
+                        response = self._session.get(
+                            self.url,
+                            timeout=timeout,
+                            proxies={'http': None, 'https': None},
+                            headers=req_headers if req_headers else None,
+                            verify=self._request_verify_ssl(),
+                        )
+                        response.raise_for_status()
                     break
-                except requests.exceptions.RequestException as e:
+                except Exception as e:
                     if attempt < 3:
                         time.sleep(2)
                         continue
-                    # 所有重试均失败，记录错误（重复错误降噪：60秒内同种错误只记一次ERROR）
                     now = time.time()
                     err_summary = f"{type(e).__name__}: {str(e)[:120]}"
                     if now - self._last_error_log_time < 60 and err_summary == self._last_error_msg:
@@ -210,24 +229,27 @@ class HTTPPollingConnection:
                         self._last_error_msg = err_summary
                     self.last_request_ok = False
                     return
-            
-            if response is None:
+
+            if not callable(fetch_raw):
+                if response is None:
+                    self.last_request_ok = False
+                    return
+                response_format = getattr(self.adapter, "response_format", "json")
+                if response_format == "json":
+                    data = response.json()
+                elif response_format == "text":
+                    data = response.text
+                elif response_format == "bytes":
+                    data = response.content
+                else:
+                    data = response.content
+
+            if data is None:
                 self.last_request_ok = False
                 return
-            
+
             self.last_request_ok = True
             self.last_request_time = time.time()
-            
-            # 解析响应（按适配器声明的格式）
-            response_format = getattr(self.adapter, "response_format", "json")
-            if response_format == "json":
-                data = response.json()
-            elif response_format == "text":
-                data = response.text
-            elif response_format == "bytes":
-                data = response.content
-            else:
-                data = response.content
             
             # 计算数据哈希（简单检测是否有新数据）
             import hashlib
@@ -366,6 +388,20 @@ class HTTPPollingManager:
             return UspAdapter('usp', url)
         if url == CWA_REPORT_HTTP_URL:
             return CwaReportAdapter('cwa', url)
+        if url == EMSC_HTTP_URL:
+            return EmscHttpAdapter('emsc', url)
+        if url == TMD_HTTP_URL:
+            return TmdAdapter('tmd', url)
+        if url == BCSF_HTTP_URL:
+            return BcsfAdapter('bcsf', url)
+        if url == KMA_HTTP_URL:
+            return KmaHttpAdapter('kma', url)
+        if url == MMD_HTTP_URL:
+            return MmdAdapter('mmd', url)
+        if url == NRCAN_HTTP_URL:
+            return NrcanAdapter('nrcan', url)
+        if url == CENC_HTTP_URL:
+            return CencHttpAdapter('cenc', url)
         # 已下线的 Wolfx HTTP 不提供适配器，跳过
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None

@@ -36,13 +36,13 @@ WOLFX_TYPE_MAP: Dict[str, str] = {
 WOLFX_REPORT_TYPES = frozenset({"wolfx_cenc", "wolfx_jma_eqlist"})
 
 # source_type -> 消息配置解析开关字段名（与设置页 Wolfx 区块一致）
+# wolfx_cwa_eew 由 WOLFX_CWA_EEW_URL 连接开关控制，不复用 Fan Studio 的 fanstudio_parse_*
 WOLFX_PARSE_FLAG: Dict[str, str] = {
     "wolfx_jma_eew": "ali_all_parse_nied",
     "wolfx_sc_eew": "ali_all_parse_early_est",
     "wolfx_fj_eew": "ali_all_parse_jma_volcano",
     "wolfx_cenc_eew": "ali_all_parse_bmkg",
     "wolfx_cq_eew": "ali_all_parse_cq_eew",
-    "wolfx_cwa_eew": "fanstudio_parse_cwa_eew",
 }
 
 ORG_BY_SOURCE: Dict[str, str] = {
@@ -275,6 +275,7 @@ class WolfxAdapter(BaseAdapter):
             "event_id": event_id,
             "raw_data": dict(item),
             "fanstudio": False,
+            "whews": False,
         }
 
         if source_type == "wolfx_cenc":
@@ -411,6 +412,7 @@ class WolfxAdapter(BaseAdapter):
             "final": final,
             "cancel": cancel,
             "fanstudio": False,
+            "whews": False,
         }
         if epi is not None and str(epi).strip() != "":
             result["epiIntensity"] = epi

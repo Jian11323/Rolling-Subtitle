@@ -26,6 +26,13 @@ from .gfz_adapter import GfzAdapter
 from .usp_adapter import UspAdapter
 from .cwa_report_adapter import CwaReportAdapter
 from .emsc_ws_adapter import EmscWsAdapter
+from .emsc_http_adapter import EmscHttpAdapter
+from .tmd_adapter import TmdAdapter
+from .bcsf_adapter import BcsfAdapter
+from .kma_http_adapter import KmaHttpAdapter
+from .mmd_adapter import MmdAdapter
+from .nrcan_adapter import NrcanAdapter
+from .cenc_http_adapter import CencHttpAdapter
 from .nowquake_cencint_adapter import NowquakeCencintAdapter
 
 __all__ = [
@@ -50,5 +57,12 @@ __all__ = [
     'UspAdapter',
     'CwaReportAdapter',
     'EmscWsAdapter',
+    'EmscHttpAdapter',
+    'TmdAdapter',
+    'BcsfAdapter',
+    'KmaHttpAdapter',
+    'MmdAdapter',
+    'NrcanAdapter',
+    'CencHttpAdapter',
     'NowquakeCencintAdapter',
 ]

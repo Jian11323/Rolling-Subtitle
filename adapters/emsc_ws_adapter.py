@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""EMSC SeismicPortal standing_order WebSocket 适配器。"""
+"""EMSC SeismicPortal standing_order WebSocket 适配器。
+
+过滤逻辑对齐服务器 fused_list_v2.py：
+- 仅 create/update
+- 震级 <= 0 丢弃
+- 发震时刻超过 1 小时丢弃（防过期事件刷屏）
+- ID + 内容 MD5 去重库（最新 20 条落盘）；同 ID 不同 MD5 视为修订放行
+"""
 
 from __future__ import annotations
 
@@ -9,15 +16,24 @@ from typing import Any, Dict, Optional
 
 from .base_adapter import BaseAdapter
 from utils import timezone_utils
+from utils.emsc_dedup import (
+    EMSC_WSS_MAX_AGE_HOURS,
+    EmscDedupStore,
+    emsc_age_hours,
+    is_emsc_event_expired,
+    parse_emsc_origin_utc,
+)
+from utils.logger import get_logger
+
+logger = get_logger()
 
 
 class EmscWsAdapter(BaseAdapter):
     """解析 EMSC standing_order 推送（action + GeoJSON Feature）。"""
 
     def __init__(self, source_name: str, source_url: str):
-        """初始化并准备事件去重状态。"""
+        """初始化适配器。"""
         super().__init__(source_name, source_url)
-        self._last_event_key = ""
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
         """解析 EMSC WebSocket JSON 消息。"""
@@ -53,6 +69,9 @@ class EmscWsAdapter(BaseAdapter):
             props.get("flynn_region") or props.get("region") or props.get("place") or ""
         ).strip()
         mag = self._safe_float(props.get("mag"), 0.0)
+        if mag <= 0:
+            return None
+
         lat = self._safe_float(props.get("lat"), 0.0)
         lon = self._safe_float(props.get("lon"), 0.0)
         depth = self._safe_float(props.get("depth"), 10.0)
@@ -74,8 +93,22 @@ class EmscWsAdapter(BaseAdapter):
             except (TypeError, ValueError):
                 pass
 
-        shock_raw = str(props.get("time") or "").strip()
-        shock_time = timezone_utils.utc_to_display(shock_raw) if shock_raw else ""
+        shock_raw = props.get("time")
+        if shock_raw is None or shock_raw == "":
+            return None
+
+        # 过期过滤：发震时刻 > 1 小时则丢弃（对齐 fused_list EMSC_WSS_MAX_AGE_HOURS）
+        origin_dt = parse_emsc_origin_utc(shock_raw)
+        if origin_dt is None or is_emsc_event_expired(shock_raw):
+            age = emsc_age_hours(origin_dt)
+            logger.info(
+                f"[EMSC] 丢弃过期事件 age={age:.1f}h > {EMSC_WSS_MAX_AGE_HOURS}h "
+                f"id={props.get('unid') or (data.get('id') if isinstance(data, dict) else '')} "
+                f"time={shock_raw}"
+            )
+            return None
+
+        shock_time = timezone_utils.utc_to_display(str(shock_raw).strip()) if shock_raw else ""
         if not place_name and not shock_time:
             return None
 
@@ -88,11 +121,15 @@ class EmscWsAdapter(BaseAdapter):
         if not event_id:
             event_id = f"emsc_{shock_time}_{lat}_{lon}"
 
-        # 同事件更新：用 unid+mag+time 去重，避免无变化刷屏；幅度/时间变化仍放行
-        dedup_key = f"{event_id}|{mag}|{shock_raw}"
-        if self._last_event_key == dedup_key:
+        # ID + MD5 去重（同 ID 不同内容视为修订，允许推送）
+        if EmscDedupStore.is_duplicate(event_id, shock_time, mag, lat, lon, depth):
+            logger.info(
+                f"[EMSC] 重复数据不推送 action={action or '-'} id={event_id} "
+                f"mag={mag} time={shock_time}"
+            )
             return None
-        self._last_event_key = dedup_key
+
+        EmscDedupStore.remember(event_id, shock_time, mag, lat, lon, depth)
 
         return {
             "type": "report",
@@ -106,6 +143,8 @@ class EmscWsAdapter(BaseAdapter):
             "organization": self.get_organization_name(),
             "event_id": event_id,
             "raw_data": raw_data,
+            "fanstudio": False,
+            "whews": False,
         }
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:

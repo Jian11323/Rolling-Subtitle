@@ -113,8 +113,20 @@ def main():
         else:
             logger.info("已选择 CPU（软件）渲染，跳过 OpenGL 设置")
 
+        # Win10/11 Toast：须在 QApplication 之前设置显式 AUMID
+        try:
+            from utils.desktop_notify import ensure_windows_app_id
+            ensure_windows_app_id()
+        except Exception as e:
+            logger.debug(f"设置 AppUserModelID 失败（可忽略）: {e}")
+
         # 创建QApplication
         app = QApplication(sys.argv)  # Qt 应用主对象
+        try:
+            app.setApplicationName("地震情报实况栏")
+            app.setOrganizationName("FanStudio")
+        except Exception:
+            pass
 
         # 打包版单实例：避免连开两个 exe 时各自弹出「发现新版本」等重复流程
         try:

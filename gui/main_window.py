@@ -38,6 +38,13 @@ from config import (
     GFZ_HTTP_URL,
     USP_HTTP_URL,
     CWA_REPORT_HTTP_URL,
+    EMSC_HTTP_URL,
+    TMD_HTTP_URL,
+    BCSF_HTTP_URL,
+    KMA_HTTP_URL,
+    MMD_HTTP_URL,
+    NRCAN_HTTP_URL,
+    CENC_HTTP_URL,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
     fanstudio_http_canonical_key,
@@ -60,7 +67,7 @@ from utils import timezone_utils
 from utils.geo_utils import should_accept_message
 from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
-from utils.desktop_notify import show_event_notification
+from utils.desktop_notify import set_tray_icon_provider, show_event_notification
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
@@ -84,11 +91,8 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
 }
 # 仅 Fan Studio 聚合通道会出现的子源（无界/官方直连不会产出）
 _FANSTUDIO_ONLY_SOURCES: Set[str] = {
-    "ningxia",
     "guangxi",
     "shanxi",
-    "beijing",
-    "yunnan",
     "fssn",
     "fssn-cmt",
     "海啸信息",
@@ -253,6 +257,7 @@ class MainWindow(QMainWindow):
             # 更新说明弹窗（每个版本仅展示一次，延后到预创建之后避免被抢焦点）
             QTimer.singleShot(1500, self._show_changelog_if_needed)
             self._setup_system_tray()
+            set_tray_icon_provider(lambda: self._tray_icon)
         except Exception as e:
             logger.error(f"延迟启动后台任务失败: {e}")
 
@@ -1855,8 +1860,9 @@ class MainWindow(QMainWindow):
                 return False
 
         if st == "emsc" and not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
-            if provider != DATA_PROVIDER_OFFICIAL or not es.get(EMSC_WSS_URL, False):
-                logger.debug("已忽略消息：官方 EMSC WebSocket 已关闭或当前非官方提供者")
+            emsc_on = bool(es.get(EMSC_WSS_URL, False) or es.get(EMSC_HTTP_URL, False))
+            if provider != DATA_PROVIDER_OFFICIAL or not emsc_on:
+                logger.debug("已忽略消息：官方 EMSC（WSS/HTTP）已关闭或当前非官方提供者")
                 return False
 
         p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
@@ -1896,6 +1902,12 @@ class MainWindow(QMainWindow):
             "gfz": GFZ_HTTP_URL,
             "usp": USP_HTTP_URL,
             "cwa": CWA_REPORT_HTTP_URL,
+            "tmd": TMD_HTTP_URL,
+            "bcsf": BCSF_HTTP_URL,
+            "kma": KMA_HTTP_URL,
+            "mmd": MMD_HTTP_URL,
+            "nrcan": NRCAN_HTTP_URL,
+            "cenc": CENC_HTTP_URL,
         }
         # 官方直连 HTTP：未开开关则丢弃；Fan Studio / 无界同名 source_type 带标记，不走此表
         if not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
@@ -2780,10 +2792,12 @@ class MainWindow(QMainWindow):
 
         try:
             from adapters.wolfx_adapter import WOLFX_PARSE_FLAG
-            from config import WOLFX_CENC_EQLIST_URL, WOLFX_JMA_EQLIST_URL
+            from config import WOLFX_CENC_EQLIST_URL, WOLFX_CWA_EEW_URL, WOLFX_JMA_EQLIST_URL
             flag = WOLFX_PARSE_FLAG.get(st)
             if flag:
                 keys.append(flag)
+            if st == "wolfx_cwa_eew":
+                keys.append(WOLFX_CWA_EEW_URL)
             if st == "wolfx_cenc":
                 keys.append(WOLFX_CENC_EQLIST_URL)
             if st == "wolfx_jma_eqlist":

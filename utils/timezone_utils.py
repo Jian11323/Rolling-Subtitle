@@ -120,6 +120,34 @@ def cst_to_display(cst_time_str: str) -> str:
         return cst_time_str
 
 
+def local_tz_to_display(time_str: str, tz_name: str, formats: Optional[list] = None) -> str:
+    """将指定本地时区的朴素时间串转为显示时区 YYYY-MM-DD HH:MM:SS。"""
+    try:
+        if not time_str:
+            return ""
+        s = time_str.strip()
+        zone = ZoneInfo(tz_name)
+        fmts = formats or [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+        ]
+        dt = None
+        for fmt in fmts:
+            try:
+                dt = datetime.strptime(s, fmt)
+                break
+            except ValueError:
+                continue
+        if dt is None:
+            return time_str
+        dt = dt.replace(tzinfo=zone)
+        return dt.astimezone(get_display_zone()).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return time_str
+
+
 def timestamp_to_display(ts: int) -> str:
     """
     将时间戳（秒或毫秒）按 UTC 解释后转为显示时区，格式化为 YYYY-MM-DD HH:MM:SS。

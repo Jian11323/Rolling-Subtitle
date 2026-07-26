@@ -117,6 +117,7 @@ class FanStudioHttpAdapter(BaseAdapter):
             'Enname': enname,
             'raw_data': item,
             'fanstudio': True,
+            'whews': False,
             'event_id': event_id,
             'Ckposition': ckposition,
             'ckposition': ckposition,

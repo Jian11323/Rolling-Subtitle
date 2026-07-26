@@ -164,6 +164,13 @@ HKO_HTTP_URL = "https://data.weather.gov.hk/weatherAPI/opendata/earthquake.php?d
 GFZ_HTTP_URL = "https://geofon.gfz.de/fdsnws/event/1/query?limit=10"
 USP_HTTP_URL = "https://www.moho.iag.usp.br/fdsnws/event/1/query?limit=10"
 CWA_REPORT_HTTP_URL = "https://api.core.exptech.dev/api/v2/eq/report?limit=25"
+EMSC_HTTP_URL = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=20"
+TMD_HTTP_URL = "https://eq.tmd.go.th/map-events.json"
+BCSF_HTTP_URL = "https://api.franceseisme.fr/fdsnws/event/1/query?format=text&limit=20"
+KMA_HTTP_URL = "https://www.kma.go.kr/nchn/earthquake/earthquake-korea.do"
+MMD_HTTP_URL = "http://mygempa.met.gov.my/lib/php/fetch-multiple-shake-admis-data.php"
+NRCAN_HTTP_URL = "https://www.earthquakescanada.nrcan.gc.ca/fdsnws/event/1/query?format=text&limit=20&orderby=time"
+CENC_HTTP_URL = "http://api.dizhensubao.igexin.com/api.htm"
 
 NEW_HTTP_SOURCE_KEYS: List[str] = [
     BMKG_HTTP_URL,
@@ -177,6 +184,13 @@ NEW_HTTP_SOURCE_KEYS: List[str] = [
     GFZ_HTTP_URL,
     USP_HTTP_URL,
     CWA_REPORT_HTTP_URL,
+    EMSC_HTTP_URL,
+    TMD_HTTP_URL,
+    BCSF_HTTP_URL,
+    KMA_HTTP_URL,
+    MMD_HTTP_URL,
+    NRCAN_HTTP_URL,
+    CENC_HTTP_URL,
 ]
 
 # 各 HTTP 数据源默认轮询间隔（秒）
@@ -192,6 +206,13 @@ DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
     GFZ_HTTP_URL: 60,
     USP_HTTP_URL: 60,
     CWA_REPORT_HTTP_URL: 30,
+    EMSC_HTTP_URL: 60,
+    TMD_HTTP_URL: 60,
+    BCSF_HTTP_URL: 60,
+    KMA_HTTP_URL: 60,
+    MMD_HTTP_URL: 60,
+    NRCAN_HTTP_URL: 60,
+    CENC_HTTP_URL: 30,
     FANSTUDIO_TYPHOON_HTTP: 600,
     "https://api.p2pquake.net/v2/history?codes=551&limit=3": 2,
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1": 2,
@@ -212,20 +233,22 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.7.0-pre"  # 当前程序版本
+APP_VERSION = "2.7.1"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.7.0-pre
+CHANGELOG_TEXT = """版本 2.7.1
 
-1、新增无界科技数据源，与 Fan Studio / 官方直连三选一
-2、新增 USGS、香港天文台、GFZ、USP、台湾地震报告、EMSC、CENC 烈度等数据源
-3、优化数据源热切换：切换时清空缓冲并重新拉取，避免窜数据
-4、移除历史记录窗口
-5、修复无界科技火山情报（va）解析"""
+1、无界科技改为独立数据解析，不再依赖 Fan Studio 解析逻辑
+2、适配无界新增源：韩国气象厅预警、NRCan、MMD、七省级地震局速报
+3、修复无界省级源（宁夏/北京/云南等）在非 Fan 提供者下被误丢弃
+4、设置页与性能预设同步新增无界子源开关
+5、官方 EMSC WebSocket：复用过期过滤与 ID+MD5 去重，防止过期事件重复推送
+6、官方 HTTP 补齐 EMSC/TMD/BCSF/KMA/MMD/NRCAN/CENC
+7、修复 Wolfx 台湾预警误绑 Fan Studio 解析开关，三源溯源标记更清晰"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -432,6 +455,16 @@ class MessageConfig:
     whews_parse_geonet: bool = True
     whews_parse_tmd: bool = True
     whews_parse_ingv: bool = True
+    whews_parse_nrcan: bool = True
+    whews_parse_mmd: bool = True
+    whews_parse_kma_eew: bool = True
+    whews_parse_fujian: bool = True
+    whews_parse_beijing: bool = True
+    whews_parse_sichuan: bool = True
+    whews_parse_yunnan: bool = True
+    whews_parse_ningxia: bool = True
+    whews_parse_shaanxi: bool = True
+    whews_parse_hubei: bool = True
     whews_parse_jma: bool = True  # 残留项：JMA 情报仅走 P2PQuake，保存时强制 False
     whews_parse_jma_volcano: bool = True  # 无界科技 source=va 火山情报
     whews_parse_tsunami: bool = True
@@ -945,6 +978,16 @@ class Config:
                 'whews_parse_geonet': getattr(self.message_config, 'whews_parse_geonet', True),
                 'whews_parse_tmd': getattr(self.message_config, 'whews_parse_tmd', True),
                 'whews_parse_ingv': getattr(self.message_config, 'whews_parse_ingv', True),
+                'whews_parse_nrcan': getattr(self.message_config, 'whews_parse_nrcan', True),
+                'whews_parse_mmd': getattr(self.message_config, 'whews_parse_mmd', True),
+                'whews_parse_kma_eew': getattr(self.message_config, 'whews_parse_kma_eew', True),
+                'whews_parse_fujian': getattr(self.message_config, 'whews_parse_fujian', True),
+                'whews_parse_beijing': getattr(self.message_config, 'whews_parse_beijing', True),
+                'whews_parse_sichuan': getattr(self.message_config, 'whews_parse_sichuan', True),
+                'whews_parse_yunnan': getattr(self.message_config, 'whews_parse_yunnan', True),
+                'whews_parse_ningxia': getattr(self.message_config, 'whews_parse_ningxia', True),
+                'whews_parse_shaanxi': getattr(self.message_config, 'whews_parse_shaanxi', True),
+                'whews_parse_hubei': getattr(self.message_config, 'whews_parse_hubei', True),
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
                 'whews_parse_jma_volcano': getattr(self.message_config, 'whews_parse_jma_volcano', True),
                 'whews_parse_tsunami': getattr(self.message_config, 'whews_parse_tsunami', True),
@@ -1383,6 +1426,9 @@ class Config:
                         setattr(self.message_config, key, value)
                 if not self.message_config.validate():
                     success = False
+                # JMA 情报仅走 P2PQuake：无界侧残留开关强制关闭
+                if hasattr(self.message_config, "whews_parse_jma"):
+                    self.message_config.whews_parse_jma = False
                 # 迁移逻辑：当老配置仅有 fanstudio_parse_warning / fanstudio_parse_report 时，
                 # 按这两个总开关初始化各 Fan Studio 子源细粒度开关，避免升级后行为变化。
                 try:
@@ -1832,6 +1878,18 @@ class Config:
             INGV_HTTP_URL: "ingv",
             EARLYEST_HTTP_URL: "early_est",
             JMA_ATOM_LONG_URL: "jma_volcano",
+            USGS_HTTP_URL: "usgs",
+            HKO_HTTP_URL: "hko",
+            GFZ_HTTP_URL: "gfz",
+            USP_HTTP_URL: "usp",
+            CWA_REPORT_HTTP_URL: "cwa",
+            EMSC_HTTP_URL: "emsc",
+            TMD_HTTP_URL: "tmd",
+            BCSF_HTTP_URL: "bcsf",
+            KMA_HTTP_URL: "kma",
+            MMD_HTTP_URL: "mmd",
+            NRCAN_HTTP_URL: "nrcan",
+            CENC_HTTP_URL: "cenc",
         }
         if normalized_url in http_url_to_name:
             return http_url_to_name[normalized_url]
@@ -1884,6 +1942,13 @@ class Config:
             GFZ_HTTP_URL: "gfz",
             USP_HTTP_URL: "usp",
             CWA_REPORT_HTTP_URL: "cwa",
+            EMSC_HTTP_URL: "emsc",
+            TMD_HTTP_URL: "tmd",
+            BCSF_HTTP_URL: "bcsf",
+            KMA_HTTP_URL: "kma",
+            MMD_HTTP_URL: "mmd",
+            NRCAN_HTTP_URL: "nrcan",
+            CENC_HTTP_URL: "cenc",
         }
         return url_to_name.get(normalized_url, url)
     
@@ -1904,6 +1969,12 @@ class Config:
             "shanxi": "山西地震局",
             "beijing": "北京地震局",
             "yunnan": "云南地震局",
+            "fujian": "福建地震局",
+            "sichuan": "四川地震局",
+            "shaanxi": "陕西地震局",
+            "hubei": "湖北地震局",
+            "nrcan": "加拿大自然资源部",
+            "mmd": "马来西亚气象局",
             "tsunami": "自然资源部海啸预警中心",
             "海啸信息": "自然资源部海啸预警中心",
             "cwa": "台湾中央气象署",

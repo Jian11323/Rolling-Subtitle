@@ -18,7 +18,7 @@ logger = get_logger()
 
 # 数据源优先级定义（数字越小优先级越高）
 # 注意：这是速报消息的优先级，预警消息（除气象预警外）永远优先于速报
-# 速报播放顺序：气象预警、海啸信息、cenc、ningxia、guangxi、shanxi、beijing、yunnan、cwa、p2pquake、p2pquake_tsunami、jma_volcano、hko、usgs、emsc、bcsf、gfz、usp、kma、fssn
+# 速报播放顺序：气象预警、海啸信息、cenc、省级局、cwa、p2pquake…、国际速报
 SOURCE_PRIORITY: Dict[str, int] = {
     'weatheralarm': 1,
     'fanstudio_typhoon': 2,
@@ -33,23 +33,30 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'shanxi': 7,
     'beijing': 8,
     'yunnan': 9,
-    'cwa': 10,
-    'p2pquake': 11,  # P2P日本气象厅地震情报
-    'p2pquake_tsunami': 12,  # P2P日本气象厅海啸预报
-    'jma_volcano': 13,  # JMA 火山情报
-    'hko': 14,
-    'usgs': 15,
-    'emsc': 16,
-    'bcsf': 17,
-    'gfz': 18,
-    'usp': 19,
-    'kma': 20,
-    'bmkg': 21,
-    'geonet': 22,
-    'ingv': 23,
-    'ptwc': 24,
-    'fssn': 25,
-    'fssn-cmt': 26,
+    'fujian': 10,
+    'sichuan': 11,
+    'shaanxi': 12,
+    'hubei': 13,
+    'cwa': 14,
+    'p2pquake': 15,  # P2P日本气象厅地震情报
+    'p2pquake_tsunami': 16,  # P2P日本气象厅海啸预报
+    'jma_volcano': 17,  # JMA 火山情报
+    'hko': 18,
+    'usgs': 19,
+    'emsc': 20,
+    'bcsf': 21,
+    'gfz': 22,
+    'usp': 23,
+    'kma': 24,
+    'bmkg': 25,
+    'geonet': 26,
+    'ingv': 27,
+    'tmd': 28,
+    'mmd': 29,
+    'nrcan': 30,
+    'ptwc': 31,
+    'fssn': 32,
+    'fssn-cmt': 33,
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
     'cea': 0,
     'cea-pr': 0,
@@ -80,10 +87,13 @@ SOURCE_FIXED_ORDER: List[str] = [
     'early_est',
     # 速报
     'weatheralarm', 'fanstudio_typhoon', 'tsunami', '海啸信息',
-    'cenc', 'cenc-ir', 'wolfx_cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa',
+    'cenc', 'cenc-ir', 'wolfx_cenc',
+    'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan',
+    'fujian', 'sichuan', 'shaanxi', 'hubei',
+    'cwa',
     'p2pquake', 'wolfx_jma_eqlist', 'p2pquake_tsunami', 'jma_volcano',
     'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma',
-    'bmkg', 'geonet', 'ingv', 'ptwc', 'fssn', 'fssn-cmt',
+    'bmkg', 'geonet', 'ingv', 'tmd', 'mmd', 'nrcan', 'ptwc', 'fssn', 'fssn-cmt',
 ]
 SOURCE_FIXED_ORDER_INDEX: Dict[str, int] = {
     source: idx for idx, source in enumerate(SOURCE_FIXED_ORDER)
