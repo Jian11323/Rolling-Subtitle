@@ -4,7 +4,10 @@
 地名修正工具
 使用 Region Fe Fix/fe_fix_region_data.json 根据经纬度修正地名（区域 bbox，与 korea_region_data.json 同结构）。
 中国境内优先使用同目录下 china_place_index.json（0.05° 区县级栅格查表）。
-支持 usgs, emsc, bcsf, gfz, usp, kma 数据源
+
+规则：
+- CENC / CWA / JMA / HKO / P2PQuake 等保留原文，不修正
+- 国外数据源优先使用 FE 地名修正
 """
 
 import sys
@@ -12,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from utils.logger import get_logger
+from utils.place_name_utils import should_apply_fe_place_fix
 from utils.region_name_fixer import RegionNameFixer
 
 logger = get_logger()
@@ -21,7 +25,7 @@ _FE_FIX_JSON = "fe_fix_region_data.json"
 
 
 class PlaceNameFixer:
-    """地名修正工具类"""
+    """地名修正工具类（国外数据源 → FE 区域名）。"""
 
     def __init__(self, fix_file_path: Optional[str] = None):
         """
@@ -57,14 +61,6 @@ class PlaceNameFixer:
             source_type="fe-fix",
         )
 
-        # 支持按经纬度 bbox 修正地名的数据源类型
-        self.supported_sources = {
-            "usgs", "emsc", "bcsf", "gfz", "usp", "kma",
-            "bmkg", "geonet", "ingv", "early_est",
-            "tmd", "mmd", "nrcan",
-            "p2pquake", "p2pquake_tsunami",
-        }
-
         if not self.fix_file_path.exists():
             logger.warning(f"地名修正文件不存在: {self.fix_file_path}")
 
@@ -87,7 +83,7 @@ class PlaceNameFixer:
         Returns:
             修正后的地名，如果无法修正则返回原始地名
         """
-        if source_type.lower() not in self.supported_sources:  # 不在白名单内不修正
+        if not should_apply_fe_place_fix(source_type):
             return place_name
 
         if not self._region_fixer.is_supported():  # 区域数据未加载成功
@@ -97,7 +93,7 @@ class PlaceNameFixer:
 
     def is_supported(self, source_type: str) -> bool:
         """
-        检查是否支持该数据源
+        检查该数据源是否应走 FE 地名修正
 
         Args:
             source_type: 数据源类型
@@ -105,4 +101,4 @@ class PlaceNameFixer:
         Returns:
             是否支持
         """
-        return source_type.lower() in self.supported_sources
+        return should_apply_fe_place_fix(source_type)

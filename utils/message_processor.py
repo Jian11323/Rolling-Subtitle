@@ -15,7 +15,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from utils.logger import get_logger
 from utils import timezone_utils
-from utils.place_name_utils import should_apply_place_name_fix, should_translate_place_name
+from utils.place_name_utils import (
+    should_apply_place_name_fix,
+    should_keep_original_place_name,
+    should_translate_place_name,
+)
 from utils.translation_service import TranslationService
 
 _place_name_fixer = None
@@ -133,8 +137,10 @@ class MessageProcessor:
         latitude: Optional[float] = None,
         longitude: Optional[float] = None,
     ) -> str:
-        """地名修正或百度翻译：非中文数据源二选一；翻译失败时回退经纬度修正。"""
+        """地名修正或百度翻译：国外源二选一；CENC/CWA/JMA/HKO/P2P 保留原文。"""
         if not place_name:
+            return place_name
+        if should_keep_original_place_name(source_type):
             return place_name
 
         lat = self._safe_float(latitude, 0.0) if latitude is not None else None
@@ -143,14 +149,13 @@ class MessageProcessor:
             lat = lon = None
 
         if should_apply_place_name_fix(self.config):  # 地名修正模式（与翻译互斥）
-            place_name = self._apply_coord_place_name_fix(
+            return self._apply_coord_place_name_fix(
                 place_name, source_type, lat, lon
             )
-            return place_name
 
         if not getattr(self.config.translation_config, "enabled", False):  # 未启用百度翻译
             return place_name
-        if not should_translate_place_name(source_type, place_name):  # 中文源或无需翻译的地名
+        if not should_translate_place_name(source_type, place_name):  # 无需翻译的地名
             return place_name
         if not self.translator:  # 翻译服务初始化失败
             return place_name

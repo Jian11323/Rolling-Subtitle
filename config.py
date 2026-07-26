@@ -248,7 +248,8 @@ CHANGELOG_TEXT = """版本 2.7.1
 4、设置页与性能预设同步新增无界子源开关
 5、官方 EMSC WebSocket：复用过期过滤与 ID+MD5 去重，防止过期事件重复推送
 6、官方 HTTP 补齐 EMSC/TMD/BCSF/KMA/MMD/NRCAN/CENC
-7、修复 Wolfx 台湾预警误绑 Fan Studio 解析开关，三源溯源标记更清晰"""
+7、修复 Wolfx 台湾预警误绑 Fan Studio 解析开关，三源溯源标记更清晰
+8、地名处理：CENC/CWA/JMA/HKO/P2P 保留原文，国外源优先 FE 修正；修复 FE 栅格 off-by-one"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -709,7 +710,7 @@ class WebSocketConfig:
 @dataclass
 class TranslationConfig:
     """地名处理配置：地名修正与百度翻译二选一。"""
-    use_place_name_fix: bool = True  # 非中文数据源使用地名修正（与百度翻译互斥），默认开启
+    use_place_name_fix: bool = True  # 国外数据源优先 FE 地名修正（与百度翻译互斥）；CENC/CWA/JMA/HKO/P2P 保留原文
     enabled: bool = False  # 非中文数据源使用百度翻译（与地名修正互斥）
     baidu_app_id: str = ""  # 百度翻译开放平台 AppID
     baidu_secret: str = ""  # 百度翻译开放平台密钥

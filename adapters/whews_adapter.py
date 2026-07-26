@@ -137,10 +137,6 @@ WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "cea", "cea-pr", "km
 # 发震时间为 UTC+9（JST/KST）的预警源
 WHEWS_UTC9_WARNING = frozenset({"jma", "kma-eew"})
 
-# 可应用通用地名修正的速报源
-WHEWS_PLACE_FIX_REPORT = frozenset(
-    {"usgs", "emsc", "bcsf", "gfz", "usp", "kma", "bmkg", "geonet", "tmd", "ingv", "nrcan", "mmd", "hko"}
-)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -232,12 +228,16 @@ def _maybe_fix_place_name(
             fixer = get_kma_region_fixer()
             if fixer and fixer.is_supported():
                 return fixer.fix_place_name(place_name, latitude, longitude)
-        if not is_warning and source_type in WHEWS_PLACE_FIX_REPORT:
+        if not is_warning:
             from utils.place_name_fixer import PlaceNameFixer
+            from utils.place_name_utils import should_apply_fe_place_fix
 
-            fixer = PlaceNameFixer()
-            if fixer.is_supported(source_type):
-                return fixer.fix_place_name(place_name, latitude, longitude, source_type)
+            if should_apply_fe_place_fix(source_type):
+                fixer = PlaceNameFixer()
+                if fixer.is_supported(source_type):
+                    return fixer.fix_place_name(
+                        place_name, latitude, longitude, source_type
+                    )
     except Exception as e:
         logger.debug(f"[WHEWS] 地名修正失败: {e}")
     return place_name

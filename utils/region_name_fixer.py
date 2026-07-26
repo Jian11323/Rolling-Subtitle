@@ -165,7 +165,11 @@ class RegionNameFixer:
         )
 
     def _lookup_by_grid(self, latitude: float, longitude: float) -> Optional[str]:
-        """按 1° F-E 栅格查表，与 fe_fix.txt 的 feNumbers/feNames 一致。"""
+        """按 1° F-E 栅格查表。
+
+        grid.table 存的是 1-based FE 区域号（与 feNumbers 一致）；
+        grid.names 为 0-based，names[0] 对应 FE 区域 1。
+        """
         if not self._grid_table or not self._grid_names:
             return None
         row = int(latitude + 90)
@@ -173,9 +177,11 @@ class RegionNameFixer:
         row = max(0, min(len(self._grid_table) - 1, row))
         col = max(0, min(len(self._grid_table[0]) - 1, col))
         region_id = self._grid_table[row][col]
-        if region_id < 0 or region_id >= len(self._grid_names):
-            region_id = len(self._grid_names) - 1
-        return self._grid_names[region_id]
+        # 1-based FE 号 -> names 下标
+        idx = region_id - 1
+        if idx < 0 or idx >= len(self._grid_names):
+            idx = len(self._grid_names) - 1
+        return self._grid_names[idx]
 
     def _lookup_by_bbox(self, latitude: float, longitude: float) -> Optional[str]:
         """bbox 查表：优先非 aggregate 区域，再取面积最小者。"""

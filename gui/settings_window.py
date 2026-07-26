@@ -3484,7 +3484,8 @@ class SettingsWindow(QDialog):
         place_mode_group.addButton(fix_radio, 0)
         main_layout.addWidget(fix_radio)
         fix_info = QLabel(
-            "根据经纬度自动修正地名（支持 usgs、emsc、bcsf、gfz、usp、kma、bmkg、geonet、ingv、early_est 等数据源），无需 API 密钥。"
+            "国外数据源根据经纬度使用 FE 区域库修正地名（usgs、emsc、bcsf、gfz、usp、kma、bmkg、geonet、ingv 等）。"
+            "CENC、CWA、JMA、HKO、P2PQuake 使用原始地名，无需 API 密钥。"
         )
         fix_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
         fix_info.setWordWrap(True)
@@ -3495,8 +3496,8 @@ class SettingsWindow(QDialog):
         place_mode_group.addButton(baidu_radio, 1)
         main_layout.addWidget(baidu_radio)
         baidu_info = QLabel(
-            "将日语、韩语、英语等非中文地名翻译为中文，适用于所有非中文数据源（含速报、预警、火山情报等）。"
-            "需要配置百度翻译 API 密钥。"
+            "将英语等非中文地名翻译为中文，适用于国外数据源。"
+            "CENC、CWA、JMA、HKO、P2PQuake 仍使用原始地名。需要配置百度翻译 API 密钥。"
         )
         baidu_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
         baidu_info.setWordWrap(True)
@@ -4102,7 +4103,7 @@ class SettingsWindow(QDialog):
         title_label = QLabel("地震预警及速报滚动实况")
         title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0066CC; padding-bottom: 2px;")
         layout.addWidget(title_label)
-        version_label = QLabel(f"版本 v{APP_VERSION} Beta测试版")
+        version_label = QLabel(f"版本 v{APP_VERSION}")
         version_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FF6600; padding-bottom: 6px;")
         layout.addWidget(version_label)
 
