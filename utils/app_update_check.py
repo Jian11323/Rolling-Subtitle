@@ -184,10 +184,13 @@ def _write_installer_bat(setup_exe_abs: str, *, ui_mode: str = "progress") -> st
         "timeout /t 3 /nobreak >nul",
         'if not exist "%SETUP%" goto :eof',
         f'"%SETUP%" {inno_flags}',
-        'set "L1=%ProgramFiles%\\Rolling Subtitle\\Rolling Subtitle.exe"',
-        'set "L2=%LocalAppData%\\Programs\\Rolling Subtitle\\Rolling Subtitle.exe"',
+        # 默认：Program Files (x86)；兼容旧版 Program Files / 每用户 LocalAppData
+        'set "L1=%ProgramFiles(x86)%\\Rolling Subtitle\\Rolling Subtitle.exe"',
+        'set "L2=%ProgramFiles%\\Rolling Subtitle\\Rolling Subtitle.exe"',
+        'set "L3=%LocalAppData%\\Programs\\Rolling Subtitle\\Rolling Subtitle.exe"',
         'if exist "%L1%" (start "" "%L1%" & goto :done)',
         'if exist "%L2%" (start "" "%L2%" & goto :done)',
+        'if exist "%L3%" (start "" "%L3%" & goto :done)',
         ":done",
         'del "%~f0"',
     ]

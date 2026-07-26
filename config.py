@@ -249,7 +249,8 @@ CHANGELOG_TEXT = """版本 2.7.1
 5、官方 EMSC WebSocket：复用过期过滤与 ID+MD5 去重，防止过期事件重复推送
 6、官方 HTTP 补齐 EMSC/TMD/BCSF/KMA/MMD/NRCAN/CENC
 7、修复 Wolfx 台湾预警误绑 Fan Studio 解析开关，三源溯源标记更清晰
-8、地名处理：CENC/CWA/JMA/HKO/P2P 保留原文，国外源优先 FE 修正；修复 FE 栅格 off-by-one"""
+8、地名处理：CENC/CWA/JMA/HKO/P2P 保留原文，国外源优先 FE 修正；修复 FE 栅格 off-by-one
+9、默认安装位置改为 C:\\Program Files (x86)\\Rolling Subtitle"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
