@@ -259,12 +259,19 @@ class _WAuthLoginWorker(QObject):
     """后台执行 WeJet WAuth 浏览器登录，避免卡住设置窗口。"""
 
     finished = pyqtSignal(object)
+    progress = pyqtSignal(str)
 
     def run(self) -> None:
         """执行浏览器登录流程。"""
-        from utils.wauth_login import login_with_browser
+        from utils.wauth_login import WAuthLoginResult, login_with_browser
 
-        result = login_with_browser(timeout_seconds=180.0)
+        try:
+            result = login_with_browser(
+                timeout_seconds=180.0,
+                on_status=lambda msg: self.progress.emit(str(msg or "")),
+            )
+        except Exception as e:
+            result = WAuthLoginResult(False, f"登录失败：{e}")
         self.finished.emit(result)
 
 
@@ -783,15 +790,15 @@ class SettingsWindow(QDialog):
                 if 'speed' in self.display_vars:
                     self.display_vars['speed'].setValue(int(round(g.text_speed * 10)))
                 if 'width' in self.display_vars:
-                    self.display_vars['width'].setValue(g.window_width)
+                    self.display_vars['width'].setValue(int(g.window_width))
                 if 'height' in self.display_vars:
-                    self.display_vars['height'].setValue(g.window_height)
+                    self.display_vars['height'].setValue(int(g.window_height))
                 if 'opacity' in self.display_vars:
                     self.display_vars['opacity'].setValue(int(round(g.opacity * 10)))
                 if 'vsync_enabled' in self.display_vars:
                     self.display_vars['vsync_enabled'].setChecked(g.vsync_enabled)
                 if 'target_fps' in self.display_vars:
-                    self.display_vars['target_fps'].setValue(g.target_fps)
+                    self.display_vars['target_fps'].setValue(int(g.target_fps))
                 if 'font_bold' in self.display_vars:
                     self.display_vars['font_bold'].setChecked(g.font_bold)
                 if 'font_italic' in self.display_vars:
@@ -824,8 +831,9 @@ class SettingsWindow(QDialog):
                         float(getattr(mc, 'geo_filter_longitude', 0.0) or 0.0)
                     )
                 if 'geo_filter_radius_km' in self.display_vars:
+                    # QSpinBox 需要 int；配置里可能存成 float
                     self.display_vars['geo_filter_radius_km'].setValue(
-                        float(getattr(mc, 'geo_filter_radius_km', 0.0) or 0.0)
+                        int(float(getattr(mc, 'geo_filter_radius_km', 1000) or 1000))
                     )
                 if 'watermark_text' in self.display_vars:
                     self.display_vars['watermark_text'].setText(
@@ -1197,14 +1205,14 @@ class SettingsWindow(QDialog):
         width_spin = QSpinBox()
         width_spin.setMinimum(200)
         width_spin.setMaximum(20000)  # 不受分辨率限制，允许超出屏幕
-        width_spin.setValue(min(20000, max(200, self.config.gui_config.window_width)))
+        width_spin.setValue(min(20000, max(200, int(self.config.gui_config.window_width))))
         width_spin.setStyleSheet(STYLE_SPINBOX)
         height_label = QLabel("窗口高度:")
         height_label.setStyleSheet(STYLE_LABEL)
         height_spin = QSpinBox()
         height_spin.setMinimum(50)
         height_spin.setMaximum(5000)  # 不受分辨率限制，允许超出屏幕
-        height_spin.setValue(min(5000, max(50, self.config.gui_config.window_height)))
+        height_spin.setValue(min(5000, max(50, int(self.config.gui_config.window_height))))
         height_spin.setStyleSheet(STYLE_SPINBOX)
         size_row.addWidget(width_label)
         size_row.addWidget(width_spin)
@@ -1460,7 +1468,7 @@ class SettingsWindow(QDialog):
         fps_spin = QSpinBox()
         fps_spin.setMinimum(1)
         fps_spin.setMaximum(240)
-        fps_spin.setValue(self.config.gui_config.target_fps)
+        fps_spin.setValue(int(self.config.gui_config.target_fps))
         fps_spin.setToolTip("1–240 fps。开启 VSync 时实际帧率跟随显示器。")
         fps_spin.setStyleSheet(STYLE_SPINBOX)
         # 目标帧率子组：标签 + 输入框 + 单位，内部紧凑 8px
@@ -3227,7 +3235,14 @@ class SettingsWindow(QDialog):
     def _on_whews_unified_login(self) -> None:
         """打开浏览器完成 WeJet WAuth 统一登录，自动填入 wat_ 令牌。"""
         if getattr(self, "_whews_login_worker", None) is not None:
-            show_info(self, "提示", "正在等待浏览器完成登录，请勿重复点击。")
+            show_info(
+                self,
+                "提示",
+                "正在等待浏览器完成登录。\n"
+                "请确认浏览器最终跳转到本地回调页：\n"
+                "http://127.0.0.1:18765/callback\n"
+                "（仅登录 WeJet 个人中心不算完成统一登录）",
+            )
             return
         btn = getattr(self, "whews_login_btn", None)
         status = getattr(self, "whews_login_status", None)
@@ -3240,6 +3255,10 @@ class SettingsWindow(QDialog):
         worker = _WAuthLoginWorker()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
+
+        def _on_progress(msg: str) -> None:
+            if status is not None and msg:
+                status.setText(msg)
 
         def _on_finished(result) -> None:
             """登录结束后回填令牌并清理线程。"""
@@ -3254,8 +3273,32 @@ class SettingsWindow(QDialog):
                 if ok and token and hasattr(self, "whews_token_entry"):
                     self.whews_token_entry.setText(token)
                     self.config.ws_config.whews_token = token
-                    self._mark_settings_dirty()
-                    show_info(self, "成功", f"{message}\n令牌已填入，请保存数据源设置后生效。")
+                    # 登录成功后立即落盘，避免用户只点保存但令牌尚未回填
+                    saved = False
+                    try:
+                        saved = bool(self.config.save_config())
+                    except Exception as e:
+                        logger.warning(f"统一登录后自动保存令牌失败: {e}")
+                    if saved:
+                        self._clear_settings_dirty()
+                        try:
+                            self.config._notify_config_changed()
+                        except Exception:
+                            pass
+                        if status is not None:
+                            status.setText(f"{message}（令牌已自动保存）")
+                        show_info(
+                            self,
+                            "成功",
+                            f"{message}\n令牌已写入并保存，勾选 WeJet 连接后即可生效。",
+                        )
+                    else:
+                        self._mark_settings_dirty()
+                        show_info(
+                            self,
+                            "成功",
+                            f"{message}\n令牌已填入，但自动保存失败，请再点一次「保存」。",
+                        )
                 elif not ok:
                     show_warning(
                         self,
@@ -3272,6 +3315,7 @@ class SettingsWindow(QDialog):
                 except Exception:
                     pass
 
+        worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
         self._whews_login_worker = worker
         self._whews_login_thread = thread

@@ -233,20 +233,20 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.7.2"  # 当前程序版本
+APP_VERSION = "2.7.3"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.7.2
+CHANGELOG_TEXT = """版本 2.7.3
 
-1、修复外观页「预警最少展示时长」：打开设置/重载时误把秒数写入分钟控件，保存后变成 60 分钟
-2、补齐外观相关控件从配置回填（水印、地理过滤、自定义回切等），降低改参后状态错乱
-3、非法 render_backend 回退 CPU，避免配置损坏后静默切 GPU
-4、数据源品牌更名：无界科技 → WeJet
-5、接入 WeJet WAuth 统一登录（OAuth2+PKCE），一键获取 wat_ 令牌"""
+1、修复 WeJet 统一登录在 Windows 上回调等待可能卡死，界面一直停在「正在打开浏览器」
+2、统一登录成功后自动写入并保存 wat_ 令牌，无需再单独点保存
+3、修复刷新设置控件时 QSpinBox 收到 float 导致部分项回填失败
+4、未配置 WeJet 令牌时写入 ERROR 日志，便于在 log.txt 中诊断
+5、兼容 WeJet 首连数组中偶发的非法 JSON，避免整包丢弃导致多数子源显示「未解析」"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (

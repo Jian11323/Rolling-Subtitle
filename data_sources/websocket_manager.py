@@ -471,12 +471,11 @@ class WebSocketManager:
                     logger.debug(f"[{source_name}] 收到文本 pong")
                     return
 
-            # 解析JSON
+            # 解析JSON（WeJet 首连数组偶发 updates:016 等非法前导零）
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
-                # 尝试清理特殊字符后重新解析
-                cleaned_message = re.sub(r'[\x00-\x1F]+', '', message)
+                cleaned_message = self._sanitize_json_text(message)
                 try:
                     data = json.loads(cleaned_message)
                 except (json.JSONDecodeError, ValueError, TypeError):
@@ -611,6 +610,14 @@ class WebSocketManager:
             logger.debug(f"[{source_name}] 检查发送队列失败: {e}")
 
     @staticmethod
+    def _sanitize_json_text(message: str) -> str:
+        """清理非法控制字符与 WeJet 偶发的整数前导零（如 updates:016）。"""
+        cleaned = re.sub(r"[\x00-\x1F]+", "", message if isinstance(message, str) else str(message))
+        # JSON 禁止 016 这类八进制写法；上游火山等帧偶发，导致整段首连数组失败
+        cleaned = re.sub(r'("(?:updates|Updates)"\s*:\s*)0+(\d+)\b', r"\1\2", cleaned)
+        return cleaned
+
+    @staticmethod
     def _wolfx_normalize_recv_text(message: Any) -> str:
         """将 Wolfx 收到的 WebSocket 帧统一转为 UTF-8 字符串。"""
         if isinstance(message, bytes):
@@ -634,9 +641,8 @@ class WebSocketManager:
         try:
             data = json.loads(message)
         except json.JSONDecodeError:
-            cleaned = re.sub(r"[\x00-\x1F]+", "", message)
             try:
-                data = json.loads(cleaned)
+                data = json.loads(self._sanitize_json_text(message))
             except (json.JSONDecodeError, ValueError, TypeError):
                 return False
         if not isinstance(data, dict):
@@ -756,7 +762,11 @@ class WebSocketManager:
                 if is_whews_url(url or ""):
                     token = (getattr(Config().ws_config, "whews_token", "") or "").strip()
                     if not token:
-                        logger.warning(f"[{source_name}] 未配置 WeJet 令牌，暂停连接（请统一登录或填写 wat_ 令牌）")
+                        # 文件日志只保留 DEBUG/ERROR，故用 error 确保可诊断
+                        logger.error(
+                            f"[{source_name}] 未配置 WeJet 令牌，暂停连接"
+                            "（请统一登录或填写 wat_ 令牌）"
+                        )
                         self.connection_states[url] = "unconnected"
                         await asyncio.sleep(30)
                         continue

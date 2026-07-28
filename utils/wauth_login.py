@@ -81,6 +81,9 @@ def _html_page(title: str, body: str) -> bytes:
 class _CallbackServer(HTTPServer):
     """携带授权结果的本机回调服务。"""
 
+    # 快速重试时避免 Windows 上地址占用残留
+    allow_reuse_address = True
+
     def __init__(self, server_address, RequestHandlerClass):
         super().__init__(server_address, RequestHandlerClass)
         self.auth_code: Optional[str] = None
@@ -212,6 +215,7 @@ def login_with_browser(
     timeout_seconds: float = 180.0,
     open_browser: bool = True,
     on_authorize_url: Optional[Callable[[str], None]] = None,
+    on_status: Optional[Callable[[str], None]] = None,
 ) -> WAuthLoginResult:
     """
     打开浏览器完成 WAuth 统一登录，返回 api_token（wat_…）。
@@ -220,7 +224,16 @@ def login_with_browser(
         timeout_seconds: 等待用户完成授权的最长时间
         open_browser: 是否自动打开系统浏览器
         on_authorize_url: 若提供，在打开浏览器前回调授权 URL（便于 UI 展示）
+        on_status: 可选进度文案回调（等待回调 / 换取令牌等）
     """
+    def _status(msg: str) -> None:
+        if on_status is None:
+            return
+        try:
+            on_status(msg)
+        except Exception:
+            pass
+
     client_id, _ = get_wauth_client_credentials()
     if not client_id:
         return WAuthLoginResult(False, "未配置 WAuth AppID")
@@ -246,33 +259,50 @@ def login_with_browser(
     except OSError as e:
         return WAuthLoginResult(
             False,
-            f"无法监听 {WAUTH_REDIRECT_URI}（端口可能被占用）：{e}",
+            f"无法监听 {WAUTH_REDIRECT_URI}（端口可能被占用，请关闭残留进程后重试）：{e}",
         )
 
     server.expected_state = state
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    # 用带超时的 handle_request 轮询，避免 serve_forever()+shutdown() 在 Windows 上偶发死锁
+    server.timeout = 0.5
     try:
         if on_authorize_url is not None:
             try:
                 on_authorize_url(authorize_url)
             except Exception:
                 pass
+        _status("正在打开浏览器…")
         if open_browser:
-            webbrowser.open(authorize_url)
+            opened = webbrowser.open(authorize_url)
+            if not opened:
+                _status("无法自动打开浏览器，请手动打开授权链接")
+        _status(
+            "已打开浏览器，请完成登录；成功后应跳转到本地回调页"
+            f"（{WAUTH_REDIRECT_URI}）…"
+        )
 
         deadline = time.monotonic() + max(30.0, float(timeout_seconds))
         while time.monotonic() < deadline:
-            if server.done_event.wait(timeout=0.4):
+            if server.done_event.is_set():
                 break
-        else:
-            return WAuthLoginResult(False, "等待授权超时，请重试并在浏览器中完成登录")
+            try:
+                server.handle_request()
+            except Exception:
+                # 单次 accept/处理失败不中断整个登录
+                pass
+        if not server.done_event.is_set():
+            return WAuthLoginResult(
+                False,
+                "等待授权超时。请确认浏览器最终跳转到本地回调页"
+                f"（{WAUTH_REDIRECT_URI}），而不是仅停留在 WeJet 个人中心。",
+            )
 
         if server.auth_error:
             return WAuthLoginResult(False, f"授权失败：{server.auth_error}")
         if not server.auth_code:
             return WAuthLoginResult(False, "未收到授权码")
 
+        _status("已收到授权码，正在换取令牌…")
         token_payload = _exchange_code(server.auth_code, verifier)
         # 文档约定：OAuth 登录时 token 响应自动下发应用专用 api_token（wat_…）
         api_token = str(token_payload.get("api_token") or "").strip()
@@ -302,10 +332,6 @@ def login_with_browser(
     except Exception as e:
         return WAuthLoginResult(False, f"登录失败：{e}")
     finally:
-        try:
-            server.shutdown()
-        except Exception:
-            pass
         try:
             server.server_close()
         except Exception:

@@ -1,7 +1,7 @@
 # 地震预警及情报实况栏
 
 > [!NOTE]
-> **当前版本：2.7.2**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。
+> **当前版本：2.7.3**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
