@@ -551,7 +551,7 @@ class WebSocketManager:
                         _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
             # 无界科技 /ws/all 首连为 JSON 数组
             elif isinstance(data, list) and str(data_source_type).startswith("whews"):
-                logger.info(f"[{source_name}] 收到无界科技首连数组，共 {len(data)} 帧")
+                logger.info(f"[{source_name}] 收到 WeJet 首连数组，共 {len(data)} 帧")
                 all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 for parsed_data in all_parsed_data:
                     if parsed_data:
@@ -756,7 +756,7 @@ class WebSocketManager:
                 if is_whews_url(url or ""):
                     token = (getattr(Config().ws_config, "whews_token", "") or "").strip()
                     if not token:
-                        logger.warning(f"[{source_name}] 未配置无界科技令牌，暂停连接（请在设置中填写 wat_ 令牌）")
+                        logger.warning(f"[{source_name}] 未配置 WeJet 令牌，暂停连接（请统一登录或填写 wat_ 令牌）")
                         self.connection_states[url] = "unconnected"
                         await asyncio.sleep(30)
                         continue
@@ -835,7 +835,7 @@ class WebSocketManager:
                 self._cleanup_connection(url, source_name)
                 # 无界科技鉴权失败（4401）：停止重连，避免刷令牌错误
                 if int(getattr(e, "code", 0) or 0) == 4401 and is_whews_url(url or ""):
-                    logger.error(f"[{source_name}] 无界科技鉴权失败(4401)，已停止重连，请检查令牌")
+                    logger.error(f"[{source_name}] WeJet 鉴权失败(4401)，已停止重连，请检查令牌")
                     self.enabled_sources[url] = False
                     self.connection_states[url] = "auth_failed"
                     continue
@@ -1148,7 +1148,7 @@ class WebSocketManager:
 
     async def _maybe_send_whews_auth(self, websocket: Any, url: str, source_name: str) -> None:
         """
-        无界科技建连后立即发送纯文本令牌（首帧）。
+        WeJet 建连后立即发送纯文本令牌（首帧）。
 
         若 5 秒内未发送，服务端以关闭码 4401 断开。
         """
@@ -1156,13 +1156,13 @@ class WebSocketManager:
             return
         token = (getattr(Config().ws_config, "whews_token", "") or "").strip()
         if not token:
-            logger.warning(f"[{source_name}] 无界科技令牌为空，无法鉴权")
+            logger.warning(f"[{source_name}] WeJet 令牌为空，无法鉴权")
             return
         try:
             await websocket.send(token)
-            logger.info(f"[{source_name}] 已发送无界科技纯文本令牌鉴权")
+            logger.info(f"[{source_name}] 已发送 WeJet 纯文本令牌鉴权")
         except Exception as e:
-            logger.warning(f"[{source_name}] 发送无界科技令牌失败: {e}")
+            logger.warning(f"[{source_name}] 发送 WeJet 令牌失败: {e}")
 
     async def _maybe_send_fanstudio_auth(self, websocket: Any, url: str, source_name: str) -> None:
         """
@@ -1244,7 +1244,7 @@ class WebSocketManager:
                 logger.warning(f"跳过已移除的 Fan Studio 路径: {url}")
                 continue
             if is_whews_dedicated_endpoint(url):
-                logger.debug(f"跳过已废弃的无界科技专用端点: {url}")
+                logger.debug(f"跳过已废弃的 WeJet 专用端点: {url}")
                 continue
             if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(url):
                 continue

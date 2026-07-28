@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QGroupBox,
     QSizePolicy, QStyle, QShortcut, QFileDialog, QAbstractButton,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer, QThread, QObject
 from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics, QPixmap
 from typing import Optional, Dict, Any, List, Tuple
 import re
@@ -253,6 +253,19 @@ _AUDIO_TIER_TTS = (
     ('tier_weather_cb', 'weather_tts_enabled'),
     ('tier_tsunami_cb', 'tsunami_tts_enabled'),
 )
+
+
+class _WAuthLoginWorker(QObject):
+    """后台执行 WeJet WAuth 浏览器登录，避免卡住设置窗口。"""
+
+    finished = pyqtSignal(object)
+
+    def run(self) -> None:
+        """执行浏览器登录流程。"""
+        from utils.wauth_login import login_with_browser
+
+        result = login_with_browser(timeout_seconds=180.0)
+        self.finished.emit(result)
 
 
 class SettingsWindow(QDialog):
@@ -784,9 +797,80 @@ class SettingsWindow(QDialog):
                 if 'font_italic' in self.display_vars:
                     self.display_vars['font_italic'].setChecked(g.font_italic)
                 if 'warning_min_display_seconds' in self.display_vars:
+                    # 配置存秒，控件单位为分钟（1–60）；切勿把秒数直接 setValue（会钳到 60）
+                    wm_sec = int(getattr(mc, 'warning_min_display_seconds', 300) or 300)
                     self.display_vars['warning_min_display_seconds'].setValue(
-                        getattr(mc, 'warning_min_display_seconds', 300)
+                        max(1, min(60, wm_sec // 60))
                     )
+                if 'custom_text_return_seconds' in self.display_vars:
+                    ct_sec = int(getattr(mc, 'custom_text_return_seconds', 300) or 300)
+                    self.display_vars['custom_text_return_seconds'].setValue(
+                        max(1, min(60, ct_sec // 60))
+                    )
+                if 'min_report_magnitude' in self.display_vars:
+                    self.display_vars['min_report_magnitude'].setValue(
+                        float(getattr(mc, 'min_report_magnitude', 0) or 0)
+                    )
+                if 'geo_filter_enabled' in self.display_vars:
+                    self.display_vars['geo_filter_enabled'].setChecked(
+                        bool(getattr(mc, 'geo_filter_enabled', False))
+                    )
+                if 'geo_filter_latitude' in self.display_vars:
+                    self.display_vars['geo_filter_latitude'].setValue(
+                        float(getattr(mc, 'geo_filter_latitude', 0.0) or 0.0)
+                    )
+                if 'geo_filter_longitude' in self.display_vars:
+                    self.display_vars['geo_filter_longitude'].setValue(
+                        float(getattr(mc, 'geo_filter_longitude', 0.0) or 0.0)
+                    )
+                if 'geo_filter_radius_km' in self.display_vars:
+                    self.display_vars['geo_filter_radius_km'].setValue(
+                        float(getattr(mc, 'geo_filter_radius_km', 0.0) or 0.0)
+                    )
+                if 'watermark_text' in self.display_vars:
+                    self.display_vars['watermark_text'].setText(
+                        getattr(g, 'watermark_text', '') or ''
+                    )
+                if 'watermark_font_family' in self.display_vars:
+                    wm_ff = getattr(g, 'watermark_font_family', '') or ''
+                    combo_ff = self.display_vars['watermark_font_family']
+                    idx_ff = combo_ff.findData(wm_ff) if wm_ff else -1
+                    if idx_ff >= 0:
+                        combo_ff.setCurrentIndex(idx_ff)
+                if 'watermark_font_auto' in self.display_vars and 'watermark_font_size' in self.display_vars:
+                    wm_fs = int(getattr(g, 'watermark_font_size', 0) or 0)
+                    auto_wm = wm_fs <= 0
+                    self.display_vars['watermark_font_auto'].setChecked(auto_wm)
+                    base_fs = int(getattr(g, 'font_size', 40) or 40)
+                    auto_fs = max(8, int(base_fs * 0.7))
+                    self.display_vars['watermark_font_size'].setValue(wm_fs if wm_fs > 0 else auto_fs)
+                    self.display_vars['watermark_font_size'].setEnabled(not auto_wm)
+                if 'watermark_position' in self.display_vars:
+                    pos = getattr(g, 'watermark_position', 'diagonal') or 'diagonal'
+                    combo_pos = self.display_vars['watermark_position']
+                    idx_pos = combo_pos.findData(pos)
+                    if idx_pos < 0:
+                        idx_pos = combo_pos.findData('diagonal')
+                    if idx_pos >= 0:
+                        combo_pos.setCurrentIndex(idx_pos)
+                if 'timezone' in self.display_vars:
+                    tz = getattr(g, 'timezone', 'Asia/Shanghai') or 'Asia/Shanghai'
+                    combo_tz = self.display_vars['timezone']
+                    idx_tz = combo_tz.findData(tz)
+                    if idx_tz >= 0:
+                        combo_tz.setCurrentIndex(idx_tz)
+                if 'font_size' in self.display_vars:
+                    fs = getattr(g, 'font_size', 40)
+                    combo_fs = self.display_vars['font_size']
+                    idx_fs = combo_fs.findData(fs)
+                    if idx_fs >= 0:
+                        combo_fs.setCurrentIndex(idx_fs)
+                if 'font_family' in self.display_vars:
+                    ff = getattr(g, 'font_family', '') or ''
+                    combo_family = self.display_vars['font_family']
+                    idx_family = combo_family.findData(ff) if ff else -1
+                    if idx_family >= 0:
+                        combo_family.setCurrentIndex(idx_family)
                 if 'minimize_to_tray' in self.display_vars:
                     self.display_vars['minimize_to_tray'].setChecked(
                         getattr(g, 'minimize_to_tray', False)
@@ -886,6 +970,24 @@ class SettingsWindow(QDialog):
                 use_custom = getattr(mc, 'use_custom_text', False)
                 self.radio_custom_text.setChecked(use_custom)
                 self.radio_report.setChecked(not use_custom)
+            if hasattr(self, 'show_one_alert_per_received_checkbox'):
+                self.show_one_alert_per_received_checkbox.setChecked(
+                    bool(getattr(mc, 'show_one_alert_per_received', False))
+                )
+            if hasattr(self, 'custom_text_return_after_warning_checkbox'):
+                self.custom_text_return_after_warning_checkbox.setChecked(
+                    bool(getattr(mc, 'custom_text_return_after_warning', False))
+                )
+            if hasattr(self, 'disable_warning_expiry_test_cb'):
+                self.disable_warning_expiry_test_cb.setChecked(
+                    bool(getattr(mc, 'disable_warning_expiry_for_test', False))
+                )
+            if hasattr(self, 'custom_text_edit'):
+                self.custom_text_edit.setPlainText(getattr(mc, 'custom_text', '') or '')
+            if hasattr(self, 'whews_token_entry'):
+                self.whews_token_entry.setText(
+                    getattr(self.config.ws_config, 'whews_token', '') or ''
+                )
             if hasattr(self, 'http_poll_spinboxes'):
                 for url, spin in self.http_poll_spinboxes.items():
                     spin.setValue(max(1, int(self.config.get_http_poll_interval(url))))
@@ -2515,7 +2617,7 @@ class SettingsWindow(QDialog):
             show_warning(self, "错误", "音频设置保存失败")
 
     def _create_data_source_tab(self):
-        """创建数据源设置标签页（顶部三选一：Fan Studio / 无界科技 / 官方+Wolfx）。"""
+        """创建数据源设置标签页（顶部三选一：Fan Studio / WeJet / 官方+Wolfx）。"""
         scroll_area = QScrollArea()  # 可滚动容器
         scroll_area.setWidgetResizable(True)  # 内容区随窗口宽度自适应
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 禁用横向滚动条
@@ -2561,7 +2663,7 @@ class SettingsWindow(QDialog):
         provider_row.setSpacing(24)
         self.data_provider_group = QButtonGroup(self)
         self.radio_provider_fanstudio = QRadioButton("Fan Studio")
-        self.radio_provider_whews = QRadioButton("无界科技")
+        self.radio_provider_whews = QRadioButton("WeJet")
         self.radio_provider_official = QRadioButton("官方数据源+Wolfx")
         for rb in (
             self.radio_provider_fanstudio,
@@ -2697,28 +2799,28 @@ class SettingsWindow(QDialog):
         fs_panel_layout.addWidget(group_warning)
         scroll_layout.addWidget(self.ds_panel_fanstudio)
 
-        # ---------- 无界科技面板 ----------
+        # ---------- WeJet 面板 ----------
         self.ds_panel_whews = QWidget()
         wh_panel_layout = QVBoxLayout(self.ds_panel_whews)
         wh_panel_layout.setContentsMargins(0, 0, 0, 0)
         wh_panel_layout.setSpacing(12)
 
-        group_whews = QGroupBox("无界科技")
+        group_whews = QGroupBox("WeJet")
         group_whews.setStyleSheet(STYLE_GROUPBOX)
         wh_layout = QVBoxLayout(group_whews)
         wh_layout.setContentsMargins(12, 14, 12, 12)
         wh_layout.setSpacing(12)
         wh_apply_hint = QLabel(
-            '无界科技数据源需要 WAuth 令牌鉴权。'
-            '<a href="https://auth.beecld.com/login?redirect=%2Fprofile" style="color: #4A90E2;">前往申请</a>'
-            '（登录/注册后在个人中心获取 wat_ 开头的令牌）'
+            'WeJet 数据源需要 WAuth 令牌鉴权。推荐使用下方「统一登录」自动获取；'
+            '也可<a href="https://auth.beecld.com/login?redirect=%2Fprofile" style="color: #4A90E2;">前往个人中心</a>'
+            '手动复制 wat_ 开头的令牌。'
         )
         wh_apply_hint.setOpenExternalLinks(True)
         wh_apply_hint.setStyleSheet(STYLE_HINT)
         wh_apply_hint.setWordWrap(True)
         wh_layout.addWidget(wh_apply_hint)
         wh_hint = QLabel(
-            "填写 WAuth 令牌后勾选连接；建连后以纯文本发送令牌（须在 5 秒内）。"
+            "登录或填写令牌后勾选连接；建连后以纯文本发送令牌（须在 5 秒内）。"
             "CEA / CENC 等子源均经 /ws/all 聚合流解析，由下方勾选控制。"
             "JMA 预警/情报请使用下方 P2PQuake。"
         )
@@ -2747,7 +2849,7 @@ class SettingsWindow(QDialog):
         else:
             self.radio_whews_host_primary.setChecked(True)
 
-        token_label = QLabel("无界科技令牌：")
+        token_label = QLabel("WeJet 令牌：")
         token_label.setStyleSheet(STYLE_LABEL)
         wh_layout.addWidget(token_label)
         self.whews_token_entry = QLineEdit()
@@ -2758,8 +2860,24 @@ class SettingsWindow(QDialog):
         self.whews_token_entry.setToolTip("建连后以纯文本首帧发送；5 秒内未发送则断开；鉴权失败关闭码 4401")
         wh_layout.addWidget(self.whews_token_entry)
 
+        login_row = QHBoxLayout()
+        login_row.setSpacing(8)
+        self.whews_login_btn = QPushButton("WeJet 统一登录")
+        self.whews_login_btn.setStyleSheet("font-size: 15px; padding: 6px 14px;")
+        self.whews_login_btn.setToolTip(
+            "打开浏览器完成 WAuth 登录，自动写入本应用专用 wat_ 令牌。"
+            "开发者后台须登记回调：http://127.0.0.1:18765/callback"
+        )
+        self.whews_login_btn.clicked.connect(self._on_whews_unified_login)
+        login_row.addWidget(self.whews_login_btn)
+        self.whews_login_status = QLabel("")
+        self.whews_login_status.setStyleSheet(STYLE_HINT)
+        self.whews_login_status.setWordWrap(True)
+        login_row.addWidget(self.whews_login_status, 1)
+        wh_layout.addLayout(login_row)
+
         whews_urls = self.config.get_whews_endpoint_urls(cur_host)
-        self.whews_all_connect_cb = QCheckBox("无界科技（/ws/all）")
+        self.whews_all_connect_cb = QCheckBox("WeJet（/ws/all）")
         self.whews_all_connect_cb.setChecked(
             self.config.enabled_sources.get(whews_urls.get("all", WHEWS_ALL_URL), False)
         )
@@ -2767,7 +2885,7 @@ class SettingsWindow(QDialog):
         wh_layout.addWidget(self.whews_all_connect_cb)
 
         def _wh_cb(cfg_name: str, text: str) -> QCheckBox:
-            """创建无界科技子源复选框行。"""
+            """创建 WeJet 子源复选框行。"""
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
             cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
@@ -2797,6 +2915,7 @@ class SettingsWindow(QDialog):
         self.whews_parse_cwa_cb = _wh_cb("whews_parse_cwa", "台湾气象署速报")
         self.whews_parse_hko_cb = _wh_cb("whews_parse_hko", "香港天文台速报")
         self.whews_parse_usgs_cb = _wh_cb("whews_parse_usgs", "美国地质调查局速报")
+
         self.whews_parse_emsc_cb = _wh_cb("whews_parse_emsc", "欧洲地中海地震中心速报")
         self.whews_parse_bcsf_cb = _wh_cb("whews_parse_bcsf", "法国中央地震研究所速报")
         self.whews_parse_gfz_cb = _wh_cb("whews_parse_gfz", "德国地学研究中心速报")
@@ -3100,10 +3219,63 @@ class SettingsWindow(QDialog):
         self._update_parse_status_labels()
 
     def _current_whews_host_from_ui(self) -> str:
-        """从设置页读取无界科技主机。"""
+        """从设置页读取 WeJet 主机。"""
         if hasattr(self, "radio_whews_host_backup") and self.radio_whews_host_backup.isChecked():
             return WHEWS_HOST_BACKUP
         return WHEWS_HOST_PRIMARY
+
+    def _on_whews_unified_login(self) -> None:
+        """打开浏览器完成 WeJet WAuth 统一登录，自动填入 wat_ 令牌。"""
+        if getattr(self, "_whews_login_worker", None) is not None:
+            show_info(self, "提示", "正在等待浏览器完成登录，请勿重复点击。")
+            return
+        btn = getattr(self, "whews_login_btn", None)
+        status = getattr(self, "whews_login_status", None)
+        if btn is not None:
+            btn.setEnabled(False)
+        if status is not None:
+            status.setText("正在打开浏览器，请在网页中完成登录…")
+
+        thread = QThread(self)
+        worker = _WAuthLoginWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+
+        def _on_finished(result) -> None:
+            """登录结束后回填令牌并清理线程。"""
+            try:
+                if btn is not None:
+                    btn.setEnabled(True)
+                ok = bool(getattr(result, "ok", False))
+                message = str(getattr(result, "message", "") or "")
+                token = str(getattr(result, "api_token", "") or "").strip()
+                if status is not None:
+                    status.setText(message)
+                if ok and token and hasattr(self, "whews_token_entry"):
+                    self.whews_token_entry.setText(token)
+                    self.config.ws_config.whews_token = token
+                    self._mark_settings_dirty()
+                    show_info(self, "成功", f"{message}\n令牌已填入，请保存数据源设置后生效。")
+                elif not ok:
+                    show_warning(
+                        self,
+                        "登录失败",
+                        message
+                        + "\n\n若提示 redirect_uri 无效，请在 WAuth 开发者后台为本应用登记：\n"
+                        "http://127.0.0.1:18765/callback",
+                    )
+            finally:
+                self._whews_login_worker = None
+                try:
+                    thread.quit()
+                    thread.wait(2000)
+                except Exception:
+                    pass
+
+        worker.finished.connect(_on_finished)
+        self._whews_login_worker = worker
+        self._whews_login_thread = thread
+        thread.start()
 
     def _current_data_provider_from_ui(self) -> str:
         """从设置页单选框读取当前数据源提供者。"""
@@ -4401,7 +4573,7 @@ class SettingsWindow(QDialog):
         if "ws.fanstudio.tech/all" in low:
             return "Fan Studio"
         if "api.2v8.cn/ws/all" in low or "api.beecld.com/ws/all" in low:
-            return "无界科技 all"
+            return "WeJet all"
         return source_name or url
 
     def _compute_health_percent(self, connection_state: str, heartbeat_state: str, timeout_count: int, heartbeat_age: Any, timeout_threshold: float) -> float:

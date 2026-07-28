@@ -1795,7 +1795,7 @@ class MainWindow(QMainWindow):
             logger.debug("已忽略消息：当前非 Fan Studio 提供者")
             return False
         if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
-            logger.debug("已忽略消息：当前非无界科技提供者")
+            logger.debug("已忽略消息：当前非 WeJet 提供者")
             return False
 
         fanstudio_all_url = FANSTUDIO_ALL_URL
@@ -1819,16 +1819,16 @@ class MainWindow(QMainWindow):
         if parsed_data.get("whews"):
             from config import is_whews_url
             if not any(bool(v) and is_whews_url(k) for k, v in es.items()):
-                logger.debug("已忽略消息：无界科技连接均已关闭")
+                logger.debug("已忽略消息：WeJet 连接均已关闭")
                 return False
             if st:
                 flag = WHEWS_SOURCE_FLAG_FIELD.get(st)
                 if flag and not getattr(mc, flag, True):
-                    logger.debug(f"已忽略消息：无界科技子源「{st}」解析已关闭（{flag}=False）")
+                    logger.debug(f"已忽略消息：WeJet 子源「{st}」解析已关闭（{flag}=False）")
                     return False
             # JMA 情报仅走 P2PQuake；预警（source_type=jma）随主服务
             if st in ("jma_eq",):
-                logger.debug("已忽略消息：无界科技 JMA 情报已禁用，请使用 P2PQuake")
+                logger.debug("已忽略消息：WeJet JMA 情报已禁用，请使用 P2PQuake")
                 return False
 
         wolfx_all_url = WOLFX_ALL_EEW_URL

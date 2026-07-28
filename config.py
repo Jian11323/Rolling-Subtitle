@@ -38,7 +38,7 @@ def fanstudio_http_canonical_key(url: str) -> str:
 FANSTUDIO_ALL_URL = fanstudio_ws_url("all")
 FANSTUDIO_ALL_URLS = (FANSTUDIO_ALL_URL,)
 
-# 无界科技（WHEWS）：主站 api.2v8.cn（含 CEA）；备用 api.beecld.com（无 CEA）
+# WeJet（WHEWS）：主站 api.2v8.cn（含 CEA）；备用 api.beecld.com（无 CEA）
 WHEWS_HOST_PRIMARY = "api.2v8.cn"
 WHEWS_HOST_BACKUP = "api.beecld.com"
 WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
@@ -233,24 +233,20 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.7.1"  # 当前程序版本
+APP_VERSION = "2.7.2"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.7.1
+CHANGELOG_TEXT = """版本 2.7.2
 
-1、无界科技改为独立数据解析，不再依赖 Fan Studio 解析逻辑
-2、适配无界新增源：韩国气象厅预警、NRCan、MMD、七省级地震局速报
-3、修复无界省级源（宁夏/北京/云南等）在非 Fan 提供者下被误丢弃
-4、设置页与性能预设同步新增无界子源开关
-5、官方 EMSC WebSocket：复用过期过滤与 ID+MD5 去重，防止过期事件重复推送
-6、官方 HTTP 补齐 EMSC/TMD/BCSF/KMA/MMD/NRCAN/CENC
-7、修复 Wolfx 台湾预警误绑 Fan Studio 解析开关，三源溯源标记更清晰
-8、地名处理：CENC/CWA/JMA/HKO/P2P 保留原文，国外源优先 FE 修正；修复 FE 栅格 off-by-one
-9、默认安装位置改为 C:\\Program Files (x86)\\Rolling Subtitle"""
+1、修复外观页「预警最少展示时长」：打开设置/重载时误把秒数写入分钟控件，保存后变成 60 分钟
+2、补齐外观相关控件从配置回填（水印、地理过滤、自定义回切等），降低改参后状态错乱
+3、非法 render_backend 回退 CPU，避免配置损坏后静默切 GPU
+4、数据源品牌更名：无界科技 → WeJet
+5、接入 WeJet WAuth 统一登录（OAuth2+PKCE），一键获取 wat_ 令牌"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -1165,7 +1161,7 @@ class Config:
         for url in list(self.enabled_sources.keys()):
             if is_whews_dedicated_endpoint(url):
                 if self.enabled_sources.get(url):
-                    logger.info(f"已关闭无界科技专用端点（改走 /ws/all）: {url}")
+                    logger.info(f"已关闭 WeJet 专用端点（改走 /ws/all）: {url}")
                 self.enabled_sources[url] = False
         for url in all_whews_ws_urls():
             if is_whews_dedicated_endpoint(url):
@@ -1414,7 +1410,8 @@ class Config:
                 if backend in ("cpu", "opengl"):
                     self.gui_config.render_backend = backend
                 else:
-                    self.gui_config.render_backend = "opengl"
+                    # 非法取值回退 CPU，避免配置损坏后静默切到 GPU
+                    self.gui_config.render_backend = "cpu"
                 # 根据 render_backend 同步 use_gpu_rendering，保证一致
                 self.gui_config.use_gpu_rendering = (self.gui_config.render_backend == "opengl")
                 if not self.gui_config.validate():
@@ -1959,7 +1956,7 @@ class Config:
         organization_name_mapping = {
             "custom": "自定义数据源",
             "fanstudio": "Fan Studio数据源",
-            "whews": "无界科技",
+            "whews": "WeJet",
             "whews_cea": "中国地震预警网",
             "weatheralarm": "气象预警",
             "cenc": "中国地震台网中心自动测定/正式测定",

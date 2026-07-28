@@ -1,7 +1,7 @@
 # 地震预警及情报实况栏
 
 > [!NOTE]
-> **当前版本：2.7.1**。主数据源支持 Fan Studio / 无界科技 / 官方+Wolfx 三选一；无界科技为独立解析并覆盖 api.2v8.cn 聚合源。
+> **当前版本：2.7.2**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,7 +18,7 @@
 ## 功能
 
 * 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
-* **主数据源三选一**：Fan Studio / 无界科技 / 官方数据源+Wolfx（切换时清空缓冲并重新拉取）
+* **主数据源三选一**：Fan Studio / WeJet / 官方数据源+Wolfx（切换时清空缓冲并重新拉取）
 * 全局辅助源：台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一提供者并用
 * 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA（ExpTech）、BMKG、GeoNet、INGV、PTWC 等
 * 可自定义界面样式与颜色；支持音效、TTS、NHK/JMA 独立音效与系统通知
@@ -29,9 +29,9 @@
 ## 数据来源
 
 * 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
-* 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[无界科技](https://auth.beecld.com/)
-* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、无界科技、Wolfx、Nowquake（烈度速报）
-* 气象预警：[中央气象台](https://www.nmc.cn/)、Fan Studio、无界科技
+* 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
+* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、WeJet、Wolfx、Nowquake（烈度速报）
+* 气象预警：[中央气象台](https://www.nmc.cn/)、Fan Studio、WeJet
 * 其他机构速报：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经聚合源或官方直连）
 
 ## 系统要求与性能模式
@@ -44,7 +44,7 @@
 |------|------|
 | 操作系统 | Windows 10 及以上 |
 | 内存 | 4 GB 及以上 |
-| 网络 | 稳定宽带（仅需连接 Fan Studio 或无界等核心聚合源） |
+| 网络 | 稳定宽带（仅需连接 Fan Studio 或 WeJet 等核心聚合源） |
 | 软件设置 | 设置 → 外观与显示 → 性能与渲染 → 选择 **低配模式** 并点击 **应用性能模式** |
 
 低配模式会：使用 CPU 软件渲染、30 fps、关闭闪烁/音效/Toast、减少同时连接的数据源与 HTTP 轮询频率。**地震预警显示能力保留**，主要降低 CPU、内存与网络负载。

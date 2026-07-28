@@ -605,9 +605,13 @@ class MessageProcessor:
         if updates is None and source_type == 'sa':
             updates = 1
         shock_time = data.get('shock_time', '')  # 获取发震时间
+        # JMA 特殊手法（PLUM/Level/IPF单点）深度不可靠时不展示
+        jma_omit_depth = bool(data.get("jma_omit_depth"))
         # 获取深度，如果为null或None，默认为10公里
         depth_value = data.get('depth')
-        if depth_value is None:
+        if jma_omit_depth:
+            depth = None
+        elif depth_value is None:
             depth = 10.0
         else:
             depth = self._safe_float(depth_value, 10.0)
@@ -710,9 +714,10 @@ class MessageProcessor:
             elif not place_name and magnitude == 0:
                 message_parts.append("发生地震")
             
-            # 添加深度信息（深度保留整数，所有预警都显示）
-            depth_int = int(round(depth, 0))
-            message_parts.append(f"，震源深度{depth_int}公里")
+            # 添加深度信息（深度保留整数；JMA 特殊手法省略不可靠深度）
+            if depth is not None:
+                depth_int = int(round(depth, 0))
+                message_parts.append(f"，震源深度{depth_int}公里")
             self._append_epi_intensity_after_depth(message_parts, data, source_type)
             self._append_wolfx_jma_accuracy_line(message_parts, data, source_type)
 

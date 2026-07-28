@@ -18,6 +18,7 @@ from .base_adapter import BaseAdapter
 from config import Config, WOLFX_CENC_EQLIST_URL, WOLFX_JMA_EQLIST_URL
 from utils.logger import get_logger
 from utils import timezone_utils
+from utils.jma_eew_special import classify_jma_eew_special, intensity_valid
 
 logger = get_logger()
 
@@ -396,6 +397,27 @@ class WolfxAdapter(BaseAdapter):
             issue_src = str(issue.get("Source") or issue.get("source") or "").strip()
             issue_status = str(issue.get("Status") or issue.get("status") or "").strip()
 
+        # JMA 特殊手法：PLUM / Level / IPF单点 / 深発（无效字段置空，地名前缀）
+        jma_method = ""
+        jma_omit_depth = False
+        if source_type == "wolfx_jma_eew":
+            special = classify_jma_eew_special(data)
+            jma_method = special["method"]
+            if special["is_plum"] or special["is_level"]:
+                # PLUM：M1.0/深10km 为假设值；Level：仅有预估震度
+                magnitude = 0.0
+                jma_omit_depth = True
+            elif special["is_ipf1"]:
+                # IPF 单点：仅震级可信，深度不可靠
+                jma_omit_depth = True
+            if special["is_deep"] and not intensity_valid(epi):
+                # 深层 150km+：常规法不给预估震度（PLUM 已给出则保留）
+                epi = None
+            if jma_method and place_name and not place_name.startswith(f"（{jma_method}）"):
+                place_name = f"（{jma_method}）{place_name}"
+            if jma_omit_depth:
+                depth_f = 0.0
+
         result: Dict[str, Any] = {
             "type": "warning",
             "source_type": source_type,
@@ -414,7 +436,11 @@ class WolfxAdapter(BaseAdapter):
             "fanstudio": False,
             "whews": False,
         }
-        if epi is not None and str(epi).strip() != "":
+        if jma_method:
+            result["jma_method"] = jma_method
+        if jma_omit_depth:
+            result["jma_omit_depth"] = True
+        if epi is not None and intensity_valid(epi):
             result["epiIntensity"] = epi
         if warn_area_type:
             result["warn_area_type"] = warn_area_type

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-无界科技（WHEWS：api.2v8.cn / 备用 api.beecld.com）数据源适配器。
+WeJet（WHEWS：api.2v8.cn / 备用 api.beecld.com）数据源适配器。
 
 帧格式：{"Data": {...}, "md5": "...", "source": "cenc"}
 聚合 /ws/all 首连为 JSON 数组，之后为单对象；心跳 type=heartbeat。
@@ -28,7 +28,7 @@ from utils import timezone_utils
 
 logger = get_logger()
 
-# JMA 情报仅使用 P2PQuake；预警由主服务（无界科技）解析
+# JMA 情报仅使用 P2PQuake；预警由主服务（WeJet）解析
 WHEWS_SKIP_SOURCES = frozenset({"jma"})
 
 # 七省级地震局（/ws/dzj 与 /ws/all）
@@ -244,7 +244,7 @@ def _maybe_fix_place_name(
 
 
 class WhewsAdapter(BaseAdapter):
-    """无界科技 WebSocket 适配器（独立解析）。"""
+    """WeJet WebSocket 适配器（独立解析）。"""
 
     def __init__(self, source_name: str, source_url: str):
         super().__init__(source_name, source_url)
