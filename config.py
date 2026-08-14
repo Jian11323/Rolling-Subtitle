@@ -135,6 +135,64 @@ WOLFX_VIRTUAL_SOURCE_KEYS: Tuple[str, ...] = (
 EMSC_WSS_URL = "wss://www.seismicportal.eu/standing_order/websocket"  # EMSC 实时推送
 NOWQUAKE_CENCINT_WSS_URL = "wss://api-cencint-public.nowquake.cn/websocket"  # Nowquake CENC 烈度速报
 
+# EQSC（equake.top）全局辅助数据源：以 HTTP 轮询为主（官方称 WS 不稳定）
+# 登录密钥在 https://equake.top/auth 申请；软件内自动换取 AccessToken
+EQSC_HTTP_BASE = "https://equake.top"
+EQSC_HTTP_MASTER = "https://equake.top/"  # 总开关逻辑键（不直接轮询）
+EQSC_WS_URL = "wss://equake.top:50023/"  # 保留常量；默认强制关闭，不建连
+EQSC_JMA_EEW_HTTP = f"{EQSC_HTTP_BASE}/jma_eew.json"
+EQSC_JMA_REPORT_HTTP = f"{EQSC_HTTP_BASE}/jma_report.json"
+EQSC_JMA_TSUNAMI_HTTP = f"{EQSC_HTTP_BASE}/jma_tsunami.json"
+EQSC_CENC_HTTP = f"{EQSC_HTTP_BASE}/eqlistCENC.json?limit=2"
+EQSC_CENC_IR_HTTP = f"{EQSC_HTTP_BASE}/listIntensityReportCENC.json?limit=2"
+EQSC_CWA_HTTP = f"{EQSC_HTTP_BASE}/eqlistCWA.json?limit=2"
+EQSC_HKO_HTTP = f"{EQSC_HTTP_BASE}/eqlistHKO.json?limit=2"
+EQSC_USGS_HTTP = f"{EQSC_HTTP_BASE}/eqlistUSGS4.json?limit=2"  # level4：M≥4.5
+EQSC_EMSC_HTTP = f"{EQSC_HTTP_BASE}/eqlistEMSC4.json?limit=2"
+EQSC_TYPHOON_HTTP = f"{EQSC_HTTP_BASE}/typhoonNMC.json"
+EQSC_VOLCANO_HTTP = f"{EQSC_HTTP_BASE}/volcanoJMA.json"
+EQSC_HTTP_SOURCE_KEYS: List[str] = [
+    EQSC_JMA_EEW_HTTP,
+    EQSC_JMA_REPORT_HTTP,
+    EQSC_JMA_TSUNAMI_HTTP,
+    EQSC_CENC_HTTP,
+    EQSC_CENC_IR_HTTP,
+    EQSC_CWA_HTTP,
+    EQSC_HKO_HTTP,
+    EQSC_USGS_HTTP,
+    EQSC_EMSC_HTTP,
+    EQSC_TYPHOON_HTTP,
+    EQSC_VOLCANO_HTTP,
+]
+# HTTP URL -> API scope（供适配器识别）
+EQSC_HTTP_URL_TO_SCOPE: Dict[str, str] = {
+    EQSC_JMA_EEW_HTTP: "jma_eew",
+    EQSC_JMA_REPORT_HTTP: "jma_report",
+    EQSC_JMA_TSUNAMI_HTTP: "jma_tsunami",
+    EQSC_CENC_HTTP: "eqlistCENC",
+    EQSC_CENC_IR_HTTP: "listIntensityReportCENC",
+    EQSC_CWA_HTTP: "eqlistCWA",
+    EQSC_HKO_HTTP: "eqlistHKO",
+    EQSC_USGS_HTTP: "eqlistUSGS",
+    EQSC_EMSC_HTTP: "eqlistEMSC",
+    EQSC_TYPHOON_HTTP: "typhoonNMC",
+    EQSC_VOLCANO_HTTP: "volcanoJMA",
+}
+# MessageConfig 解析开关 -> HTTP URL
+EQSC_PARSE_FLAG_TO_URL: Dict[str, str] = {
+    "eqsc_parse_jma_eew": EQSC_JMA_EEW_HTTP,
+    "eqsc_parse_jma_report": EQSC_JMA_REPORT_HTTP,
+    "eqsc_parse_jma_tsunami": EQSC_JMA_TSUNAMI_HTTP,
+    "eqsc_parse_cenc": EQSC_CENC_HTTP,
+    "eqsc_parse_cenc_ir": EQSC_CENC_IR_HTTP,
+    "eqsc_parse_cwa": EQSC_CWA_HTTP,
+    "eqsc_parse_hko": EQSC_HKO_HTTP,
+    "eqsc_parse_usgs": EQSC_USGS_HTTP,
+    "eqsc_parse_emsc": EQSC_EMSC_HTTP,
+    "eqsc_parse_typhoon": EQSC_TYPHOON_HTTP,
+    "eqsc_parse_volcano": EQSC_VOLCANO_HTTP,
+}
+
 WS_URL_CANONICAL_ORDER: List[str] = [  # 官方数据源+Wolfx 固定连接顺序
     P2PQUAKE_WSS_URL,  # P2PQuake WSS
     WOLFX_ALL_EEW_URL,  # Wolfx 聚合（除 CWA 外全部）
@@ -216,10 +274,26 @@ DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
     FANSTUDIO_TYPHOON_HTTP: 600,
     "https://api.p2pquake.net/v2/history?codes=551&limit=3": 2,
     "https://api.p2pquake.net/v2/jma/tsunami?limit=1": 2,
+    # EQSC：预警 1s；速报按品类（海啸稍密，台风/火山较疏）
+    EQSC_JMA_EEW_HTTP: 1,
+    EQSC_JMA_REPORT_HTTP: 30,
+    EQSC_JMA_TSUNAMI_HTTP: 15,
+    EQSC_CENC_HTTP: 30,
+    EQSC_CENC_IR_HTTP: 30,
+    EQSC_CWA_HTTP: 30,
+    EQSC_HKO_HTTP: 60,
+    EQSC_USGS_HTTP: 60,
+    EQSC_EMSC_HTTP: 60,
+    EQSC_TYPHOON_HTTP: 300,
+    EQSC_VOLCANO_HTTP: 300,
 }
 
 ALL_KNOWN_HTTP_SOURCE_KEYS: List[str] = (
-    P2PQUAKE_HTTP_SOURCE_KEYS + FANSTUDIO_HTTP_SOURCE_KEYS + NEW_HTTP_SOURCE_KEYS
+    P2PQUAKE_HTTP_SOURCE_KEYS
+    + FANSTUDIO_HTTP_SOURCE_KEYS
+    + NEW_HTTP_SOURCE_KEYS
+    + [EQSC_HTTP_MASTER]
+    + EQSC_HTTP_SOURCE_KEYS
 )
 
 
@@ -233,20 +307,22 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.7.3"  # 当前程序版本
+APP_VERSION = "2.8.0"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.7.3
+CHANGELOG_TEXT = """版本 2.8.0
 
-1、修复 WeJet 统一登录在 Windows 上回调等待可能卡死，界面一直停在「正在打开浏览器」
-2、统一登录成功后自动写入并保存 wat_ 令牌，无需再单独点保存
-3、修复刷新设置控件时 QSpinBox 收到 float 导致部分项回填失败
-4、未配置 WeJet 令牌时写入 ERROR 日志，便于在 log.txt 中诊断
-5、兼容 WeJet 首连数组中偶发的非法 JSON，避免整包丢弃导致多数子源显示「未解析」"""
+1、自定义背景：内置预设或上传裁切，可调模糊与遮罩
+2、无边框模式，左键拖拽移动窗口
+3、新增 EQSC数据源作为辅助数据源
+4、WeJet 新增海外海啸与多国速报；
+5、气象预警可按关注地区与黄/橙/红过滤（不受震级限制）
+6、敏感密钥落盘加密
+7、设置页浅色主题微调；「透明度」改为「不透明度」"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -280,6 +356,11 @@ class GUIConfig:
     use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
     render_backend: str = "cpu"  # "cpu" | "opengl"，默认 cpu
     always_on_top: bool = False  # 窗口置顶
+    borderless: bool = False  # 无边框模式（FramelessWindowHint）
+    # 自定义背景图：存 AppData/subtitl/backgrounds/ 下文件名或绝对路径；空=纯色 bg_color
+    background_image_path: str = ""
+    background_blur_radius: int = 12  # 毛玻璃模糊半径，0=关闭
+    background_overlay_opacity: float = 0.35  # 背景半透明遮罩（保证字幕可读）
     watermark_text: str = ""  # 背景水印文字，空则不显示
     watermark_angle: str = "horizontal"  # 水印方向："horizontal" 横向，"45" 斜向45度
     watermark_font_family: str = ""  # 水印字体族名，空表示跟随主字体
@@ -303,7 +384,7 @@ class GUIConfig:
         try:
             assert 10 <= self.font_size <= 100, "字体大小必须在10-100之间"
             assert 0.1 <= self.text_speed <= 20.0, "滚动速度必须在0.1-20.0之间"
-            assert 0.1 <= self.opacity <= 1.0, "透明度必须在0.1-1.0之间"
+            assert 0.1 <= self.opacity <= 1.0, "不透明度必须在0.1-1.0之间"
             # 窗口尺寸不受系统分辨率限制，允许超出屏幕；仅做合理范围校验
             assert 800 <= self.window_width <= 20000, "窗口宽度必须在800-20000之间"
             assert 100 <= self.window_height <= 5000, "窗口高度必须在100-5000之间"
@@ -321,6 +402,18 @@ class GUIConfig:
             if pm not in ("low", "standard", "high", "custom"):
                 pm = "standard"
             self.performance_mode = pm
+            self.borderless = bool(getattr(self, "borderless", False))
+            try:
+                br = int(getattr(self, "background_blur_radius", 12) or 0)
+                self.background_blur_radius = max(0, min(40, br))
+            except (TypeError, ValueError):
+                self.background_blur_radius = 12
+            try:
+                ov = float(getattr(self, "background_overlay_opacity", 0.35) or 0.0)
+                self.background_overlay_opacity = max(0.0, min(0.9, ov))
+            except (TypeError, ValueError):
+                self.background_overlay_opacity = 0.35
+            self.background_image_path = str(getattr(self, "background_image_path", "") or "").strip()
             if getattr(self, 'watermark_angle', 'horizontal') not in ("horizontal", "45"):
                 self.watermark_angle = "horizontal"
             try:
@@ -386,6 +479,18 @@ class MessageConfig:
     ali_all_parse_jma_volcano: bool = True  # 解析 福建省地震局预警
     ali_all_parse_bmkg: bool = True         # 解析 中国地震台网地震预警
     ali_all_parse_cq_eew: bool = True       # 解析 重庆市地震局预警
+    # EQSC（equake.top）全局辅助源：勾选则解析对应类型
+    eqsc_parse_jma_eew: bool = True
+    eqsc_parse_jma_report: bool = True
+    eqsc_parse_jma_tsunami: bool = True
+    eqsc_parse_cenc: bool = True
+    eqsc_parse_cenc_ir: bool = True
+    eqsc_parse_cwa: bool = True
+    eqsc_parse_hko: bool = True
+    eqsc_parse_usgs: bool = True
+    eqsc_parse_emsc: bool = True
+    eqsc_parse_typhoon: bool = True
+    eqsc_parse_volcano: bool = False  # 数据量大，默认关闭
     warning_color: str = '#FF0000'  # 红色
     report_color: str = '#00FFFF'  # 青色
     custom_text_color: str = '#01FF00'  # 自定义文本颜色（绿色，与默认颜色一致）
@@ -456,17 +561,21 @@ class MessageConfig:
     whews_parse_nrcan: bool = True
     whews_parse_mmd: bool = True
     whews_parse_kma_eew: bool = True
-    whews_parse_fujian: bool = True
     whews_parse_beijing: bool = True
-    whews_parse_sichuan: bool = True
     whews_parse_yunnan: bool = True
     whews_parse_ningxia: bool = True
-    whews_parse_shaanxi: bool = True
-    whews_parse_hubei: bool = True
     whews_parse_jma: bool = True  # 残留项：JMA 情报仅走 P2PQuake，保存时强制 False
     whews_parse_jma_volcano: bool = True  # 无界科技 source=va 火山情报
     whews_parse_tsunami: bool = True
     whews_parse_weatheralarm: bool = True
+    whews_parse_phivolcs: bool = True
+    whews_parse_sgc: bool = True
+    whews_parse_ga: bool = True
+    whews_parse_cenais: bool = True
+    whews_parse_ntwc: bool = True
+    whews_parse_ptwc: bool = True
+    whews_parse_incois: bool = True
+    whews_parse_jma_tsunami: bool = True
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報）；HTTP 聚合拉取逻辑不变
     p2pquake_parse_551: bool = True
     p2pquake_parse_552: bool = True
@@ -477,6 +586,11 @@ class MessageConfig:
     geo_filter_latitude: float = 39.9042
     geo_filter_longitude: float = 116.4074
     geo_filter_radius_km: float = 1000.0
+    # 气象预警过滤：地区（市/县/区，逗号分隔）与等级档位
+    weather_region_filter_enabled: bool = False
+    weather_region_filter: str = ""
+    # none=不过滤 / yellow_up=黄及以上 / orange_up=橙及以上 / red=仅红色
+    weather_level_filter: str = "none"
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -499,6 +613,11 @@ class MessageConfig:
             self.disable_warning_expiry_for_test = bool(
                 getattr(self, "disable_warning_expiry_for_test", False)
             )
+            # 气象预警等级档位：不过滤 / 黄及以上 / 橙及以上 / 仅红
+            _wl = (getattr(self, "weather_level_filter", "none") or "none").strip().lower()
+            if _wl not in ("none", "yellow_up", "orange_up", "red"):
+                _wl = "none"
+            self.weather_level_filter = _wl
             return True
         except AssertionError as e:
             logger.error(f"消息配置验证失败: {e}")
@@ -684,6 +803,8 @@ class WebSocketConfig:
     fanstudio_api_key: str = ""
     # 无界科技 WAuth 令牌（wat_…）；建连后以纯文本首帧发送，须在 5 秒内
     whews_token: str = ""
+    # EQSC 登录密钥（https://equake.top/auth）；软件内自动换取 Refresh/Access Token
+    eqsc_login_token: str = ""
     # 无界科技主机：api.2v8.cn（主站，含 CEA）/ api.beecld.com（备用，无 CEA）
     whews_host: str = WHEWS_HOST_PRIMARY
 
@@ -854,6 +975,12 @@ class Config:
                 'use_gpu_rendering': self.gui_config.use_gpu_rendering,
                 'render_backend': self.gui_config.render_backend,
                 'always_on_top': self.gui_config.always_on_top,
+                'borderless': getattr(self.gui_config, 'borderless', False),
+                'background_image_path': getattr(self.gui_config, 'background_image_path', "") or "",
+                'background_blur_radius': int(getattr(self.gui_config, 'background_blur_radius', 12) or 0),
+                'background_overlay_opacity': float(
+                    getattr(self.gui_config, 'background_overlay_opacity', 0.35) or 0.0
+                ),
                 'watermark_text': self.gui_config.watermark_text,
                 'watermark_angle': self.gui_config.watermark_angle,
                 'watermark_font_family': getattr(self.gui_config, 'watermark_font_family', ""),
@@ -914,6 +1041,17 @@ class Config:
                 'ali_all_parse_jma_volcano': getattr(self.message_config, 'ali_all_parse_jma_volcano', True),
                 'ali_all_parse_bmkg': getattr(self.message_config, 'ali_all_parse_bmkg', True),
                 'ali_all_parse_cq_eew': getattr(self.message_config, 'ali_all_parse_cq_eew', True),
+                'eqsc_parse_jma_eew': getattr(self.message_config, 'eqsc_parse_jma_eew', True),
+                'eqsc_parse_jma_report': getattr(self.message_config, 'eqsc_parse_jma_report', True),
+                'eqsc_parse_jma_tsunami': getattr(self.message_config, 'eqsc_parse_jma_tsunami', True),
+                'eqsc_parse_cenc': getattr(self.message_config, 'eqsc_parse_cenc', True),
+                'eqsc_parse_cenc_ir': getattr(self.message_config, 'eqsc_parse_cenc_ir', True),
+                'eqsc_parse_cwa': getattr(self.message_config, 'eqsc_parse_cwa', True),
+                'eqsc_parse_hko': getattr(self.message_config, 'eqsc_parse_hko', True),
+                'eqsc_parse_usgs': getattr(self.message_config, 'eqsc_parse_usgs', True),
+                'eqsc_parse_emsc': getattr(self.message_config, 'eqsc_parse_emsc', True),
+                'eqsc_parse_typhoon': getattr(self.message_config, 'eqsc_parse_typhoon', True),
+                'eqsc_parse_volcano': getattr(self.message_config, 'eqsc_parse_volcano', False),
                 'p2pquake_parse_551': getattr(self.message_config, 'p2pquake_parse_551', True),
                 'p2pquake_parse_552': getattr(self.message_config, 'p2pquake_parse_552', True),
                 'warning_color': self.message_config.warning_color,
@@ -979,22 +1117,31 @@ class Config:
                 'whews_parse_nrcan': getattr(self.message_config, 'whews_parse_nrcan', True),
                 'whews_parse_mmd': getattr(self.message_config, 'whews_parse_mmd', True),
                 'whews_parse_kma_eew': getattr(self.message_config, 'whews_parse_kma_eew', True),
-                'whews_parse_fujian': getattr(self.message_config, 'whews_parse_fujian', True),
                 'whews_parse_beijing': getattr(self.message_config, 'whews_parse_beijing', True),
-                'whews_parse_sichuan': getattr(self.message_config, 'whews_parse_sichuan', True),
                 'whews_parse_yunnan': getattr(self.message_config, 'whews_parse_yunnan', True),
                 'whews_parse_ningxia': getattr(self.message_config, 'whews_parse_ningxia', True),
-                'whews_parse_shaanxi': getattr(self.message_config, 'whews_parse_shaanxi', True),
-                'whews_parse_hubei': getattr(self.message_config, 'whews_parse_hubei', True),
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
                 'whews_parse_jma_volcano': getattr(self.message_config, 'whews_parse_jma_volcano', True),
                 'whews_parse_tsunami': getattr(self.message_config, 'whews_parse_tsunami', True),
                 'whews_parse_weatheralarm': getattr(self.message_config, 'whews_parse_weatheralarm', True),
+                'whews_parse_phivolcs': getattr(self.message_config, 'whews_parse_phivolcs', True),
+                'whews_parse_sgc': getattr(self.message_config, 'whews_parse_sgc', True),
+                'whews_parse_ga': getattr(self.message_config, 'whews_parse_ga', True),
+                'whews_parse_cenais': getattr(self.message_config, 'whews_parse_cenais', True),
+                'whews_parse_ntwc': getattr(self.message_config, 'whews_parse_ntwc', True),
+                'whews_parse_ptwc': getattr(self.message_config, 'whews_parse_ptwc', True),
+                'whews_parse_incois': getattr(self.message_config, 'whews_parse_incois', True),
+                'whews_parse_jma_tsunami': getattr(self.message_config, 'whews_parse_jma_tsunami', True),
                 'min_report_magnitude': getattr(self.message_config, 'min_report_magnitude', 0.0),
                 'geo_filter_enabled': getattr(self.message_config, 'geo_filter_enabled', False),
                 'geo_filter_latitude': getattr(self.message_config, 'geo_filter_latitude', 39.9042),
                 'geo_filter_longitude': getattr(self.message_config, 'geo_filter_longitude', 116.4074),
                 'geo_filter_radius_km': getattr(self.message_config, 'geo_filter_radius_km', 1000.0),
+                'weather_region_filter_enabled': getattr(
+                    self.message_config, 'weather_region_filter_enabled', False
+                ),
+                'weather_region_filter': getattr(self.message_config, 'weather_region_filter', '') or '',
+                'weather_level_filter': getattr(self.message_config, 'weather_level_filter', 'none') or 'none',
             },
             'ALERT_CONFIG': {
                 'enabled': self.alert_config.enabled,
@@ -1054,6 +1201,7 @@ class Config:
                 'startup_stagger_seconds': self.ws_config.startup_stagger_seconds,
                 'fanstudio_api_key': getattr(self.ws_config, 'fanstudio_api_key', '') or '',
                 'whews_token': getattr(self.ws_config, 'whews_token', '') or '',
+                'eqsc_login_token': getattr(self.ws_config, 'eqsc_login_token', '') or '',
                 'whews_host': normalize_whews_host(
                     getattr(self.ws_config, 'whews_host', WHEWS_HOST_PRIMARY)
                 ),
@@ -1104,6 +1252,36 @@ class Config:
         """
         for u in P2PQUAKE_HTTP_SOURCE_KEYS:
             self.enabled_sources[u] = False
+
+    def _disable_eqsc_ws(self) -> None:
+        """EQSC 官方称 WebSocket 不稳定，强制关闭 WS 建连，仅用 HTTP。"""
+        if EQSC_WS_URL in self.enabled_sources and self.enabled_sources.get(EQSC_WS_URL):
+            logger.info("已关闭 EQSC WebSocket（改用 HTTP 轮询）")
+        self.enabled_sources[EQSC_WS_URL] = False
+
+    def _ensure_eqsc_http_defaults(self) -> None:
+        """补全 EQSC HTTP 总开关与子源缺项；同步解析开关→启用状态；强制关 WS。"""
+        # 旧配置若曾打开 WS，迁移为 HTTP 总开关
+        if self.enabled_sources.pop(EQSC_WS_URL, False):
+            if not self.enabled_sources.get(EQSC_HTTP_MASTER, False):
+                self.enabled_sources[EQSC_HTTP_MASTER] = True
+                logger.info("已将 EQSC WebSocket 开关迁移为 HTTP 总开关")
+        self._disable_eqsc_ws()
+        if EQSC_HTTP_MASTER not in self.enabled_sources:
+            self.enabled_sources[EQSC_HTTP_MASTER] = False
+        for url in EQSC_HTTP_SOURCE_KEYS:
+            if url not in self.enabled_sources:
+                self.enabled_sources[url] = False
+        self._sync_eqsc_http_from_parse_flags()
+
+    def _sync_eqsc_http_from_parse_flags(self) -> None:
+        """按总开关 + eqsc_parse_* 同步各 EQSC HTTP 子源启用状态。"""
+        master = bool(self.enabled_sources.get(EQSC_HTTP_MASTER, False))
+        mc = self.message_config
+        for flag, url in EQSC_PARSE_FLAG_TO_URL.items():
+            parse_on = bool(getattr(mc, flag, flag != "eqsc_parse_volcano"))
+            self.enabled_sources[url] = bool(master and parse_on)
+        self._disable_eqsc_ws()
 
     def _allowed_public_ws_urls(self) -> set:
         """公开版允许持久化/连接的 WebSocket URL 集合（含 Wolfx 列表逻辑键）。"""
@@ -1192,6 +1370,9 @@ class Config:
             return True
         # CENC 烈度速报（Nowquake）：任意提供者下均可连接
         if u == NOWQUAKE_CENCINT_WSS_URL or "nowquake.cn" in low:
+            return True
+        # EQSC HTTP：全局辅助源（总开关或任一子源启用即视为活动）
+        if "equake.top" in low:
             return True
         # 台风 HTTP：任意提供者下均可轮询（全局辅助源，与主提供者解耦）
         if (
@@ -1342,10 +1523,16 @@ class Config:
         return changed
     
     def _write_config_dict(self, config_data: Dict[str, Any]) -> bool:
-        """将配置 dict 原子写入配置文件。"""
+        """将配置 dict 原子写入配置文件（敏感字段 DPAPI 加密后落盘）。"""
         if not self.config_file:
             return False
         import shutil
+        try:
+            from utils.secret_store import protect_secrets_in_config_dict
+
+            config_data = protect_secrets_in_config_dict(config_data)
+        except Exception as e:
+            logger.warning(f"敏感配置加密失败，将按明文写入: {e}")
         temp_file = self.config_file.with_suffix('.tmp')
         try:
             with open(temp_file, 'w', encoding='utf-8') as f:
@@ -1377,6 +1564,14 @@ class Config:
                 logger.warning(f"读取配置文件失败: {e}，使用默认配置")
                 self._apply_default_config()
                 return False
+
+            # 敏感字段：磁盘可能为 DPAPI 密文，加载时还原为明文供内存使用
+            try:
+                from utils.secret_store import reveal_secrets_in_config_dict
+
+                reveal_secrets_in_config_dict(config_data)
+            except Exception as e:
+                logger.warning(f"敏感配置解密失败(可忽略): {e}")
             
             # 版本不一致或缺少版本时，仅备份并继续按 section 合并加载（缺项补全，保留用户自定义）
             saved_version = config_data.get('config_version') or config_data.get('app_version') or ''
@@ -1605,6 +1800,7 @@ class Config:
             self._sync_p2pquake_http_with_wss()
             self._ensure_new_http_source_defaults()
             self._ensure_whews_source_defaults()
+            self._ensure_eqsc_http_defaults()
 
             # 根据服务器选择更新URL
             self._cleanup_invalid_fanstudio_ws_sources()
@@ -1774,6 +1970,7 @@ class Config:
         self.data_provider = DATA_PROVIDER_FANSTUDIO
         self._ensure_new_http_source_defaults()
         self._ensure_whews_source_defaults()
+        self._ensure_eqsc_http_defaults()
         self._ensure_http_poll_interval_defaults()
         self._enforce_public_ws_sources()
 
@@ -1889,6 +2086,18 @@ class Config:
             MMD_HTTP_URL: "mmd",
             NRCAN_HTTP_URL: "nrcan",
             CENC_HTTP_URL: "cenc",
+            EQSC_HTTP_MASTER: "eqsc",
+            EQSC_JMA_EEW_HTTP: "eqsc_jma_eew",
+            EQSC_JMA_REPORT_HTTP: "eqsc_jma_report",
+            EQSC_JMA_TSUNAMI_HTTP: "eqsc_jma_tsunami",
+            EQSC_CENC_HTTP: "eqsc_cenc",
+            EQSC_CENC_IR_HTTP: "eqsc_cenc_ir",
+            EQSC_CWA_HTTP: "eqsc_cwa",
+            EQSC_HKO_HTTP: "eqsc_hko",
+            EQSC_USGS_HTTP: "eqsc_usgs",
+            EQSC_EMSC_HTTP: "eqsc_emsc",
+            EQSC_TYPHOON_HTTP: "eqsc_typhoon",
+            EQSC_VOLCANO_HTTP: "eqsc_volcano",
         }
         if normalized_url in http_url_to_name:
             return http_url_to_name[normalized_url]
@@ -2009,7 +2218,26 @@ class Config:
             "tmd": "泰国地震局",
             "early_est": "Early-est",
             "jma_volcano": "日本气象厅火山情报",
+            "eqsc": "EQSC",
+            "eqsc_jma_eew": "日本气象厅（EQSC）",
+            "eqsc_jma_report": "日本气象厅地震情报（EQSC）",
+            "eqsc_jma_tsunami": "日本气象厅海啸情报（EQSC）",
+            "eqsc_cenc": "中国地震台网中心（EQSC）",
+            "eqsc_cenc_ir": "中国地震台网中心烈度速报（EQSC）",
+            "eqsc_cwa": "台湾中央气象署（EQSC）",
+            "eqsc_hko": "香港天文台（EQSC）",
+            "eqsc_usgs": "美国地质调查局（EQSC）",
+            "eqsc_emsc": "欧洲地中海地震中心（EQSC）",
+            "eqsc_typhoon": "中央气象台台风（EQSC）",
+            "eqsc_volcano": "日本气象厅火山（EQSC）",
             "ptwc": "太平洋海啸预警中心 (PTWC)",
+            "ntwc": "美国国家海啸预警中心 (NTWC)",
+            "incois": "印度海啸早期预警中心 (INCOIS)",
+            "jma_tsunami": "日本气象厅海啸预警",
+            "phivolcs": "菲律宾火山地震研究所",
+            "sgc": "哥伦比亚地质服务局",
+            "ga": "澳大利亚地球科学局",
+            "cenais": "古巴国家地震研究中心",
         }
         
         return organization_name_mapping.get(source_name, source_name)

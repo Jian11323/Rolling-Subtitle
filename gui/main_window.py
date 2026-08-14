@@ -15,8 +15,8 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QMenu, QApplication,
     QDialog, QLabel, QScrollArea, QPushButton, QFrame, QSystemTrayIcon, QAction,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
-from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint, QEvent
+from PyQt5.QtGui import QIcon, QResizeEvent, QMoveEvent, QMouseEvent
 from typing import Dict, Any, Optional, Union, List, Tuple, Set
 
 # 添加项目根目录到路径
@@ -54,12 +54,15 @@ from config import (
     WOLFX_JMA_EQLIST_URL,
     EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
+    EQSC_HTTP_MASTER,
+    EQSC_HTTP_SOURCE_KEYS,
     DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_OFFICIAL,
 )
 from adapters.fanstudio_adapter import FanStudioAdapter
 from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
+from adapters.eqsc_adapter import EQSC_PARSE_FLAG, EQSC_DIRECT_SOURCE_TYPES
 from data_sources import WebSocketManager, HTTPPollingManager
 from utils.message_processor import MessageProcessor
 from utils.logger import get_logger
@@ -88,6 +91,18 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "p2pquake",
     "p2pquake_ws",
     "p2pquake_tsunami",
+    # EQSC 各子源（全局辅助 HTTP）
+    "eqsc_jma_eew",
+    "eqsc_jma_report",
+    "eqsc_jma_tsunami",
+    "eqsc_cenc",
+    "eqsc_cenc_ir",
+    "eqsc_cwa",
+    "eqsc_hko",
+    "eqsc_usgs",
+    "eqsc_emsc",
+    "eqsc_typhoon",
+    "eqsc_volcano",
 }
 # 仅 Fan Studio 聚合通道会出现的子源（无界/官方直连不会产出）
 _FANSTUDIO_ONLY_SOURCES: Set[str] = {
@@ -102,6 +117,7 @@ _MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
     "source_type",
     "fanstudio",
     "whews",
+    "eqsc",
     "type",
     "event_id",
     "is_tsunami",
@@ -252,10 +268,10 @@ class MainWindow(QMainWindow):
             logger.info("后台任务已启动")
             # 预弹一次右键菜单（离屏并立即隐藏），消化首次 popup 的初始化，避免用户第一次右键时卡顿
             QTimer.singleShot(300, self._warm_up_context_menu)
-            # 后台预创建设置窗口，避免首次打开时构建复杂UI导致明显卡顿
-            QTimer.singleShot(1000, self._precreate_settings_window)
-            # 更新说明弹窗（每个版本仅展示一次，延后到预创建之后避免被抢焦点）
-            QTimer.singleShot(1500, self._show_changelog_if_needed)
+            # 预热设置页（导入/字体 + 预创建隐藏窗口），约 1.5s 后完成则首次打开可秒开
+            QTimer.singleShot(1500, self._warm_up_settings_assets)
+            # 更新说明弹窗（每个版本仅展示一次）
+            QTimer.singleShot(800, self._show_changelog_if_needed)
             self._setup_system_tray()
             set_tray_icon_provider(lambda: self._tray_icon)
         except Exception as e:
@@ -326,9 +342,19 @@ class MainWindow(QMainWindow):
                 logger.error(f"创建 AlertController 失败: {e}")
                 self.alert_controller = None
             
-            # 设置样式
-            self.setStyleSheet(f"background-color: {self.config.gui_config.bg_color};")
-            self._apply_always_on_top()
+            # 仅限定主窗口自身，避免无选择器 background 级联进设置等子对话框导致黑块
+            self.setStyleSheet(
+                f"QMainWindow {{ background-color: {self.config.gui_config.bg_color}; }}"
+            )
+            # 启动时同步不透明度（否则仅在保存触发 _on_config_changed 后才生效）
+            try:
+                startup_opacity = float(getattr(self.config.gui_config, "opacity", 1.0) or 1.0)
+                startup_opacity = max(0.1, min(1.0, startup_opacity))
+                self.setWindowOpacity(startup_opacity)
+            except Exception as e_op:
+                logger.debug(f"启动时应用窗口不透明度失败: {e_op}")
+            self._drag_offset = None  # 无边框模式下拖拽偏移
+            self._apply_window_chrome()
             
             # 窗口位置：已保存则恢复，否则居中
             g = self.config.gui_config
@@ -346,6 +372,8 @@ class MainWindow(QMainWindow):
                 scroll_widget.customContextMenuRequested.connect(
                     lambda pos: self._show_context_menu(pos, scroll_widget)
                 )
+                # 无边框拖拽：滚动区占满窗口，需转发鼠标事件
+                scroll_widget.installEventFilter(self)
             
             logger.debug("用户界面初始化完成")
             
@@ -354,19 +382,103 @@ class MainWindow(QMainWindow):
             raise
     
     def _apply_always_on_top(self):
-        """根据配置设置主窗口置顶"""
+        """根据配置设置主窗口置顶（兼容旧调用；实际与无边框一并应用）。"""
+        self._apply_window_chrome()
+
+    def _apply_window_chrome(self):
+        """应用置顶 + 无边框窗口标志；标志变化后需 show() 才能生效。"""
         try:
-            on_top = bool(getattr(self.config.gui_config, 'always_on_top', False))
+            on_top = bool(getattr(self.config.gui_config, "always_on_top", False))
+            borderless = bool(getattr(self.config.gui_config, "borderless", False))
             flags = self.windowFlags()
-            has_hint = bool(flags & Qt.WindowStaysOnTopHint)
-            if on_top and not has_hint:
-                self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            # 保留窗口类型位，只调整置顶/无边框
+            base = Qt.Window
+            desired = base
+            if borderless:
+                desired |= Qt.FramelessWindowHint
+            if on_top:
+                desired |= Qt.WindowStaysOnTopHint
+            # 保留最小化/关闭等常用 hint（若当前已有）
+            for hint in (Qt.WindowMinimizeButtonHint, Qt.WindowMaximizeButtonHint, Qt.WindowCloseButtonHint, Qt.WindowSystemMenuHint, Qt.WindowTitleHint):
+                if (flags & hint) and not borderless:
+                    desired |= hint
+            if not borderless:
+                desired |= Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint
+            # 比较关键标志是否变化
+            cur_top = bool(flags & Qt.WindowStaysOnTopHint)
+            cur_frame = bool(flags & Qt.FramelessWindowHint)
+            if cur_top == on_top and cur_frame == borderless:
+                return
+            was_visible = self.isVisible()
+            self.setWindowFlags(desired)
+            if was_visible:
                 self.show()
-            elif not on_top and has_hint:
-                self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
-                self.show()
+            logger.info(f"窗口外观已更新: borderless={borderless}, always_on_top={on_top}")
         except Exception as e:
-            logger.error(f"应用窗口置顶设置失败: {e}")
+            logger.error(f"应用窗口外观设置失败: {e}")
+
+    def mousePressEvent(self, event):
+        """无边框模式下左键按下开始拖拽。"""
+        try:
+            if (
+                bool(getattr(self.config.gui_config, "borderless", False))
+                and event.button() == Qt.LeftButton
+            ):
+                # Qt5: globalPos；优先系统拖拽
+                handle = self.windowHandle()
+                if handle is not None and hasattr(handle, "startSystemMove"):
+                    try:
+                        handle.startSystemMove()
+                        event.accept()
+                        return
+                    except Exception:
+                        pass
+                self._drag_offset = event.globalPos() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """无边框模式下拖拽移动窗口。"""
+        try:
+            if (
+                bool(getattr(self.config.gui_config, "borderless", False))
+                and self._drag_offset is not None
+                and (event.buttons() & Qt.LeftButton)
+            ):
+                self.move(event.globalPos() - self._drag_offset)
+                event.accept()
+                return
+        except Exception:
+            pass
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """结束无边框拖拽。"""
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def eventFilter(self, obj, event):
+        """转发滚动区鼠标事件，以支持无边框拖拽。"""
+        try:
+            if obj is getattr(self, "scrolling_text", None) and bool(
+                getattr(self.config.gui_config, "borderless", False)
+            ):
+                et = event.type()
+                if et == QEvent.MouseButtonPress and isinstance(event, QMouseEvent):
+                    self.mousePressEvent(event)
+                    return event.isAccepted()
+                if et == QEvent.MouseMove and isinstance(event, QMouseEvent):
+                    self.mouseMoveEvent(event)
+                    return event.isAccepted()
+                if et == QEvent.MouseButtonRelease and isinstance(event, QMouseEvent):
+                    self.mouseReleaseEvent(event)
+                    return False
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def _center_window(self):
         """窗口居中"""
@@ -486,16 +598,35 @@ class MainWindow(QMainWindow):
         logger.debug("右键菜单已创建")
     
     def _precreate_settings_window(self):
-        """后台预创建设置窗口，减少首次打开时的卡顿"""
+        """兼容旧调用：预热字体并在空闲时预创建隐藏的设置窗。"""
+        self._warm_up_settings_assets()
+
+    def _warm_up_settings_assets(self):
+        """后台预热设置页：先导入/字体，再分段预创建隐藏窗口，避免一次卡太久。"""
         try:
-            if self.settings_window is None:
-                from .settings_window import SettingsWindow
-                self.settings_window = SettingsWindow(self)
-                self.settings_window.hide()
-                logger.info("设置窗口已在后台预创建完成")
+            from .settings_window import SettingsWindow, prefetch_settings_assets
+            prefetch_settings_assets()
+            if self.settings_window is not None:
+                return
+            # 先建外观页，让出事件循环后再补其余 Tab
+            self.settings_window = SettingsWindow(self, defer_secondary_tabs=True)
+            self.settings_window.hide()
+            QTimer.singleShot(0, self._warm_up_settings_complete)
         except Exception as e:
-            logger.debug(f"预创建设置窗口失败（可忽略）: {e}")
-    
+            logger.debug(f"设置页预热失败（可忽略）: {e}")
+
+    def _warm_up_settings_complete(self):
+        """补齐预创建设置窗的其余标签页并保持隐藏。"""
+        try:
+            w = self.settings_window
+            if w is None:
+                return
+            if not getattr(w, "_secondary_tabs_ready", True):
+                w.complete_secondary_tabs()
+            w.hide()
+        except Exception as e:
+            logger.debug(f"设置页预热补齐失败（可忽略）: {e}")
+
     def _warm_up_context_menu(self):
         """预弹右键菜单一次（离屏并立即隐藏），使首次 popup 的初始化在后台完成，避免用户第一次右键时卡顿"""
         try:
@@ -600,18 +731,18 @@ class MainWindow(QMainWindow):
                 self.resize(new_width, new_height)
                 logger.info(f"窗口大小已更新: {current_width}x{current_height} -> {new_width}x{new_height}")
             
-            # 更新窗口透明度
+            # 更新窗口不透明度
             current_opacity = self.windowOpacity()
             new_opacity = self.config.gui_config.opacity
             if abs(current_opacity - new_opacity) > 0.01:  # 避免浮点数精度问题
                 self.setWindowOpacity(new_opacity)
-                logger.info(f"窗口透明度已更新: {current_opacity:.2f} -> {new_opacity:.2f}")
+                logger.info(f"窗口不透明度已更新: {current_opacity:.2f} -> {new_opacity:.2f}")
 
-            self._apply_always_on_top()
+            self._apply_window_chrome()
             
-            # 更新背景颜色
+            # 更新背景颜色（限定 QMainWindow，勿裸写 background-color）
             new_bg_color = self.config.gui_config.bg_color
-            self.setStyleSheet(f"background-color: {new_bg_color};")
+            self.setStyleSheet(f"QMainWindow {{ background-color: {new_bg_color}; }}")
             logger.info(f"背景颜色已更新: {new_bg_color}")
 
             # 日志配置热更新（启动清日志仍仅启动时生效）
@@ -953,11 +1084,11 @@ class MainWindow(QMainWindow):
                 + LIGHT_SCROLLBAR_QSS
             )
             layout = QVBoxLayout(dlg)
-            layout.setSpacing(8)
-            layout.setContentsMargins(18, 12, 18, 8)
+            layout.setSpacing(12)
+            layout.setContentsMargins(22, 16, 22, 14)
             title = QLabel(f"更新说明  v{APP_VERSION}")
             title.setStyleSheet(
-                "font-size: 16px; font-weight: bold; color: #333333; padding-bottom: 4px; "
+                "font-size: 18px; font-weight: bold; color: #333333; padding-bottom: 2px; "
                 "background-color: #f5f5f5;"
             )
             layout.addWidget(title)
@@ -972,7 +1103,7 @@ class MainWindow(QMainWindow):
             declaration.setTextInteractionFlags(Qt.TextSelectableByMouse)
             declaration.setStyleSheet(
                 "color: #B22222; font-weight: bold; font-size: 15px; "
-                "line-height: 1.4; padding: 4px 0 0 0; margin: 0; background-color: #f5f5f5;"
+                "line-height: 1.55; padding: 8px 0 4px 0; margin: 0; background-color: #f5f5f5;"
             )
             layout.addWidget(declaration)
             sep_line = QFrame()
@@ -986,7 +1117,7 @@ class MainWindow(QMainWindow):
             content = QLabel(CHANGELOG_TEXT)
             content.setWordWrap(True)
             content.setStyleSheet(
-                "font-size: 13px; color: #333333; line-height: 1.5; padding: 4px 0; background-color: #f5f5f5;"
+                "font-size: 15px; color: #333333; line-height: 1.7; padding: 8px 2px; background-color: #f5f5f5;"
             )
             content.setTextInteractionFlags(Qt.TextSelectableByMouse)
             scroll.setWidget(content)
@@ -994,10 +1125,10 @@ class MainWindow(QMainWindow):
             btn_layout = QHBoxLayout()
             btn_layout.addStretch()
             ok_btn = QPushButton("确定")
-            ok_btn.setMinimumWidth(88)
-            ok_btn.setMinimumHeight(32)
+            ok_btn.setMinimumWidth(96)
+            ok_btn.setMinimumHeight(36)
             ok_btn.setStyleSheet("""
-                QPushButton { background-color: #4A90E2; color: white; border: none; border-radius: 4px; font-size: 13px; }
+                QPushButton { background-color: #4A90E2; color: white; border: none; border-radius: 4px; font-size: 14px; }
                 QPushButton:hover { background-color: #357ABD; }
                 QPushButton:pressed { background-color: #2E5F8F; }
             """)
@@ -1007,9 +1138,9 @@ class MainWindow(QMainWindow):
             layout.addLayout(btn_layout)
             # 按 CHANGELOG 正文与屏幕可用区域动态决定宽度与滚动区高度（避免短文大块空白、长文撑爆屏幕）
             geo = QApplication.desktop().availableGeometry(dlg)
-            dialog_w = min(620, max(320, geo.width() - 48))
+            dialog_w = min(560, max(360, geo.width() - 48))
             m = layout.contentsMargins()
-            inner_w = max(260, dialog_w - m.left() - m.right())
+            inner_w = max(280, dialog_w - m.left() - m.right())
             declaration.setFixedWidth(inner_w)
             declaration.adjustSize()
             _dh = declaration.sizeHint().height()
@@ -1019,9 +1150,9 @@ class MainWindow(QMainWindow):
             scroll.setWidgetResizable(False)
             content.adjustSize()
             changelog_need_h = content.sizeHint().height()
-            max_changelog_h = max(160, int(geo.height() * 0.5))
-            scroll_h = min(changelog_need_h + 12, max_changelog_h)
-            scroll_h = max(scroll_h, min(72, changelog_need_h + 12))
+            max_changelog_h = max(180, int(geo.height() * 0.45))
+            scroll_h = min(changelog_need_h + 16, max_changelog_h)
+            scroll_h = max(scroll_h, min(96, changelog_need_h + 16))
             scroll.setFixedHeight(scroll_h)
             dlg.setFixedWidth(dialog_w)
             dlg.adjustSize()
@@ -1040,22 +1171,33 @@ class MainWindow(QMainWindow):
             logger.error(f"显示更新说明失败: {e}")
     
     def _open_settings(self):
-        """打开设置窗口（尽量复用预创建实例，减少每次打开的卡顿）"""
-        def _do_open_settings():
-            """在下一事件循环中打开或复用设置窗口。"""
-            try:
-                from .settings_window import SettingsWindow
-                if self.settings_window is None:
-                    # 如果预创建失败或尚未完成，按需创建一次
-                    self.settings_window = SettingsWindow(self)
-                self.settings_window._reload_controls_from_config()
+        """打开设置窗口（首次创建后复用实例；若已预创建则几乎秒开）。"""
+        try:
+            from PyQt5.QtWidgets import QApplication
+            from .settings_window import SettingsWindow, prefetch_settings_assets
+
+            # 若用户在空闲预热完成前就打开，先把字体/文本引擎成本消化掉
+            prefetch_settings_assets()
+
+            first_create = self.settings_window is None
+            if first_create:
+                # 先建外观页并立刻显示，再补齐其余 Tab，缩短「点了没反应」的空白期
+                self.settings_window = SettingsWindow(self, defer_secondary_tabs=True)
                 self.settings_window.show()
                 self.settings_window.raise_()
                 self.settings_window.activateWindow()
-            except Exception as e:
-                logger.error(f"打开设置窗口失败: {e}")
-        # 不再额外延迟，直接在下一事件循环打开（菜单点击已结束）
-        QTimer.singleShot(0, _do_open_settings)
+                QApplication.processEvents()
+                self.settings_window.complete_secondary_tabs()
+            else:
+                w = self.settings_window
+                if not getattr(w, "_secondary_tabs_ready", True):
+                    w.complete_secondary_tabs()
+                w._reload_controls_from_config()
+                w.show()
+                w.raise_()
+                w.activateWindow()
+        except Exception as e:
+            logger.error(f"打开设置窗口失败: {e}")
 
     def _warning_display_segments(
         self, message: MessageItem
@@ -1392,12 +1534,13 @@ class MainWindow(QMainWindow):
                                     logger.info(f"已更新当前显示消息的图片: {image_path}")
                                     return
                             
-                            # 如果不在缓存中，异步加载
+                            # 如果不在缓存中，异步加载（高度由主线程传入）
                             self.scrolling_text._current_load_task_id += 1
                             current_task_id = self.scrolling_text._current_load_task_id
+                            load_height = current_height if current_height > 10 else self.scrolling_text.config.gui_config.window_height
                             thread = threading.Thread(
                                 target=self.scrolling_text._load_image_async,
-                                args=(image_path, current_task_id),
+                                args=(image_path, current_task_id, load_height),
                                 daemon=True,
                                 name="ImageLoader"
                             )
@@ -1810,6 +1953,23 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：CENC 烈度速报（Nowquake）已关闭")
                 return False
 
+        # EQSC HTTP 全局辅助源
+        is_eqsc = bool(parsed_data.get("eqsc")) or st.startswith("eqsc_") or sn.startswith("eqsc_")
+        if is_eqsc:
+            if not es.get(EQSC_HTTP_MASTER, False):
+                logger.debug("已忽略消息：EQSC 总开关已关闭")
+                return False
+            flag = EQSC_PARSE_FLAG.get(st)
+            if flag and not getattr(mc, flag, True):
+                logger.debug(f"已忽略消息：EQSC 子源「{st}」解析已关闭（{flag}=False）")
+                return False
+            # 对应 HTTP URL 未启用则丢弃
+            from config import EQSC_PARSE_FLAG_TO_URL
+            url = EQSC_PARSE_FLAG_TO_URL.get(flag or "")
+            if url and not es.get(url, False):
+                logger.debug(f"已忽略消息：EQSC HTTP 源已关闭: {url}")
+                return False
+
         if parsed_data.get("fanstudio") and st:
             flag = FanStudioAdapter.FANSTUDIO_SOURCE_FLAG_FIELD.get(st)
             if flag and not getattr(mc, flag, True):
@@ -1909,8 +2069,13 @@ class MainWindow(QMainWindow):
             "nrcan": NRCAN_HTTP_URL,
             "cenc": CENC_HTTP_URL,
         }
-        # 官方直连 HTTP：未开开关则丢弃；Fan Studio / 无界同名 source_type 带标记，不走此表
-        if not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
+        # 官方直连 HTTP：未开开关则丢弃；Fan Studio / 无界 / EQSC 同名 source_type 带标记，不走此表
+        if (
+            not parsed_data.get("fanstudio")
+            and not parsed_data.get("whews")
+            and not parsed_data.get("eqsc")
+            and not st.startswith("eqsc_")
+        ):
             mapped_url = http_source_map.get(st) or http_source_map.get(sn)
             if mapped_url:
                 if provider != DATA_PROVIDER_OFFICIAL:
@@ -1955,7 +2120,8 @@ class MainWindow(QMainWindow):
             if not should_accept_message(parsed_data, self.config, message_type):
                 logger.debug(
                     f"消息被过滤: source={source_name}, type={message_type}, "
-                    f"mag={parsed_data.get('magnitude')}"
+                    f"mag={parsed_data.get('magnitude')}, "
+                    f"place={parsed_data.get('place_name') or parsed_data.get('title')}"
                 )
                 return
             
@@ -2805,6 +2971,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        try:
+            from adapters.eqsc_adapter import EQSC_PARSE_FLAG
+            from config import EQSC_HTTP_MASTER, EQSC_PARSE_FLAG_TO_URL
+
+            eq_flag = EQSC_PARSE_FLAG.get(st)
+            if eq_flag:
+                keys.append(eq_flag)
+                http_url = EQSC_PARSE_FLAG_TO_URL.get(eq_flag)
+                if http_url:
+                    keys.append(http_url)
+                keys.append(EQSC_HTTP_MASTER)
+        except Exception:
+            pass
+
         fs_st = st
         if fs_st in ("海啸信息", "tsunami"):
             fs_st = "tsunami"
@@ -2822,7 +3002,8 @@ class MainWindow(QMainWindow):
             fs_st
             and not fs_st.startswith("wolfx_")
             and not fs_st.startswith("fanstudio_")
-            and fs_st not in ("p2pquake", "p2pquake_tsunami", "cenc-ir")
+            and not fs_st.startswith("eqsc_")
+            and fs_st not in ("p2pquake", "p2pquake_tsunami", "cenc-ir", "eqsc")
         ):
             # Fan Studio / 同源短名：fanstudio_parse_*
             keys.append(f"fanstudio_parse_{fs_st.replace('-', '_')}")

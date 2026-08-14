@@ -14,12 +14,12 @@ from typing import Any, Dict, Optional
 
 # 不使用中国浅源经验式估算震中烈度的 source_type（台湾、日本相关源）
 SOURCE_NO_CHINA_EPI_ESTIMATE = frozenset(
-    {"jma", "cwa-eew", "cwa", "wolfx_jma_eew", "wolfx_cwa_eew"}
+    {"jma", "cwa-eew", "cwa", "wolfx_jma_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "eqsc_cwa"}
 )
 
 # 不进入「有感/强有感」告警序列、不拼接安全提示的 source_type（台湾、日本相关源）
 SOURCE_TW_JP_ALERT_EXCLUDE = frozenset(
-    {"jma", "cwa-eew", "cwa", "wolfx_jma_eew", "wolfx_cwa_eew"}
+    {"jma", "cwa-eew", "cwa", "wolfx_jma_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "eqsc_cwa"}
 )
 
 _EPI_KEYS = (

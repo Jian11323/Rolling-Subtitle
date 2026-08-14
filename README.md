@@ -1,7 +1,7 @@
 # 地震预警及情报实况栏
 
 > [!NOTE]
-> **当前版本：2.7.3**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。
+> **当前版本：2.8.0**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。全局辅助源新增 EQSC（equake.top）。外观支持自定义背景与无边框模式。
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -19,7 +19,7 @@
 
 * 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
 * **主数据源三选一**：Fan Studio / WeJet / 官方数据源+Wolfx（切换时清空缓冲并重新拉取）
-* 全局辅助源：台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一提供者并用
+* 全局辅助源：EQSC（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一提供者并用
 * 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA（ExpTech）、BMKG、GeoNet、INGV、PTWC 等
 * 可自定义界面样式与颜色；支持音效、TTS、NHK/JMA 独立音效与系统通知
 * **性能模式**：低配 / 标准 / 高配一键预设（调整渲染、数据源与告警负载），保存后热重载

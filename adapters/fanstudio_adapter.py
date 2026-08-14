@@ -27,20 +27,11 @@ from config import FANSTUDIO_ALL_URL
 
 logger = get_logger()
 
-# 地名修正工具（延迟加载）
-_place_name_fixer = None
-
 def get_place_name_fixer():
-    """获取地名修正工具实例（单例模式）"""
-    global _place_name_fixer
-    if _place_name_fixer is None:
-        try:
-            from utils.place_name_fixer import PlaceNameFixer
-            _place_name_fixer = PlaceNameFixer()
-        except Exception as e:
-            logger.error(f"初始化地名修正工具失败: {e}")
-            _place_name_fixer = None
-    return _place_name_fixer
+    """获取地名修正工具实例（单例，委托 utils.place_name_fixer）。"""
+    from utils.place_name_fixer import get_place_name_fixer as _get
+
+    return _get()
 
 
 def _resolve_event_id(
@@ -1000,24 +991,28 @@ class FanStudioAdapter(BaseAdapter):
         if shock_time:
             shock_time = timezone_utils.cst_to_display(shock_time)
         organization = warning_info.get('orgUnit') or self._get_organization_name_by_type('tsunami')
-        # 机构名带 LEVEL：第X报 XXX通报
+        # 标头：机构 + 第N报 + 级别（信息/蓝/黄/橙/红/解除）
         batch = (details.get('batch') or '').strip()
         title = (warning_info.get('title') or '海啸信息').strip()
+        level = (warning_info.get('level') or '').strip()
         if batch:
-            organization = f"{organization} 第{batch}报 {title}通报".strip()
-        else:
-            organization = f"{organization} {title}通报".strip() if title else organization
+            organization = f"{organization} 第{batch}报".strip()
+        if level:
+            organization = f"{organization} {level}".strip()
+        elif title and not batch:
+            organization = f"{organization} {title}".strip()
         magnitude = self._safe_float(shock_info.get('magnitude'), 0)
         depth = self._safe_float(shock_info.get('depth'), 0)
         latitude = self._safe_float(shock_info.get('latitude'), 0)
         longitude = self._safe_float(shock_info.get('longitude'), 0)
         event_id = data.get('id') or data.get('code') or ''
-        # 按 P2PQuake 海啸格式拼接详细说明：等级 + 震源海域 + 预计浪高 + 沿海区域(到达时间)
+        # 详细说明：震源海域 + 预计浪高 + 沿海区域(到达时间)；级别已在标头
         place_name = self._build_tsunami_detail_nmefc(
             warning_info=warning_info,
             shock_info=shock_info,
             details=details,
             forecasts=forecasts,
+            include_level=False,
         )
         logo_url = (details.get('logoUrl') or '').strip()
         # 相对路径时用 htmlUrl 同源拼成绝对 URL，避免前端请求失败
@@ -1048,9 +1043,13 @@ class FanStudioAdapter(BaseAdapter):
             'longitude': longitude,
             'event_id': event_id,
             'tsunami_code': data.get('code', ''),
-            'tsunami_warning_level': (warning_info.get('level') or '').strip(),
+            'tsunami_warning_level': level,
+            'tsunami_level': level,
             'tsunami_warning_title': title,
             'tsunami_warning_subtitle': (warning_info.get('subtitle') or '').strip(),
+            'tsunami_place': (
+                (shock_info.get('placeName') or warning_info.get('subtitle') or '').strip()
+            ),
             'tsunami_update_time': (time_info.get('updateDate') or '').strip(),
             'tsunami_forecasts': forecasts if isinstance(forecasts, list) else [],
             'tsunami_water_level_monitoring': water_level_monitoring if isinstance(water_level_monitoring, list) else [],
@@ -1123,14 +1122,16 @@ class FanStudioAdapter(BaseAdapter):
         shock_info: Dict[str, Any],
         details: Dict[str, Any],
         forecasts: List[Dict[str, Any]],
+        *,
+        include_level: bool = False,
     ) -> str:
         """
-        拼接自然资源部海啸详细说明，格式参考 P2PQuake：等级 + 震源海域 + 预计浪高 + 沿海省份(到达时间)。
-        示例：海啸信息 加里曼丹岛(婆罗洲)海域。预计浪高约50厘米。福建(10:30)、广东(11:00)
+        拼接自然资源部海啸详细说明：震源海域 + 预计浪高 + 沿海省份(到达时间)。
+        示例：中国台湾省周边海域。预计浪高约50厘米。福建(10:30)、广东(11:00)
         """
         parts = []
         level = (warning_info.get('level') or warning_info.get('title') or '').strip()
-        if level:
+        if include_level and level:
             parts.append(level + ' ')
         place = (shock_info.get('placeName') or warning_info.get('subtitle') or '').strip()
         if place:
@@ -1148,7 +1149,12 @@ class FanStudioAdapter(BaseAdapter):
                 max_height_str = f"{mh}厘米"
         region_bits = []
         for f in flist[:8]:
-            prov = (f.get('province') or f.get('warningLevel') or '').strip()
+            prov = (
+                str(f.get('province') or '').strip()
+                or str(f.get('forecastArea') or '').strip()
+                or str(f.get('forecastPoint') or '').strip()
+                or str(f.get('warningLevel') or '').strip()
+            )
             eta = (f.get('estimatedArrivalTime') or '').strip()
             if not prov:
                 continue

@@ -15,13 +15,17 @@ CHINESE_SOURCE_TYPES = frozenset({
     "hko",
     "wolfx_sc", "wolfx_fj", "wolfx_cenc", "wolfx_cwa", "wolfx_cq",
     "wolfx_sc_eew", "wolfx_cenc_eew", "wolfx_fj_eew", "wolfx_cq_eew", "wolfx_cwa_eew",
+    "eqsc_cenc", "eqsc_cenc_ir", "eqsc_cwa", "eqsc_hko", "eqsc_typhoon",
     "nmefc", "nmefc-tsunami",
+    # NMEFC 海啸正文已是中文地点+预报区，勿被 FE 粗分区覆盖
+    "tsunami", "海啸信息",
 })
 
 # JMA / P2PQuake：使用官方原始地名（日文），不做 FE 粗分区覆盖
 JMA_ORIGINAL_PLACE_SOURCES = frozenset({
-    "jma", "jma_volcano",
+    "jma", "jma_volcano", "jma_tsunami",
     "wolfx_jma_eew", "wolfx_jma_eqlist",
+    "eqsc_jma_eew", "eqsc_jma_report", "eqsc_jma_tsunami", "eqsc_volcano",
     "p2pquake", "p2pquake_tsunami",
 })
 

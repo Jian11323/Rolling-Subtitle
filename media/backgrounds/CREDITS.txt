@@ -1,0 +1,39 @@
+内置背景图来源与许可（均可商用）
+================================
+
+选型原则：实拍光斑 / 纹理 / 柔和虚化，适合毛玻璃字幕条；避免纯色渐变与细节过实的实景。
+
+1. city_night_bokeh.jpg
+   Unsplash — https://unsplash.com/photos/oVB0A8Br0mI
+   License: Unsplash License
+
+2. blue_street_bokeh.jpg
+   Unsplash — https://unsplash.com/photos/ftHKGXCyQiQ
+   License: Unsplash License
+
+3. warm_fairy_lights.jpg
+   Pexels — Madison Inouye
+   https://www.pexels.com/photo/3728297/
+   License: Pexels License
+
+4. green_nature_bokeh.jpg
+   Unsplash — xiao ying (@zh369_)
+   https://unsplash.com/photos/0CV-4dIL_eI
+   License: Unsplash License
+
+5. blue_marble.jpg
+   Unsplash — Aleksandra Khaprenko (@xaprrr)
+   https://unsplash.com/photos/0PPw9irzLIw
+   License: Unsplash License
+
+6. soft_clouds.jpg
+   Unsplash — https://unsplash.com/photos/P8VMwYFY-Es
+   License: Unsplash License
+
+7. warm_light_flare.jpg
+   Unsplash — Liana S (@cherstve_pechivo)
+   https://unsplash.com/photos/kWEW965_5Y0
+   License: Unsplash License
+
+Unsplash License: https://unsplash.com/license
+Pexels License: https://www.pexels.com/license/

@@ -31,15 +31,11 @@ logger = get_logger()
 # JMA 情报仅使用 P2PQuake；预警由主服务（WeJet）解析
 WHEWS_SKIP_SOURCES = frozenset({"jma"})
 
-# 七省级地震局（/ws/dzj 与 /ws/all）
+# 省级地震局情报（api.beecld.com：仅北京 / 云南 / 宁夏；福建/四川/陕西/湖北已下架）
 WHEWS_PROVINCIAL_SOURCES = (
-    "fujian",
     "beijing",
-    "sichuan",
     "yunnan",
     "ningxia",
-    "shaanxi",
-    "hubei",
 )
 
 # WHEWS source 短名 → 内部 source_type（与展示层一致）
@@ -66,7 +62,15 @@ WHEWS_SOURCE_TO_INTERNAL = {
     "ingv": "ingv",
     "nrcan": "nrcan",
     "mmd": "mmd",
+    "phivolcs": "phivolcs",
+    "sgc": "sgc",
+    "ga": "ga",
+    "cenais": "cenais",
     "tsunami": "tsunami",
+    "ntwc": "ntwc",
+    "ptwc": "ptwc",
+    "incois": "incois",
+    "jma_tsunami": "jma_tsunami",
     "weatheralarm": "weatheralarm",
     "va": "jma_volcano",
 }
@@ -125,7 +129,15 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "ingv": "whews_parse_ingv",
     "nrcan": "whews_parse_nrcan",
     "mmd": "whews_parse_mmd",
+    "phivolcs": "whews_parse_phivolcs",
+    "sgc": "whews_parse_sgc",
+    "ga": "whews_parse_ga",
+    "cenais": "whews_parse_cenais",
     "tsunami": "whews_parse_tsunami",
+    "ntwc": "whews_parse_ntwc",
+    "ptwc": "whews_parse_ptwc",
+    "incois": "whews_parse_incois",
+    "jma_tsunami": "whews_parse_jma_tsunami",
     "weatheralarm": "whews_parse_weatheralarm",
     "jma_volcano": "whews_parse_jma_volcano",
 }
@@ -229,12 +241,12 @@ def _maybe_fix_place_name(
             if fixer and fixer.is_supported():
                 return fixer.fix_place_name(place_name, latitude, longitude)
         if not is_warning:
-            from utils.place_name_fixer import PlaceNameFixer
+            from utils.place_name_fixer import get_place_name_fixer
             from utils.place_name_utils import should_apply_fe_place_fix
 
             if should_apply_fe_place_fix(source_type):
-                fixer = PlaceNameFixer()
-                if fixer.is_supported(source_type):
+                fixer = get_place_name_fixer()
+                if fixer and fixer.is_supported(source_type):
                     return fixer.fix_place_name(
                         place_name, latitude, longitude, source_type
                     )
@@ -549,17 +561,43 @@ class WhewsAdapter(BaseAdapter):
         }
 
     @staticmethod
+    def _clean_ws_text(value: Any) -> str:
+        """压缩空白，保留可读标点。"""
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _append_report_suffix(org: str, updates: Any, level: str = "") -> str:
+        """统一追加「第N报」与级别后缀。"""
+        out = (org or "").strip()
+        if updates not in (None, "", 0, "0"):
+            try:
+                out = f"{out} 第{int(updates)}报"
+            except (TypeError, ValueError):
+                out = f"{out} 第{updates}报"
+        level = (level or "").strip()
+        if level:
+            out = f"{out} {level}".strip()
+        return out
+
+    @staticmethod
     def _build_tsunami_detail(
         warning_info: Dict[str, Any],
         shock_info: Dict[str, Any],
         forecasts: List[Dict[str, Any]],
+        *,
+        include_level: bool = False,
     ) -> str:
-        """拼接海啸详细说明。"""
+        """拼接 NMEFC 海啸详细说明（地点 + 浪高 + 预报区）。"""
         parts: List[str] = []
-        level = (warning_info.get("level") or warning_info.get("title") or "").strip()
-        if level:
+        level = (warning_info.get("level") or "").strip()
+        if include_level and level:
             parts.append(level + " ")
-        place = (shock_info.get("placeName") or warning_info.get("subtitle") or "").strip()
+        place = (
+            (shock_info.get("placeName") or warning_info.get("subtitle") or "").strip()
+        )
         if place:
             parts.append(place)
         flist = [x for x in (forecasts or []) if isinstance(x, dict)]
@@ -574,8 +612,14 @@ class WhewsAdapter(BaseAdapter):
                 max_height_str = f"{mh}厘米"
         region_bits = []
         for f in flist[:8]:
-            prov = (f.get("province") or f.get("warningLevel") or "").strip()
-            eta = (f.get("estimatedArrivalTime") or "").strip()
+            # 文档：forecasts[i] 含 province / forecastArea / forecastPoint / ETA / maxWaveHeight / warningLevel
+            prov = (
+                str(f.get("province") or "").strip()
+                or str(f.get("forecastArea") or "").strip()
+                or str(f.get("forecastPoint") or "").strip()
+                or str(f.get("warningLevel") or "").strip()
+            )
+            eta = str(f.get("estimatedArrivalTime") or "").strip()
             if not prov:
                 continue
             region_bits.append(f"{prov}({eta})" if eta else prov)
@@ -639,13 +683,21 @@ class WhewsAdapter(BaseAdapter):
         return _strip_note_section(full_clean)
 
     def _parse_tsunami(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """解析自然资源部海啸预警。"""
+        """解析自然资源部海啸预警（/ws/tsunami，嵌套结构，UTC+8）。"""
         if not data or not isinstance(data, dict):
             return None
         warning_info = data.get("warningInfo") or {}
+        if not isinstance(warning_info, dict):
+            warning_info = {}
         time_info = data.get("timeInfo") or {}
+        if not isinstance(time_info, dict):
+            time_info = {}
         shock_info = data.get("shockInfo") or {}
+        if not isinstance(shock_info, dict):
+            shock_info = {}
         details = data.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
         forecasts = data.get("forecasts") or []
         water_level_monitoring = data.get("waterLevelMonitoring") or []
         shock_time = shock_info.get("shockTime") or time_info.get("alarmDate") or ""
@@ -653,14 +705,15 @@ class WhewsAdapter(BaseAdapter):
             return None
         shock_time = timezone_utils.cst_to_display(str(shock_time))
         organization = warning_info.get("orgUnit") or _get_organization_name("tsunami")
-        batch = (details.get("batch") or "").strip()
+        batch = str(details.get("batch") or "").strip()
         title = (warning_info.get("title") or "海啸信息").strip()
-        if batch:
-            organization = f"{organization} 第{batch}报 {title}通报".strip()
-        else:
-            organization = f"{organization} {title}通报".strip() if title else organization
+        level = (warning_info.get("level") or "").strip()
+        # 标头：机构 + 第N报 + 级别（信息/蓝/黄/橙/红/解除），与海外海啸一致
+        organization = self._append_report_suffix(organization, batch or None, level)
 
-        place_name = self._build_tsunami_detail(warning_info, shock_info, forecasts)
+        place_name = self._build_tsunami_detail(
+            warning_info, shock_info, forecasts, include_level=False
+        )
         logo_url = (details.get("logoUrl") or "").strip()
         if logo_url and not logo_url.startswith(("http://", "https://")):
             html_url_for_base = (details.get("htmlUrl") or "").strip()
@@ -685,6 +738,7 @@ class WhewsAdapter(BaseAdapter):
             except Exception:
                 pass
 
+        maps = details.get("maps") if isinstance(details.get("maps"), dict) else {}
         result: Dict[str, Any] = {
             "type": "report",
             "is_tsunami": True,
@@ -698,20 +752,27 @@ class WhewsAdapter(BaseAdapter):
             "longitude": _safe_float(shock_info.get("longitude"), 0),
             "event_id": data.get("id") or data.get("code") or "",
             "tsunami_code": data.get("code", ""),
-            "tsunami_warning_level": (warning_info.get("level") or "").strip(),
+            "tsunami_warning_level": level,
+            "tsunami_level": level,
             "tsunami_warning_title": title,
             "tsunami_warning_subtitle": (warning_info.get("subtitle") or "").strip(),
+            "tsunami_place": (
+                (shock_info.get("placeName") or warning_info.get("subtitle") or "").strip()
+            ),
             "tsunami_update_time": (time_info.get("updateDate") or "").strip(),
+            "tsunami_alarm_time": (time_info.get("alarmDate") or "").strip(),
             "tsunami_forecasts": forecasts if isinstance(forecasts, list) else [],
             "tsunami_water_level_monitoring": (
                 water_level_monitoring if isinstance(water_level_monitoring, list) else []
             ),
+            "tsunami_maps": maps,
             "raw_data": data,
         }
         if logo_url:
             result["logo_url"] = logo_url
         html_url = (details.get("htmlUrl") or "").strip()
         if html_url:
+            result["detail_url"] = html_url
             remarks = self._fetch_tsunami_remarks(html_url)
             if remarks:
                 result["tsunami_remarks"] = remarks
@@ -725,11 +786,265 @@ class WhewsAdapter(BaseAdapter):
             return self._parse_weather(data_obj)
         if internal == "tsunami":
             return self._parse_tsunami(data_obj)
+        if internal in ("ntwc", "ptwc", "incois"):
+            return self._parse_overseas_tsunami(data_obj, internal)
+        if internal == "jma_tsunami":
+            return self._parse_jma_tsunami(data_obj)
         if internal == "jma_volcano":
             return self._parse_volcano(data_obj)
         if internal in WHEWS_WARNING_INTERNAL:
             return self._parse_warning(data_obj, internal)
         return self._parse_report(data_obj, internal)
+
+    @staticmethod
+    def _localize_overseas_tsunami_level(level: str) -> str:
+        """将 NTWC/PTWC/INCOIS 英文等级译为中文展示名。"""
+        raw = (level or "").strip()
+        if not raw:
+            return ""
+        key = re.sub(r"[\s_\-]+", "", raw).lower()
+        mapping = {
+            "information": "信息",
+            "info": "信息",
+            "advisory": "咨询",
+            "watch": "注意报",
+            "warning": "警报",
+            "alert": "警报",  # INCOIS Alert
+            "threat": "威胁",
+            "cancellation": "解除",
+            "cancel": "解除",
+            "cancelled": "解除",
+            "canceled": "解除",
+        }
+        return mapping.get(key, raw)
+
+    @staticmethod
+    def _normalize_overseas_place(place: str) -> str:
+        """清理 CAP/公报式地点前缀（如 in Colombia）。"""
+        text = (place or "").strip()
+        if not text:
+            return ""
+        text = re.sub(
+            r"^(?:in|near|off(?:\s+the)?|offshore(?:\s+of)?)\s+",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.-")
+        return text or (place or "").strip()
+
+    @staticmethod
+    def _localize_jma_tsunami_kind(kind: str) -> str:
+        """将 JMA 海啸警报种类译为中文展示名。"""
+        raw = (kind or "").strip()
+        if not raw:
+            return ""
+        mapping = {
+            "大津波警報": "大海啸警报",
+            "津波警報": "海啸警报",
+            "津波注意報": "海啸注意报",
+            "津波予報": "海啸预报",
+            "津波情報": "海啸情报",
+        }
+        return mapping.get(raw, raw)
+
+    def _build_jma_tsunami_detail(
+        self,
+        areas: List[Dict[str, Any]],
+        *,
+        title: str = "",
+        headline: str = "",
+        cancel: bool = False,
+    ) -> str:
+        """按区域拼 JMA 海啸正文：级别 + 浪高 + 区域(到达时刻)。"""
+        if cancel:
+            lead = "解除"
+        else:
+            lead = ""
+        flist = [a for a in (areas or []) if isinstance(a, dict)]
+        kind_rank = {
+            "大津波警報": 4,
+            "津波警報": 3,
+            "津波注意報": 2,
+            "津波予報": 1,
+        }
+        top_kind = ""
+        top_rank = -1
+        max_height_desc = ""
+        max_height_rank = -1
+        for a in flist:
+            kind = str(a.get("kind") or "").strip()
+            rank = kind_rank.get(kind, 0)
+            if rank > top_rank:
+                top_rank = rank
+                top_kind = kind
+            mh = str(a.get("maxHeightDesc") or "").strip()
+            hv = str(a.get("maxHeight") or "").strip()
+            desc = ""
+            if mh:
+                desc = mh
+            elif hv:
+                desc = hv if re.search(r"[mｍメートル米]", hv, re.I) else f"{hv}m"
+            if desc and rank >= max_height_rank:
+                max_height_rank = rank
+                max_height_desc = desc
+        parts: List[str] = []
+        kind_zh = self._localize_jma_tsunami_kind(top_kind)
+        if lead:
+            parts.append(lead + " ")
+        elif kind_zh:
+            parts.append(kind_zh + " ")
+        if max_height_desc:
+            parts.append(f"预计浪高约{max_height_desc}。")
+        region_bits: List[str] = []
+        for a in flist[:8]:
+            name = str(a.get("name") or "").strip()
+            if not name:
+                continue
+            arrival = str(a.get("arrivalTime") or "").strip()
+            condition = str(a.get("condition") or "").strip()
+            eta = ""
+            if arrival:
+                try:
+                    dt_str = timezone_utils.jst_to_display(arrival)
+                    eta = dt_str.split(" ")[1][:5] if " " in dt_str else arrival
+                except Exception:
+                    eta = arrival[-8:-3] if len(arrival) >= 8 else arrival
+            elif condition:
+                eta = condition
+            region_bits.append(f"{name}({eta})" if eta else name)
+        if region_bits:
+            parts.append("、".join(region_bits))
+        detail = "".join(parts).strip()
+        if detail:
+            return detail
+        fallback = self._clean_ws_text(headline) or self._clean_ws_text(title)
+        return fallback or "海啸信息"
+
+    def _parse_overseas_tsunami(
+        self, data: Dict[str, Any], source_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """解析 NTWC / PTWC / INCOIS 海啸（扁平帧，UTC+8）。"""
+        if not data or not isinstance(data, dict):
+            return None
+        shock_time_raw = data.get("shockTime") or data.get("issueTime") or ""
+        if not shock_time_raw:
+            return None
+        # 文档：shockTime / issueTime 均为 UTC+8
+        shock_time = timezone_utils.cst_to_display(str(shock_time_raw))
+        issue_time_raw = str(data.get("issueTime") or "").strip()
+        issue_time = (
+            timezone_utils.cst_to_display(issue_time_raw) if issue_time_raw else ""
+        )
+        level_raw = str(data.get("level") or "").strip()
+        level = self._localize_overseas_tsunami_level(level_raw)
+        headline = self._clean_ws_text(data.get("headline") or data.get("title"))
+        description = self._clean_ws_text(data.get("description"))
+        instruction = self._clean_ws_text(data.get("instruction"))
+        # 地点单独存，避免 FE/翻译把「地点+标题」整段覆盖
+        place = self._normalize_overseas_place(str(data.get("placeName") or ""))
+        updates = data.get("updates")
+        org = self._append_report_suffix(
+            _get_organization_name(source_type), updates, level
+        )
+        place_name = place or level or "海啸信息"
+        event_id = str(data.get("eventId") or data.get("id") or "").strip()
+        maps = data.get("maps") if isinstance(data.get("maps"), dict) else {}
+        result: Dict[str, Any] = {
+            "type": "report",
+            "is_tsunami": True,
+            "source_type": source_type,
+            "place_name": place_name,
+            "shock_time": shock_time,
+            "organization": org,
+            "magnitude": _safe_float(data.get("magnitude"), 0),
+            "depth": _safe_float(data.get("depth"), 0),
+            "latitude": _safe_float(data.get("latitude"), 0),
+            "longitude": _safe_float(data.get("longitude"), 0),
+            "event_id": event_id,
+            "tsunami_level": level,
+            "tsunami_level_raw": level_raw,
+            "tsunami_warning_level": level,  # 统一走级别着色
+            "tsunami_headline": headline,
+            "tsunami_description": description,
+            "tsunami_instruction": instruction,
+            "tsunami_mag_type": str(data.get("magType") or "").strip(),
+            "tsunami_issue_time": issue_time,
+            "tsunami_bulletin_type": str(data.get("bulletinType") or "").strip(),
+            "tsunami_maps": maps,
+            "raw_data": data,
+        }
+        for url_key, out_key in (
+            ("capUrl", "cap_url"),
+            ("bulletinUrl", "bulletin_url"),
+            ("detailUrl", "detail_url"),
+        ):
+            url = str(data.get(url_key) or "").strip()
+            if url:
+                result[out_key] = url
+        return result
+
+    def _parse_jma_tsunami(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """解析日本气象厅海啸预警（/ws/jma_tsunami，UTC+9）。"""
+        if not data or not isinstance(data, dict):
+            return None
+        create_time = data.get("createTime") or ""
+        if not create_time:
+            return None
+        # 文档：时间为 UTC+9
+        shock_time = timezone_utils.jst_to_display(str(create_time))
+        title = str(data.get("title") or "").strip()
+        headline = self._clean_ws_text(data.get("headline"))
+        info_type = str(data.get("infoTypeName") or "").strip()
+        cancel = bool(data.get("cancel")) or info_type == "取消"
+        updates = data.get("updates")
+        areas_raw = data.get("areas") or []
+        areas: List[Dict[str, Any]] = (
+            [a for a in areas_raw if isinstance(a, dict)]
+            if isinstance(areas_raw, list)
+            else []
+        )
+        kind_rank = {
+            "大津波警報": 4,
+            "津波警報": 3,
+            "津波注意報": 2,
+            "津波予報": 1,
+        }
+        top_kind = ""
+        top_rank = -1
+        for a in areas:
+            kind = str(a.get("kind") or "").strip()
+            rank = kind_rank.get(kind, 0)
+            if rank > top_rank:
+                top_rank = rank
+                top_kind = kind
+        level_zh = "解除" if cancel else self._localize_jma_tsunami_kind(top_kind)
+        org = self._append_report_suffix(
+            _get_organization_name("jma_tsunami"), updates, level_zh or info_type
+        )
+        place_name = self._build_jma_tsunami_detail(
+            areas, title=title, headline=headline, cancel=cancel
+        )
+        return {
+            "type": "report",
+            "is_tsunami": True,
+            "source_type": "jma_tsunami",
+            "place_name": place_name,
+            "shock_time": shock_time,
+            "organization": org,
+            "magnitude": 0,
+            "depth": 0,
+            "latitude": 0,
+            "longitude": 0,
+            "event_id": str(data.get("id") or "").strip(),
+            "tsunami_cancel": cancel,
+            "tsunami_headline": headline,
+            "tsunami_title": title,
+            "tsunami_info_type": info_type,
+            "tsunami_level": level_zh,
+            "tsunami_warning_level": level_zh,
+            "tsunami_areas": areas,
+            "raw_data": data,
+        }
 
     # ------------------------------------------------------------------
     # 帧入口

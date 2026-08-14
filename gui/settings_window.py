@@ -8,13 +8,13 @@
 
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QTabWidget, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
+    QTabWidget, QTabBar, QLabel, QPushButton, QCheckBox, QSlider, QSpinBox, QDoubleSpinBox,
     QLineEdit, QScrollArea, QMessageBox, QFrame, QColorDialog,
     QRadioButton, QButtonGroup, QPlainTextEdit, QComboBox, QGroupBox,
     QSizePolicy, QStyle, QShortcut, QFileDialog, QAbstractButton,
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer, QThread, QObject
-from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics, QPixmap
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QTimer, QThread, QObject, QSize
+from PyQt5.QtGui import QFont, QDesktopServices, QColor, QFontDatabase, QKeySequence, QFontMetrics, QPixmap, QPalette
 from typing import Optional, Dict, Any, List, Tuple
 import re
 import datetime
@@ -68,6 +68,9 @@ from config import (
     WOLFX_JMA_EQLIST_URL,
     EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
+    EQSC_HTTP_MASTER,
+    EQSC_HTTP_SOURCE_KEYS,
+    EQSC_WS_URL,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path, get_resource_path
@@ -78,6 +81,8 @@ from utils.performance_presets import (
     PERFORMANCE_MODES,
 )
 from .color_manager import Color48Picker
+from .image_crop_dialog import ImageCropDialog
+from .settings_auth_mixin import SettingsAuthMixin
 from .qt_light_theme import (
     apply_light_palette,
     light_dialog_stylesheet,
@@ -92,60 +97,314 @@ logger = get_logger()
 
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"
 
-# 设置页统一布局与样式常量
-MARGIN_TAB = 16
-SPACING_TAB = 16
-SPACING_BLOCK = 20
+# 设置页设计令牌（石色页底 + 同色调卡片，避免纯白块）
+COLOR_PAGE_BG = "#F3F1ED"
+COLOR_CARD_BG = "#F7F5F1"  # 略亮于页底，不再用 #FFFFFF
+COLOR_INPUT_BG = "#FFFEFC"  # 输入框略提亮，便于辨认可编辑区
+COLOR_TEXT = "#1F2937"
+COLOR_TEXT_SECONDARY = "#6B7280"
+COLOR_BORDER = "#E5E2DC"
+COLOR_ACCENT = "#3B82F6"
+COLOR_ACCENT_HOVER = "#2563EB"
+COLOR_ACCENT_PRESSED = "#1D4ED8"
+COLOR_LINK = "#3B82F6"
 
-# 共用 QSS（与高级版一致：16pt/16px 字号与新布局）
-STYLE_SECTION_TITLE = "font-weight: bold; font-size: 16pt; color: #333333; margin-bottom: 4px;"
-# 设置卡片内分区小标题（比 STYLE_SECTION_TITLE 略轻，用于同页多区块）
-STYLE_CARD_SUBHEAD = "font-weight: bold; font-size: 15px; color: #444444; margin-top: 6px; margin-bottom: 2px;"
-STYLE_LABEL = "font-size: 16px; color: #555555; line-height: 22pt;"
-STYLE_HINT = "font-size: 16px; color: #888888; line-height: 22pt;"
-STYLE_SLIDER = """
-    QSlider::groove:horizontal {
-        border: 1px solid #CCCCCC;
+MARGIN_TAB = 14
+SPACING_TAB = 12
+SPACING_BLOCK = 12
+GROUP_MARGINS = (14, 12, 14, 12)
+GROUP_SPACING = 8
+
+# 设置窗目标/最大宽度：单列表单，宁窄勿胖
+SETTINGS_DEFAULT_WIDTH = 500
+SETTINGS_MAX_WIDTH = 520
+SETTINGS_MIN_WIDTH = 460
+
+
+class _ContentWidthTabBar(QTabBar):
+    """按标签文字实际像素宽度计宽，避免样式表低估中文导致挤叠或等宽虚高。"""
+
+    PAD_H = 20  # 左右内边距合计（收紧，七标签更易一排放下）
+    PAD_V = 14
+    GAP = 4
+
+    def tabSizeHint(self, index: int) -> QSize:
+        fm = self.fontMetrics()
+        text = self.tabText(index)
+        try:
+            text_w = fm.horizontalAdvance(text)
+        except AttributeError:
+            text_w = fm.width(text)
+        # 选中态 font-weight:bold 会略增字宽，按字数预留
+        bold_slack = max(2, len(text))
+        w = text_w + self.PAD_H + self.GAP + bold_slack
+        h = max(fm.height() + self.PAD_V, 32)
+        base = super().tabSizeHint(index)
+        return QSize(max(w, 36), max(h, base.height()))
+
+
+class _FittingScrollArea(QScrollArea):
+    """设置页滚动区：内容宽度跟随视口，且不把超宽 sizeHint 回传给对话框。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        _set_widget_style(self, 
+            f"QScrollArea {{ background-color: {COLOR_PAGE_BG}; border: none; }}"
+        )
+        vp = self.viewport()
+        apply_light_palette(vp, COLOR_PAGE_BG, COLOR_TEXT)
+        _set_widget_style(vp, f"background-color: {COLOR_PAGE_BG};")
+
+    def sizeHint(self) -> QSize:
+        # 不要用内部控件的理想宽度（长标签/令牌框会把设置窗撑到接近全屏）
+        return QSize(SETTINGS_DEFAULT_WIDTH - 48, 480)
+
+    def minimumSizeHint(self) -> QSize:
+        return QSize(280, 200)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        body = self.widget()
+        if body is None:
+            return
+        vw = self.viewport().width()
+        if vw > 0:
+            body.setMaximumWidth(vw)
+            body.setMinimumWidth(0)
+
+
+def _prepare_scroll_body(body: QWidget) -> None:
+    """允许滚动内容在窄窗口下压缩，而不是撑破右侧。"""
+    body.setMinimumWidth(0)
+    body.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    # 必须用 #id 限定，裸 background-color 会渗到卡片内 Label/CheckBox 形成灰底纹
+    body.setObjectName("settingsScrollBody")
+    body.setAttribute(Qt.WA_StyledBackground, True)
+    apply_light_palette(body, COLOR_PAGE_BG, COLOR_TEXT)
+    _set_widget_style(body, f"#settingsScrollBody {{ background-color: {COLOR_PAGE_BG}; }}")
+
+
+def _prep_groupbox(group: QGroupBox) -> QGroupBox:
+    """石色卡片 GroupBox：实色底避免主窗口黑底渗入（不用纯白）。"""
+    group.setAttribute(Qt.WA_StyledBackground, True)
+    apply_light_palette(group, COLOR_CARD_BG, COLOR_TEXT)
+    _set_widget_style(group, STYLE_GROUPBOX)
+    return group
+
+
+def _prep_card_block(block: Optional[QWidget] = None) -> QWidget:
+    """卡片内中间层：与卡片同色 + 浅色调色板。"""
+    if block is None:
+        block = QWidget()
+    block.setAttribute(Qt.WA_StyledBackground, True)
+    apply_light_palette(block, COLOR_CARD_BG, COLOR_TEXT)
+    _set_widget_style(block, STYLE_INNER_BLOCK)
+    return block
+
+
+def _apply_group_layout(layout) -> None:
+    """统一 GroupBox 内边距与间距。"""
+    layout.setContentsMargins(*GROUP_MARGINS)
+    layout.setSpacing(GROUP_SPACING)
+
+
+def _make_settings_tab_shell():
+    """创建设置页通用滚动壳，返回 (scroll_area, body, main_layout)。"""
+    scroll_area = _FittingScrollArea()
+    body = QWidget()
+    _prepare_scroll_body(body)
+    main_layout = QVBoxLayout(body)
+    main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
+    main_layout.setSpacing(SPACING_TAB)
+    return scroll_area, body, main_layout
+
+
+def _add_tab_save_row(main_layout, on_save) -> None:
+    """在设置页底部加入居中「保存」按钮。"""
+    button_frame = QWidget()
+    button_layout = QHBoxLayout(button_frame)
+    button_layout.setContentsMargins(0, 6, 0, 0)
+    button_layout.addStretch()
+    save_btn = QPushButton("保存")
+    save_btn.setMinimumWidth(120)
+    save_btn.setMinimumHeight(36)
+    _set_widget_style(save_btn, STYLE_SAVE_BTN)
+    save_btn.clicked.connect(on_save)
+    button_layout.addWidget(save_btn)
+    button_layout.addStretch()
+    main_layout.addWidget(button_frame)
+
+
+# 卡片内中间层：实色（透明会透出主窗口黑底）
+STYLE_INNER_BLOCK = f"background-color: {COLOR_CARD_BG};"
+
+STYLE_CLEAR_CHILD_BG = f"""
+    QLabel, QCheckBox, QRadioButton, QSlider {{
+        background-color: transparent;
+    }}
+    QTabWidget, QTabBar {{
+        background-color: {COLOR_PAGE_BG};
+    }}
+"""
+
+# 顶栏：下划线选中；宽度由 _ContentWidthTabBar 按字数计算
+STYLE_TAB_WIDGET = f"""
+    QTabWidget::pane {{
+        border: none;
+        border-top: 1px solid {COLOR_BORDER};
+        background: {COLOR_PAGE_BG};
+        top: 0px;
+        margin-top: 0px;
+        padding-top: 4px;
+    }}
+    QTabBar {{
+        background: {COLOR_PAGE_BG};
+        qproperty-drawBase: 0;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {COLOR_TEXT_SECONDARY};
+        padding: 7px 8px 6px 8px;
+        margin-right: 2px;
+        border: none;
+        border-bottom: 3px solid transparent;
+        font-size: 14px;
+    }}
+    QTabBar::tab:selected {{
+        background: transparent;
+        color: {COLOR_TEXT};
+        font-weight: bold;
+        border-bottom: 3px solid {COLOR_ACCENT};
+    }}
+    QTabBar::tab:hover:!selected {{
+        background: #EAE7E1;
+        color: {COLOR_TEXT};
+        border-bottom: 3px solid #D4D0C8;
+        border-top-left-radius: 8px;
+        border-top-right-radius: 8px;
+    }}
+    QTabBar::scroller {{
+        width: 24px;
+    }}
+    QTabBar QToolButton {{
+        background: #EAE7E1;
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 4px;
+        margin: 2px 0;
+        padding: 0;
+    }}
+    QTabBar QToolButton:hover {{
+        background: #E0DCD4;
+    }}
+"""
+
+STYLE_SECTION_TITLE = f"font-weight: bold; font-size: 19px; color: {COLOR_TEXT}; margin-bottom: 4px; background: transparent;"
+STYLE_CARD_SUBHEAD = f"font-weight: bold; font-size: 17px; color: {COLOR_TEXT}; margin-top: 6px; margin-bottom: 2px; background: transparent;"
+STYLE_LABEL = f"font-size: 17px; color: {COLOR_TEXT}; line-height: 24px; background: transparent;"
+STYLE_HINT = f"font-size: 15px; color: {COLOR_TEXT_SECONDARY}; line-height: 22px; background: transparent;"
+STYLE_VALUE = f"font-size: 17px; color: {COLOR_TEXT}; min-width: 40px; background: transparent;"
+STYLE_CHECKBOX = f"font-size: 17px; color: {COLOR_TEXT}; spacing: 8px; background: transparent;"
+STYLE_CHECKBOX_SOURCE = f"font-size: 17px; line-height: 24px; padding: 2px 0; spacing: 8px; background: transparent;"
+STYLE_CHECKBOX_LOG = f"font-size: 17px; padding: 2px 0; spacing: 8px; background: transparent;"
+STYLE_CHECKBOX_SMALL = f"font-size: 16px; color: {COLOR_TEXT}; spacing: 8px; background: transparent;"
+STYLE_RADIO = f"font-size: 17px; color: {COLOR_TEXT}; spacing: 8px; background: transparent;"
+STYLE_SLIDER = f"""
+    QSlider::groove:horizontal {{
+        border: none;
         height: 6px;
-        background: #E0E0E0;
+        background: {COLOR_BORDER};
         border-radius: 3px;
-    }
-    QSlider::handle:horizontal {
-        background: #4A90E2;
-        border: 1px solid #4A90E2;
+    }}
+    QSlider::handle:horizontal {{
+        background: {COLOR_ACCENT};
+        border: none;
         width: 16px;
         height: 16px;
         margin: -5px 0;
         border-radius: 8px;
-    }
-    QSlider::handle:horizontal:hover { background: #357ABD; }
+    }}
+    QSlider::handle:horizontal:hover {{ background: {COLOR_ACCENT_HOVER}; }}
 """
-STYLE_SPINBOX = """
-    QSpinBox, QDoubleSpinBox {
-        padding: 6px;
-        border: 1px solid #CCCCCC;
-        border-radius: 4px;
-        font-size: 16px;
-    }
-    QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #4A90E2; }
+STYLE_SPINBOX = f"""
+    QSpinBox, QDoubleSpinBox {{
+        padding: 7px 10px;
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        font-size: 17px;
+        background: {COLOR_INPUT_BG};
+        color: {COLOR_TEXT};
+        min-height: 28px;
+    }}
+    QSpinBox:focus, QDoubleSpinBox:focus {{ border: 1px solid {COLOR_ACCENT}; }}
 """
-STYLE_COMBOBOX = """
-    QComboBox {
-        padding: 6px;
-        border: 1px solid #CCCCCC;
-        border-radius: 4px;
-        font-size: 16px;
-        min-height: 24px;
-    }
-    QComboBox:focus { border: 1px solid #4A90E2; }
+STYLE_COMBOBOX = f"""
+    QComboBox {{
+        padding: 7px 28px 7px 10px;
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        font-size: 17px;
+        min-height: 32px;
+        background: {COLOR_INPUT_BG};
+        color: {COLOR_TEXT};
+    }}
+    QComboBox:focus {{ border: 1px solid {COLOR_ACCENT}; }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+        width: 24px;
+        border: none;
+    }}
+    QComboBox QAbstractItemView {{
+        border: 1px solid {COLOR_BORDER};
+        background: {COLOR_INPUT_BG};
+        outline: 0;
+        font-size: 17px;
+        padding: 2px;
+        selection-background-color: {COLOR_ACCENT};
+        selection-color: #FFFFFF;
+    }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 34px;
+        padding: 6px 10px;
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background: {COLOR_ACCENT};
+        color: #FFFFFF;
+    }}
 """
-STYLE_LINEEDIT = "QLineEdit { padding: 6px; border: 1px solid #CCCCCC; border-radius: 4px; font-size: 16px; } QLineEdit:focus { border: 1px solid #4A90E2; }"
-STYLE_GROUPBOX = "QGroupBox { font-weight: bold; font-size: 16pt; color: #333333; border: 1px solid #CCCCCC; border-radius: 4px; margin-top: 10px; padding-top: 8px; } QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
-STYLE_SOURCE_TITLE = "font-weight: bold; font-size: 16px; color: #000000;"
-STYLE_ABOUT_ITEM = "font-size: 18px; color: #555555;"
-STYLE_STATUS_CONNECTED = "font-size: 15px; color: #2E7D32; font-weight: bold;"
-STYLE_STATUS_DISCONNECTED = "font-size: 15px; color: #C62828; font-weight: bold;"
-STYLE_STATUS_NEUTRAL = "font-size: 15px; color: #757575;"
+STYLE_LINEEDIT = (
+    f"QLineEdit {{ padding: 7px 10px; border: 1px solid {COLOR_BORDER}; border-radius: 8px; "
+    f"font-size: 17px; background: {COLOR_INPUT_BG}; color: {COLOR_TEXT}; min-height: 28px; }} "
+    f"QLineEdit:focus {{ border: 1px solid {COLOR_ACCENT}; }}"
+)
+STYLE_PLAINTEXT = (
+    f"QPlainTextEdit {{ padding: 8px; border: 1px solid {COLOR_BORDER}; border-radius: 8px; "
+    f"font-size: 17px; background: {COLOR_INPUT_BG}; color: {COLOR_TEXT}; }} "
+    f"QPlainTextEdit:focus {{ border: 1px solid {COLOR_ACCENT}; }}"
+)
+STYLE_GROUPBOX = (
+    f"QGroupBox {{ font-weight: bold; font-size: 19px; color: {COLOR_TEXT}; "
+    f"background-color: {COLOR_CARD_BG}; border: 1px solid {COLOR_BORDER}; "
+    f"border-radius: 12px; margin-top: 18px; "
+    f"padding-top: 20px; padding-bottom: 12px; }} "
+    f"QGroupBox::title {{ subcontrol-origin: margin; left: 14px; padding: 0 10px; "
+    f"color: {COLOR_TEXT}; background-color: {COLOR_CARD_BG}; }} "
+    # GroupBox 本地 stylesheet 会切断父级样式；子容器须实色，否则露出主窗口黑底
+    f"QGroupBox > QWidget {{ background-color: {COLOR_CARD_BG}; }} "
+    f"QGroupBox QLabel {{ background-color: transparent; color: {COLOR_TEXT}; }} "
+    f"QGroupBox QCheckBox, QGroupBox QRadioButton {{ background-color: transparent; color: {COLOR_TEXT}; }} "
+    f"QGroupBox QSlider {{ background-color: transparent; }}"
+)
+STYLE_SOURCE_TITLE = f"font-weight: bold; font-size: 18px; color: {COLOR_TEXT}; background: transparent;"
+STYLE_ABOUT_ITEM = f"font-size: 17px; color: {COLOR_TEXT_SECONDARY}; background: transparent;"
+STYLE_STATUS_CONNECTED = "font-size: 15px; color: #15803D; font-weight: bold; background: transparent;"
+STYLE_STATUS_DISCONNECTED = "font-size: 15px; color: #DC2626; font-weight: bold; background: transparent;"
+STYLE_STATUS_NEUTRAL = f"font-size: 15px; color: {COLOR_TEXT_SECONDARY}; background: transparent;"
+STYLE_PROVIDER_RADIO = f"font-size: 17px; font-weight: bold; color: {COLOR_TEXT}; padding: 6px 4px; spacing: 8px; background: transparent;"
 
 # 字体列表去重与精简：去掉「中」「中文」「_GB2312」等变体后缀，每种字体只保留一条，显示名用精简后的名称
 _FONT_SUFFIXES: Tuple[str, ...] = (
@@ -163,85 +422,181 @@ def _font_base_name(name: str) -> str:
     return s
 
 
+# 构建期暂缓子控件 setStyleSheet，建完后一次性刷上，减少布局 polish
+_PENDING_WIDGET_STYLES: List[Tuple[QWidget, str]] = []
+_DEFER_WIDGET_STYLES = False
+
+
+def _begin_defer_widget_styles() -> None:
+    """开始暂缓控件样式表应用。"""
+    global _DEFER_WIDGET_STYLES, _PENDING_WIDGET_STYLES
+    _DEFER_WIDGET_STYLES = True
+    _PENDING_WIDGET_STYLES = []
+
+
+def _set_widget_style(widget: QWidget, style: str) -> None:
+    """设置控件样式；若在暂缓期则先入队。"""
+    if _DEFER_WIDGET_STYLES:
+        _PENDING_WIDGET_STYLES.append((widget, style))
+    else:
+        widget.setStyleSheet(style)
+
+
+def _flush_deferred_widget_styles() -> None:
+    """应用暂缓期内积累的控件样式表。"""
+    global _DEFER_WIDGET_STYLES, _PENDING_WIDGET_STYLES
+    _DEFER_WIDGET_STYLES = False
+    pending = _PENDING_WIDGET_STYLES
+    _PENDING_WIDGET_STYLES = []
+    for widget, style in pending:
+        try:
+            widget.setStyleSheet(style)
+        except RuntimeError:
+            pass
+
+
+# 字体列表缓存：QFontDatabase.families() 很快，但逐字体 exactMatch 在 Windows 上可达数秒
+_FONT_LIST_CACHE: Optional[List[Tuple[str, str]]] = None
+
+
 def _get_deduplicated_font_list() -> List[Tuple[str, str]]:
-    """返回 [(显示名, 实际字体族)], 每种字体一条，显示名已精简；优先选用系统能 exactMatch 的字体名以保证应用后生效。"""
+    """返回 [(显示名, 实际字体族)]，每种字体一条；结果进程内缓存。
+
+    不再对每个候选调用 exactMatch（Windows 上数百次可耗时 1s+）。
+    优先使用与基名完全一致的族名，否则取最短候选（通常即主族名）。
+    """
+    global _FONT_LIST_CACHE
+    if _FONT_LIST_CACHE is not None:
+        return _FONT_LIST_CACHE
     db = QFontDatabase()
     families = db.families()
     base_to_candidates: Dict[str, List[str]] = {}
-    for f in sorted(families):
+    for f in families:
         base = _font_base_name(f)
         if not base:
             continue
         base_to_candidates.setdefault(base, []).append(f)
-    test_font = QFont()
-    test_font.setPointSize(12)
     result: List[Tuple[str, str]] = []
     for base in sorted(base_to_candidates.keys()):
         candidates = base_to_candidates[base]
-        # 优先选用 setFamily 后 exactMatch 为 True 的（保证保存后主窗口字体能生效）
-        chosen = None
-        for f in candidates:
-            test_font.setFamily(f)
-            if test_font.exactMatch():
-                chosen = f
-                break
-        if chosen is None:
-            chosen = candidates[0]
+        if base in candidates:
+            chosen = base
+        else:
+            # 最短名多为「正族」；同长度时保持原序稳定
+            chosen = min(candidates, key=lambda n: (len(n), n))
         result.append((base, chosen))
+    _FONT_LIST_CACHE = result
     return result
-STYLE_SAVE_BTN = """
-    QPushButton {
-        background-color: #4CAF50;
+
+
+_SETTINGS_TEXT_ENGINE_WARMED = False
+
+
+def prefetch_settings_assets() -> None:
+    """在 GUI 线程预热设置页重资源：字体列表 + 首次中文 LineEdit 排版。
+
+    Windows 上进程内第一次给 QLineEdit 设中文约 0.5–0.7s（DirectWrite/字体回退），
+    放到空闲预热后，真正打开设置窗时不再卡在水印等输入框。
+    """
+    global _SETTINGS_TEXT_ENGINE_WARMED
+    try:
+        _get_deduplicated_font_list()
+    except Exception as e:
+        logger.debug(f"预热设置页字体列表失败（可忽略）: {e}")
+    if _SETTINGS_TEXT_ENGINE_WARMED:
+        return
+    try:
+        # 无离屏控件消化首次中文 setText / 带样式 LineEdit 排版
+        warm = QLineEdit()
+        warm.setStyleSheet(STYLE_LINEEDIT)
+        warm.setText("预热")
+        warm.deleteLater()
+        _SETTINGS_TEXT_ENGINE_WARMED = True
+    except Exception as e:
+        logger.debug(f"预热设置页文本引擎失败（可忽略）: {e}")
+
+
+STYLE_SAVE_BTN = f"""
+    QPushButton {{
+        background-color: {COLOR_ACCENT};
         color: white;
         border: none;
-        border-radius: 4px;
-        font-size: 16px;
+        border-radius: 8px;
+        font-size: 15px;
         font-weight: bold;
-        padding: 8px 20px;
-    }
-    QPushButton:hover { background-color: #45a049; }
-    QPushButton:pressed { background-color: #3d8b40; }
+        padding: 6px 12px;
+        min-height: 30px;
+    }}
+    QPushButton:hover {{ background-color: {COLOR_ACCENT_HOVER}; }}
+    QPushButton:pressed {{ background-color: {COLOR_ACCENT_PRESSED}; }}
 """
-STYLE_SELECT_ALL_BTN = """
-    QPushButton {
-        background-color: #4A90E2;
+STYLE_SECONDARY_BTN = f"""
+    QPushButton {{
+        background-color: {COLOR_INPUT_BG};
+        color: {COLOR_TEXT};
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        font-size: 15px;
+        padding: 6px 10px;
+        min-height: 30px;
+    }}
+    QPushButton:hover {{ background-color: #EAE7E1; border-color: {COLOR_ACCENT}; }}
+    QPushButton:pressed {{ background-color: #E0DCD4; }}
+"""
+STYLE_CANCEL_BTN = f"""
+    QPushButton {{
+        background-color: #E8E4DE;
+        color: {COLOR_TEXT};
+        border: none;
+        border-radius: 8px;
+        font-size: 15px;
+        padding: 6px 10px;
+        min-height: 30px;
+    }}
+    QPushButton:hover {{ background-color: #DCD7CF; }}
+    QPushButton:pressed {{ background-color: #D0CBC2; }}
+"""
+STYLE_SELECT_ALL_BTN = f"""
+    QPushButton {{
+        background-color: {COLOR_ACCENT};
         color: white;
         border: none;
-        border-radius: 4px;
-        font-size: 16px;
+        border-radius: 8px;
+        font-size: 15px;
         font-weight: bold;
-        padding: 8px 20px;
-    }
-    QPushButton:hover { background-color: #357ABD; }
-    QPushButton:pressed { background-color: #2E5F8F; }
+        padding: 6px 12px;
+        min-height: 30px;
+    }}
+    QPushButton:hover {{ background-color: {COLOR_ACCENT_HOVER}; }}
+    QPushButton:pressed {{ background-color: {COLOR_ACCENT_PRESSED}; }}
 """
-STYLE_AUDIO_COMPACT_BTN = """
-    QPushButton {
-        background-color: #4A90E2;
+STYLE_AUDIO_COMPACT_BTN = f"""
+    QPushButton {{
+        background-color: {COLOR_ACCENT};
         color: white;
         border: none;
-        border-radius: 4px;
-        font-size: 14px;
+        border-radius: 8px;
+        font-size: 15px;
         font-weight: bold;
-        padding: 5px 8px;
-        min-height: 28px;
-    }
-    QPushButton:hover { background-color: #357ABD; }
-    QPushButton:pressed { background-color: #2E5F8F; }
+        padding: 5px 10px;
+        min-height: 30px;
+    }}
+    QPushButton:hover {{ background-color: {COLOR_ACCENT_HOVER}; }}
+    QPushButton:pressed {{ background-color: {COLOR_ACCENT_PRESSED}; }}
 """
-STYLE_AUDIO_FILE_BTN = """
-    QPushButton {
-        background-color: #FFFFFF;
-        color: #333333;
-        border: 1px solid #CCCCCC;
-        border-radius: 4px;
-        font-size: 14px;
+STYLE_AUDIO_FILE_BTN = f"""
+    QPushButton {{
+        background-color: {COLOR_INPUT_BG};
+        color: {COLOR_TEXT};
+        border: 1px solid {COLOR_BORDER};
+        border-radius: 8px;
+        font-size: 15px;
         padding: 5px 8px;
         min-height: 28px;
         text-align: left;
-    }
-    QPushButton:hover { border: 1px solid #4A90E2; background-color: #F7FAFD; }
-    QPushButton:pressed { background-color: #EEF4FB; }
+    }}
+    QPushButton:hover {{ border: 1px solid {COLOR_ACCENT}; background-color: #F8FAFC; }}
+    QPushButton:pressed {{ background-color: #EFF6FF; }}
 """
 
 _AUDIO_TIER_SOUND = (
@@ -275,18 +630,21 @@ class _WAuthLoginWorker(QObject):
         self.finished.emit(result)
 
 
-class SettingsWindow(QDialog):
+class SettingsWindow(SettingsAuthMixin, QDialog):
     """设置窗口"""
 
     # 后台线程鉴权结果回主线程（勿在非 GUI 线程直接改控件）
     fanstudio_auth_test_finished = pyqtSignal(bool, str, str)
+    eqsc_auth_test_finished = pyqtSignal(bool, str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, defer_secondary_tabs: bool = False):
         """
         初始化设置窗口
 
         Args:
             parent: 父窗口
+            defer_secondary_tabs: 若为 True，仅先建「外观」页，便于尽快 show；
+                调用方应在首次绘制后调用 complete_secondary_tabs()。
         """
         super().__init__(parent)
         self.config = Config()
@@ -299,6 +657,11 @@ class SettingsWindow(QDialog):
         # 数据源状态页：按分钟记录绿/红条（True=绿，False=红）
         self._status_minute_bars: Dict[str, List[bool]] = {}
         self._status_last_minute_key: Dict[str, str] = {}
+        # url -> 可复用卡片控件（避免每 2s deleteLater + 重建）
+        self._status_card_by_url: Dict[str, Dict[str, Any]] = {}
+        self._status_cards_url_order: List[str] = []
+        self._status_cards_empty_label: Optional[QLabel] = None
+        self._status_cards_stretch_item = None
         self.individual_source_urls = []  # 存储所有单项数据源的URL
         self.fanstudio_source_urls = []  # 存储所有Fan Studio单项数据源的URL（不包括All源）
         self._updating_mutual_exclusion = False  # 防止回调循环的标志
@@ -309,163 +672,48 @@ class SettingsWindow(QDialog):
         # 设置UI（只在初始化时调用一次）
         self._settings_dirty = False
         self._fanstudio_auth_testing = False
+        self._eqsc_auth_testing = False
+        self._defer_secondary_tabs = bool(defer_secondary_tabs)
+        self._secondary_tabs_ready = not self._defer_secondary_tabs
+        self.auto_save_settings_cb = None
         self.fanstudio_auth_test_finished.connect(self._on_fanstudio_auth_test_finished)
+        self.eqsc_auth_test_finished.connect(self._on_eqsc_auth_test_finished)
         self._setup_ui()
-        self._wire_dirty_tracking()
+        if self._secondary_tabs_ready:
+            self._wire_dirty_tracking()
         self._auto_save_running = False
         self._auto_save_timer = QTimer(self)
         self._auto_save_timer.setSingleShot(True)
         self._auto_save_timer.setInterval(800)
         self._auto_save_timer.timeout.connect(self._perform_auto_save)
-        self.auto_save_settings_cb = None
 
     def _update_base_urls(self):
         """更新基础 URL（固定使用 Fan Studio /all）"""
         self.all_source_url = FANSTUDIO_ALL_URL
 
-    def _on_fanstudio_auth_test_clicked(self):
-        """测试 Fan Studio API Key：连接 /all 发送 auth，等待 auth_success 或 error。"""
-        api_key = ""
-        if hasattr(self, "fanstudio_api_key_entry"):
-            api_key = self.fanstudio_api_key_entry.text().strip()
-        if not api_key:
-            show_warning(self, "提示", "请先填写 Fan Studio API Key（sk- 开头）。")
-            return
-        if getattr(self, "_fanstudio_auth_testing", False):
-            return
+    def _apply_window_chrome(self) -> None:
+        """应用设置窗调色板与样式表（宜在控件树建完后再调用，避免布局插入时反复 polish）。"""
+        apply_light_palette(self, COLOR_PAGE_BG, COLOR_TEXT)
+        pal = self.palette()
+        card = QColor(COLOR_CARD_BG)
+        input_bg = QColor(COLOR_INPUT_BG)
+        pal.setColor(QPalette.Window, QColor(COLOR_PAGE_BG))
+        pal.setColor(QPalette.Base, input_bg)
+        pal.setColor(QPalette.AlternateBase, card)
+        pal.setColor(QPalette.Button, card)
+        pal.setColor(QPalette.Light, card)
+        pal.setColor(QPalette.Midlight, card)
+        self.setPalette(pal)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        _set_widget_style(self, 
+            f"QDialog {{ background-color: {COLOR_PAGE_BG}; }}"
+            + light_dialog_stylesheet(COLOR_PAGE_BG)
+            + LIGHT_SCROLLBAR_QSS
+            + STYLE_TAB_WIDGET
+            + STYLE_CLEAR_CHILD_BG
+            + "QCheckBox, QRadioButton { spacing: 8px; background-color: transparent; }"
+        )
 
-        self._fanstudio_auth_testing = True
-        if hasattr(self, "fanstudio_auth_btn"):
-            self.fanstudio_auth_btn.setEnabled(False)
-        if hasattr(self, "fanstudio_auth_status_label"):
-            self.fanstudio_auth_status_label.setText("正在连接并鉴权…")
-            self.fanstudio_auth_status_label.setStyleSheet("color: #666666; font-size: 14px;")
-
-        import threading
-        from utils.fanstudio_credentials import test_fanstudio_auth
-
-        def _worker():
-            try:
-                ok, message = test_fanstudio_auth(api_key)
-            except Exception as e:
-                ok, message = False, f"鉴权异常: {e}"
-            # 必须经信号回主线程；后台线程里 QTimer.singleShot 可能永不触发
-            self.fanstudio_auth_test_finished.emit(bool(ok), str(message or ""), api_key)
-
-        threading.Thread(target=_worker, daemon=True, name="FanStudioAuthTest").start()
-
-    def _on_fanstudio_auth_test_finished(self, ok: bool, message: str, api_key: str):
-        """鉴权测试完成后更新 UI；成功则写入配置并对主连接热鉴权（无需重启）。"""
-        self._fanstudio_auth_testing = False
-        if hasattr(self, "fanstudio_auth_btn"):
-            self.fanstudio_auth_btn.setEnabled(True)
-        if ok:
-            self.config.ws_config.fanstudio_api_key = api_key
-            live_applied = self._hot_apply_fanstudio_auth(api_key)
-            self._mark_settings_dirty()
-            status = message or "鉴权成功，已接入数据流。"
-            if live_applied:
-                status = status + " 已对当前连接生效，完整数据流将自动下发。"
-            else:
-                status = status + " Key 已保存，Fan Studio 下次建连时将自动鉴权。"
-            if hasattr(self, "fanstudio_auth_status_label"):
-                self.fanstudio_auth_status_label.setText(status)
-                self.fanstudio_auth_status_label.setStyleSheet("color: #2E7D32; font-size: 14px;")
-            show_info(self, "鉴权成功", status)
-        else:
-            if hasattr(self, "fanstudio_auth_status_label"):
-                self.fanstudio_auth_status_label.setText(message or "鉴权失败")
-                self.fanstudio_auth_status_label.setStyleSheet("color: #C62828; font-size: 14px;")
-            show_warning(self, "鉴权失败", message or "鉴权失败，请检查 API Key。")
-        self._refresh_fanstudio_auth_status_label(force=False)
-
-    def _fanstudio_api_key_text(self) -> str:
-        """读取设置页当前填写的 Fan Studio API Key。"""
-        if hasattr(self, "fanstudio_api_key_entry") and self.fanstudio_api_key_entry is not None:
-            return (self.fanstudio_api_key_entry.text() or "").strip()
-        return (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip()
-
-    def _set_fanstudio_auth_status_text(self, text: str, color: str = "#888888") -> None:
-        """设置鉴权状态行文案（始终非空）。"""
-        if not hasattr(self, "fanstudio_auth_status_label") or self.fanstudio_auth_status_label is None:
-            return
-        msg = (text or "").strip() or "请输入 Key"
-        self.fanstudio_auth_status_label.setText(msg)
-        self.fanstudio_auth_status_label.setStyleSheet(f"color: {color}; font-size: 14px;")
-
-    def _refresh_fanstudio_auth_status_label(self, force: bool = False) -> None:
-        """
-        刷新 API Key 下方状态行，保证始终有可见文案。
-        优先级：测试进行中 > 主连接鉴权结果 > 是否已填写 Key。
-        """
-        if not hasattr(self, "fanstudio_auth_status_label") or self.fanstudio_auth_status_label is None:
-            return
-        if getattr(self, "_fanstudio_auth_testing", False) and not force:
-            self._set_fanstudio_auth_status_text("正在连接并鉴权…", "#666666")
-            return
-
-        key = self._fanstudio_api_key_text()
-        if not key:
-            self._set_fanstudio_auth_status_text("请输入 Key", "#888888")
-            return
-
-        parent = self.parent()
-        getter = getattr(parent, "get_fanstudio_auth_status", None) if parent is not None else None
-        state, message = "none", ""
-        if callable(getter):
-            try:
-                state, message = getter()
-            except Exception:
-                state, message = "none", ""
-        state = str(state or "none").strip().lower()
-        message = str(message or "").strip()
-        current = (self.fanstudio_auth_status_label.text() or "").strip()
-
-        if state == "ok":
-            text = message or "鉴权成功，已接入数据流。"
-            if force or current.startswith("正在连接并鉴权") or not current or current in (
-                "请输入 Key",
-                "已填写，点击「连接」进行鉴权",
-            ) or "鉴权成功" in current:
-                self._set_fanstudio_auth_status_text(text, "#2E7D32")
-            return
-        if state == "pending":
-            self._set_fanstudio_auth_status_text(message or "正在连接并鉴权…", "#666666")
-            return
-        if state == "failed":
-            if force or current.startswith("正在连接并鉴权") or "鉴权失败" in current or current in (
-                "请输入 Key",
-                "已填写，点击「连接」进行鉴权",
-                "",
-            ):
-                self._set_fanstudio_auth_status_text(message or "鉴权失败", "#C62828")
-            return
-
-        # 无主连接鉴权结果：保留最近一次成功/失败提示，否则提示去点连接
-        if current and current not in ("请输入 Key",) and (
-            "鉴权成功" in current or "鉴权失败" in current or current.startswith("正在连接并鉴权")
-        ):
-            return
-        self._set_fanstudio_auth_status_text("已填写，点击「连接」进行鉴权", "#666666")
-
-    def _sync_fanstudio_auth_status_label(self, force: bool = False) -> None:
-        """兼容旧调用：转交到统一刷新逻辑。"""
-        self._refresh_fanstudio_auth_status_label(force=force)
-
-    def _hot_apply_fanstudio_auth(self, api_key: str) -> bool:
-        """向主窗口已连接的 Fan Studio /all 热发送鉴权；返回是否已发出。"""
-        parent = self.parent()
-        if parent is None:
-            return False
-        apply_fn = getattr(parent, "apply_fanstudio_api_key", None)
-        if not callable(apply_fn):
-            ws_manager = getattr(parent, "ws_manager", None)
-            if ws_manager is None or not hasattr(ws_manager, "send_fanstudio_auth"):
-                return False
-            self.config.ws_config.fanstudio_api_key = (api_key or "").strip()
-            return bool(ws_manager.send_fanstudio_auth(api_key))
-        return bool(apply_fn(api_key))
-    
     def _setup_ui(self):
         """设置UI（只在初始化时调用一次）"""
         # 设置窗口属性
@@ -474,43 +722,60 @@ class SettingsWindow(QDialog):
         # 获取屏幕尺寸，确保窗口不超出屏幕
         from PyQt5.QtWidgets import QApplication
         screen = QApplication.desktop().screenGeometry()
-        max_width = min(550, screen.width() - 40)   # 宽度 550，留出边距
-        max_height = min(800, screen.height() - 100)  # 高度 800，留出边距（含任务栏）
+        max_width = min(SETTINGS_MAX_WIDTH, screen.width() - 40)
+        init_width = min(SETTINGS_DEFAULT_WIDTH, max_width)
+        max_height = min(800, screen.height() - 100)
         
-        self.setMinimumSize(500, 300)  # 最小宽度 500，避免内容挤在一起
-        self.resize(max_width, max_height)  # 初始尺寸 550×800
-        # 最大尺寸不超过屏幕，留出更多边距
-        self.setMaximumSize(screen.width() - 20, screen.height() - 40)  # 最大尺寸不超过屏幕
+        self.setMinimumSize(SETTINGS_MIN_WIDTH, 300)
+        self.setMaximumSize(max_width, screen.height() - 40)
+        self.resize(init_width, max_height)
         # 使用非模态窗口，避免阻塞主界面事件循环
         self.setModal(False)
-        
-        # 设置窗口背景为白色（Win 深色主题下需同时设置 QPalette，避免继承黑底）
-        apply_light_palette(self, "#FFFFFF")
-        self.setStyleSheet(
-            "background-color: white;"
-            + light_dialog_stylesheet("#FFFFFF")
-            + LIGHT_SCROLLBAR_QSS
-        )
-        
-        # 创建主布局
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
-        main_layout.setSpacing(10)
-        
-        # 创建标签页
-        self.notebook = QTabWidget()
-        main_layout.addWidget(self.notebook)
-        
-        # 标签页顺序：外观与显示、音频、数据源、数据源状态、高级、关于
-        self._create_appearance_tab()
-        self._create_audio_tab()
-        self._create_data_source_tab()
-        self._create_data_source_status_tab()
-        self._create_advanced_tab()
-        self._create_about_tab()
-        
-        # 创建底部按钮区域
-        self._create_bottom_buttons(main_layout)
+
+        # 构建期关闭重绘；子样式与窗口 chrome 放到控件建完后再套，减少布局 polish
+        self.setUpdatesEnabled(False)
+        _begin_defer_widget_styles()
+        try:
+            # 创建主布局
+            main_layout = QVBoxLayout(self)
+            main_layout.setContentsMargins(10, 8, 10, 10)
+            main_layout.setSpacing(6)
+            
+            # 创建标签页（先换自定义 TabBar，再 addTab，宽度按字数计算）
+            self.notebook = QTabWidget()
+            self.notebook.setTabBar(_ContentWidthTabBar())
+            self.notebook.setDocumentMode(True)
+            tab_bar = self.notebook.tabBar()
+            tab_bar.setExpanding(False)
+            tab_bar.setUsesScrollButtons(True)
+            tab_bar.setElideMode(Qt.ElideNone)
+            main_layout.addWidget(self.notebook)
+            
+            # 跨 Tab 共享的控件引用（外观 / 显示拆页后仍统一保存）
+            self.display_vars = {}
+            self.render_vars = {}
+            self.performance_vars = {}
+
+            # 标签页顺序：外观、显示、音频、数据源、数据源状态、高级、关于
+            # 先建「外观」，其余可延后，缩短首次可见耗时
+            self._create_appearance_tab()
+            if not self._defer_secondary_tabs:
+                self._create_secondary_tabs()
+            
+            # 创建底部按钮区域
+            self._create_bottom_buttons(main_layout)
+
+            if not self._defer_secondary_tabs:
+                # 抑制长文案/令牌框把布局最小宽度撑爆
+                self._tighten_horizontal_hints()
+
+            _flush_deferred_widget_styles()
+            self._apply_window_chrome()
+        finally:
+            # 异常时也要结束暂缓，避免后续控件样式一直入队不生效
+            if _DEFER_WIDGET_STYLES:
+                _flush_deferred_widget_styles()
+            self.setUpdatesEnabled(True)
         
         # 居中显示
         self._center_window()
@@ -519,15 +784,44 @@ class SettingsWindow(QDialog):
         self._custom_source_status_timer = QTimer(self)
         self._custom_source_status_timer.setInterval(2000)
         self._custom_source_status_timer.timeout.connect(self._update_custom_source_status)
-        # 数据源页连接/解析状态定时刷新
-        self._data_source_tab_index = 2
-        self._data_source_status_tab_index = 3
+        # 数据源页连接/解析状态定时刷新（外观/显示拆开后索引 +1）
+        self._appearance_tab_index = 0
+        self._display_tab_index = 1
+        self._audio_tab_index = 2
+        self._data_source_tab_index = 3
+        self._data_source_status_tab_index = 4
+        self._advanced_tab_index = 5
         self._status_refresh_timer = QTimer(self)
         self._status_refresh_timer.setInterval(2000)
         self._status_refresh_timer.timeout.connect(self._on_status_refresh_tick)
-        self._advanced_tab_index = 4  # 高级页在 notebook 中的索引
-        self._audio_tab_index = 1
         self.notebook.currentChanged.connect(self._on_settings_tab_changed)
+
+    def _create_secondary_tabs(self) -> None:
+        """创建除「外观」外的其余设置标签页（顺序须与索引常量一致）。"""
+        self._create_display_tab()
+        self._create_audio_tab()
+        self._create_data_source_tab()
+        self._create_data_source_status_tab()
+        self._create_advanced_tab()
+        self._create_about_tab()
+
+    def complete_secondary_tabs(self) -> None:
+        """补齐延后创建的标签页，并完成脏标记绑定。首次 show 后调用。"""
+        if self._secondary_tabs_ready:
+            return
+        self.setUpdatesEnabled(False)
+        _begin_defer_widget_styles()
+        try:
+            self._create_secondary_tabs()
+            self._tighten_horizontal_hints()
+            _flush_deferred_widget_styles()
+        finally:
+            if _DEFER_WIDGET_STYLES:
+                _flush_deferred_widget_styles()
+            self.setUpdatesEnabled(True)
+        self._wire_dirty_tracking()
+        self._secondary_tabs_ready = True
+        self._defer_secondary_tabs = False
     
     def _on_settings_tab_changed(self, index: int):
         """切换标签页时：仅在「高级」页启动状态刷新定时器，离开时停止。"""
@@ -537,6 +831,7 @@ class SettingsWindow(QDialog):
             if index == self._data_source_tab_index:
                 self._update_parse_status_labels()
                 self._sync_fanstudio_auth_status_label()
+                self._sync_eqsc_auth_status_label()
             else:
                 self._update_data_source_health_table()
         else:
@@ -557,6 +852,7 @@ class SettingsWindow(QDialog):
         if current_index == self._data_source_tab_index:
             self._update_parse_status_labels()
             self._sync_fanstudio_auth_status_label()
+            self._sync_eqsc_auth_status_label()
         elif current_index == self._data_source_status_tab_index:
             self._update_data_source_health_table()
 
@@ -589,17 +885,17 @@ class SettingsWindow(QDialog):
                         enabled = bool(getattr(mc, key, False))
                     if enabled:
                         lbl.setText(connected_text)
-                        lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
+                        _set_widget_style(lbl, STYLE_STATUS_CONNECTED)
                     else:
                         lbl.setText(disconnected_text)
-                        lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
+                        _set_widget_style(lbl, STYLE_STATUS_NEUTRAL)
                     continue
                 if key in parsed_keys:
                     lbl.setText(connected_text)
-                    lbl.setStyleSheet(STYLE_STATUS_CONNECTED)
+                    _set_widget_style(lbl, STYLE_STATUS_CONNECTED)
                 else:
                     lbl.setText(disconnected_text)
-                    lbl.setStyleSheet(STYLE_STATUS_NEUTRAL)
+                    _set_widget_style(lbl, STYLE_STATUS_NEUTRAL)
         except Exception as e:
             logger.debug(f"更新解析状态标签失败: {e}")
     
@@ -669,6 +965,7 @@ class SettingsWindow(QDialog):
                 self._status_refresh_timer.start()
             self._update_parse_status_labels()
             self._sync_fanstudio_auth_status_label()
+            self._sync_eqsc_auth_status_label()
         elif self.notebook.currentIndex() == self._data_source_status_tab_index:
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
@@ -787,6 +1084,23 @@ class SettingsWindow(QDialog):
             if hasattr(self, 'display_vars') and self.display_vars:
                 if 'always_on_top' in self.display_vars:
                     self.display_vars['always_on_top'].setChecked(getattr(g, 'always_on_top', False))
+                if 'borderless' in self.display_vars:
+                    self.display_vars['borderless'].setChecked(getattr(g, 'borderless', False))
+                if 'background_image_path' in self.display_vars:
+                    _bgp = str(getattr(g, 'background_image_path', '') or '')
+                    self.display_vars['background_image_path'].setText(_bgp)
+                    _sync = getattr(self, '_sync_bg_preset_combo', None)
+                    if callable(_sync):
+                        _sync(_bgp)
+                if 'background_blur_radius' in self.display_vars:
+                    self.display_vars['background_blur_radius'].setValue(
+                        int(getattr(g, 'background_blur_radius', 12) or 0)
+                    )
+                if 'background_overlay_opacity' in self.display_vars:
+                    _ov = float(getattr(g, 'background_overlay_opacity', 0.35) or 0.0)
+                    self.display_vars['background_overlay_opacity'].setValue(
+                        int(round(max(0.0, min(0.9, _ov)) * 100))
+                    )
                 if 'speed' in self.display_vars:
                     self.display_vars['speed'].setValue(int(round(g.text_speed * 10)))
                 if 'width' in self.display_vars:
@@ -835,6 +1149,19 @@ class SettingsWindow(QDialog):
                     self.display_vars['geo_filter_radius_km'].setValue(
                         int(float(getattr(mc, 'geo_filter_radius_km', 1000) or 1000))
                     )
+                if 'weather_region_filter_enabled' in self.display_vars:
+                    self.display_vars['weather_region_filter_enabled'].setChecked(
+                        bool(getattr(mc, 'weather_region_filter_enabled', False))
+                    )
+                if 'weather_region_filter' in self.display_vars:
+                    self.display_vars['weather_region_filter'].setText(
+                        getattr(mc, 'weather_region_filter', '') or ''
+                    )
+                if 'weather_level_filter' in self.display_vars:
+                    _wl = (getattr(mc, 'weather_level_filter', 'none') or 'none').strip().lower()
+                    _combo = self.display_vars['weather_level_filter']
+                    _idx = _combo.findData(_wl)
+                    _combo.setCurrentIndex(_idx if _idx >= 0 else 0)
                 if 'watermark_text' in self.display_vars:
                     self.display_vars['watermark_text'].setText(
                         getattr(g, 'watermark_text', '') or ''
@@ -931,6 +1258,11 @@ class SettingsWindow(QDialog):
                 self.fanstudio_api_key_entry.setText(
                     getattr(self.config.ws_config, 'fanstudio_api_key', '') or ''
                 )
+            if hasattr(self, 'eqsc_login_token_entry'):
+                self.eqsc_login_token_entry.setText(
+                    getattr(self.config.ws_config, 'eqsc_login_token', '') or ''
+                )
+                self._refresh_eqsc_auth_status_label(force=True)
             for attr, cfg_name in [
                 ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
                 ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
@@ -956,6 +1288,41 @@ class SettingsWindow(QDialog):
                 ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
                 ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
                 ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
+                ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+                ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
+                ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
+                ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
+                ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
+                ('whews_parse_cea_cb', 'whews_parse_cea'),
+                ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
+                ('whews_parse_cenc_cb', 'whews_parse_cenc'),
+                ('whews_parse_cwa_cb', 'whews_parse_cwa'),
+                ('whews_parse_hko_cb', 'whews_parse_hko'),
+                ('whews_parse_usgs_cb', 'whews_parse_usgs'),
+                ('whews_parse_emsc_cb', 'whews_parse_emsc'),
+                ('whews_parse_bcsf_cb', 'whews_parse_bcsf'),
+                ('whews_parse_gfz_cb', 'whews_parse_gfz'),
+                ('whews_parse_usp_cb', 'whews_parse_usp'),
+                ('whews_parse_kma_cb', 'whews_parse_kma'),
+                ('whews_parse_bmkg_cb', 'whews_parse_bmkg'),
+                ('whews_parse_geonet_cb', 'whews_parse_geonet'),
+                ('whews_parse_tmd_cb', 'whews_parse_tmd'),
+                ('whews_parse_ingv_cb', 'whews_parse_ingv'),
+                ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
+                ('whews_parse_mmd_cb', 'whews_parse_mmd'),
+                ('whews_parse_beijing_cb', 'whews_parse_beijing'),
+                ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
+                ('whews_parse_ningxia_cb', 'whews_parse_ningxia'),
+                ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
+                ('whews_parse_ntwc_cb', 'whews_parse_ntwc'),
+                ('whews_parse_ptwc_cb', 'whews_parse_ptwc'),
+                ('whews_parse_incois_cb', 'whews_parse_incois'),
+                ('whews_parse_jma_tsunami_cb', 'whews_parse_jma_tsunami'),
+                ('whews_parse_phivolcs_cb', 'whews_parse_phivolcs'),
+                ('whews_parse_sgc_cb', 'whews_parse_sgc'),
+                ('whews_parse_ga_cb', 'whews_parse_ga'),
+                ('whews_parse_cenais_cb', 'whews_parse_cenais'),
+                ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ]:
                 cb = getattr(self, attr, None)
                 if cb is not None:
@@ -974,6 +1341,22 @@ class SettingsWindow(QDialog):
                 self.p2pquake_parse_551_cb.setChecked(getattr(mc, 'p2pquake_parse_551', True))
             if hasattr(self, 'p2pquake_parse_552_cb'):
                 self.p2pquake_parse_552_cb.setChecked(getattr(mc, 'p2pquake_parse_552', True))
+            for attr, cfg_name, default in [
+                ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew', True),
+                ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report', True),
+                ('eqsc_parse_jma_tsunami_cb', 'eqsc_parse_jma_tsunami', True),
+                ('eqsc_parse_cenc_cb', 'eqsc_parse_cenc', True),
+                ('eqsc_parse_cenc_ir_cb', 'eqsc_parse_cenc_ir', True),
+                ('eqsc_parse_cwa_cb', 'eqsc_parse_cwa', True),
+                ('eqsc_parse_hko_cb', 'eqsc_parse_hko', True),
+                ('eqsc_parse_usgs_cb', 'eqsc_parse_usgs', True),
+                ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc', True),
+                ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon', True),
+                ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano', False),
+            ]:
+                cb = getattr(self, attr, None)
+                if cb is not None:
+                    cb.setChecked(getattr(mc, cfg_name, default))
             if hasattr(self, 'radio_custom_text') and hasattr(self, 'radio_report'):
                 use_custom = getattr(mc, 'use_custom_text', False)
                 self.radio_custom_text.setChecked(use_custom)
@@ -1017,26 +1400,56 @@ class SettingsWindow(QDialog):
         finally:
             self._clear_settings_dirty()
     
+    def _tighten_horizontal_hints(self) -> None:
+        """让可换行文案与单行输入在水平方向可压缩，避免撑宽整个设置窗。"""
+        for label in self.findChildren(QLabel):
+            # Ignored：以父级实际宽度换行，杜绝「理想整行宽度」回传给对话框
+            if label.wordWrap():
+                label.setMinimumWidth(0)
+                label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            else:
+                # 关于页等超长单行（数据源名、URL）也允许收缩并改开换行
+                fm = label.fontMetrics()
+                try:
+                    tw = fm.horizontalAdvance(label.text())
+                except AttributeError:
+                    tw = fm.width(label.text())
+                if tw > SETTINGS_DEFAULT_WIDTH - 80:
+                    label.setWordWrap(True)
+                    label.setMinimumWidth(0)
+                    label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        for edit in self.findChildren(QLineEdit):
+            edit.setMinimumWidth(0)
+            edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for area in self.findChildren(_FittingScrollArea):
+            area.setMinimumWidth(0)
+
     def _adjust_window_to_screen(self):
-        """调整窗口大小和位置，确保不超出屏幕"""
+        """调整窗口大小和位置，确保不超出屏幕，并限制最大宽度。"""
         from PyQt5.QtWidgets import QApplication
         screen = QApplication.desktop().screenGeometry()
-        
-        # 获取当前窗口尺寸
+
+        max_width = min(SETTINGS_MAX_WIDTH, screen.width() - 40)
+        max_height = screen.height() - 40
+        # 复用旧实例时重设宽高上限（旧代码曾允许接近全屏宽）
+        self.setMinimumWidth(min(SETTINGS_MIN_WIDTH, max_width))
+        self.setMaximumWidth(max_width)
+        self.setMaximumHeight(max_height)
+
         window_width = self.width()
         window_height = self.height()
-        
-        # 如果窗口高度超过屏幕，调整窗口高度
-        max_height = screen.height() - 40  # 留出40像素边距
+
+        # 超过上限，或明显宽于默认宽（历史超宽几何）→ 收到默认宽
+        if window_width > max_width or window_width > SETTINGS_DEFAULT_WIDTH + 8:
+            window_width = min(SETTINGS_DEFAULT_WIDTH, max_width)
+            self.resize(window_width, window_height)
+
         if window_height > max_height:
             window_height = max_height
             self.resize(window_width, window_height)
-        
-        # 如果窗口宽度超过屏幕，调整窗口宽度
-        max_width = screen.width() - 20  # 留出20像素边距
-        if window_width > max_width:
-            window_width = max_width
-            self.resize(window_width, window_height)
+
+        window_width = self.width()
+        window_height = self.height()
         
         # 计算理想位置（居中或相对于父窗口）
         if self.parent():
@@ -1048,17 +1461,12 @@ class SettingsWindow(QDialog):
             y = (screen.height() - window_height) // 2
         
         # 确保窗口不超出屏幕边界
-        # 水平方向：确保窗口在屏幕内
         x = max(10, min(x, screen.width() - window_width - 10))
         
-        # 垂直方向：优先保证窗口完全可见
-        # 如果窗口底部超出屏幕，向上移动
         if y + window_height > screen.height() - 10:
             y = screen.height() - window_height - 10
-        # 如果窗口顶部超出屏幕，向下移动
         if y < 10:
             y = 10
-        # 确保窗口底部不超出屏幕
         if y + window_height > screen.height() - 10:
             y = screen.height() - window_height - 10
         
@@ -1069,41 +1477,13 @@ class SettingsWindow(QDialog):
         self._adjust_window_to_screen()
     
     def _create_appearance_tab(self):
-        """创建「外观与显示」标签页（合并原显示设置、渲染方式、字体颜色、自定义文本）"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scrollable_widget = QWidget()
-        main_layout = QVBoxLayout(scrollable_widget)
-        main_layout.setContentsMargins(12, 12, 12, 12)
-        main_layout.setSpacing(8)
-        
-        # ---------- 1. 基本显示 ----------
-        group_basic = QGroupBox("基本显示")
-        group_basic.setStyleSheet(STYLE_GROUPBOX)
-        block1 = QWidget()
-        block1_layout = QGridLayout(block1)
-        block1_layout.setContentsMargins(0, 0, 0, 0)
-        block1_layout.setHorizontalSpacing(4)
-        block1_layout.setVerticalSpacing(2)
-        
-        # 滚动速度
-        speed_label = QLabel("滚动速度:")
-        speed_label.setStyleSheet(STYLE_LABEL)
-        speed_label.setMinimumWidth(80)
-        speed_slider = QSlider(Qt.Horizontal)
-        speed_slider.setMinimum(1)
-        speed_slider.setMaximum(200)
-        speed_slider.setValue(int(self.config.gui_config.text_speed * 10))
-        speed_slider.setStyleSheet(STYLE_SLIDER)
-        speed_slider.setFixedWidth(240)
-        speed_label_value = QLabel(f"{self.config.gui_config.text_speed:.1f}")
-        speed_label_value.setStyleSheet("font-size: 16px; color: #333333; min-width: 40px;")
-        speed_slider.valueChanged.connect(lambda v: speed_label_value.setText(f"{v / 10.0:.1f}"))
-        block1_layout.addWidget(speed_label, 1, 0)
-        block1_layout.addWidget(speed_slider, 1, 1)
-        block1_layout.addWidget(speed_label_value, 1, 2)
-        
+        """创建「外观」标签页：字体、背景、水印、颜色。"""
+        scroll_area, scrollable_widget, main_layout = _make_settings_tab_shell()
+
+        # ---------- 字体 ----------
+        group_font = QGroupBox("字体")
+        _prep_groupbox(group_font)
+
         # 字体、字体大小（第0行）；字体加粗、字体倾斜（第1行）—— 使用内部 QGridLayout 保证列对齐
         font_family_combo = QComboBox()
         font_family_combo.setEditable(False)
@@ -1117,12 +1497,16 @@ class SettingsWindow(QDialog):
             font_family_combo.setCurrentIndex(idx)
         else:
             font_family_combo.setCurrentIndex(0)
-        font_family_combo.setStyleSheet(STYLE_COMBOBOX)
-        font_family_combo.setFixedWidth(140)
+        _set_widget_style(font_family_combo, STYLE_COMBOBOX)
+        font_family_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        font_family_combo.setMinimumContentsLength(4)
+        font_family_combo.setMinimumWidth(100)
+        font_family_combo.setMaximumWidth(160)
+        font_family_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         font_family_label = QLabel("字体:")
-        font_family_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(font_family_label, STYLE_LABEL)
         font_size_label = QLabel("字体大小:")
-        font_size_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(font_size_label, STYLE_LABEL)
         font_size_combo = QComboBox()
         font_size_combo.setEditable(False)
         for i in range(10, 101, 2):
@@ -1132,204 +1516,320 @@ class SettingsWindow(QDialog):
         if idx_fs < 0:
             idx_fs = font_size_combo.findData((current_fs // 2) * 2)
         font_size_combo.setCurrentIndex(max(0, idx_fs))
-        font_size_combo.setStyleSheet(STYLE_COMBOBOX)
-        font_size_combo.setFixedWidth(88)
+        _set_widget_style(font_size_combo, STYLE_COMBOBOX)
+        font_size_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        font_size_combo.setMinimumContentsLength(4)
+        # 需容纳「100px」+ 下拉箭头，避免显示成「40p:」被裁切
+        font_size_combo.setMinimumWidth(108)
+        font_size_combo.setFixedWidth(108)
         font_bold_cb = QCheckBox("字体加粗")
         font_bold_cb.setChecked(getattr(self.config.gui_config, 'font_bold', False))
-        font_bold_cb.setStyleSheet("font-size: 16px;")
+        _set_widget_style(font_bold_cb, STYLE_CHECKBOX)
         font_italic_cb = QCheckBox("字体倾斜")
         font_italic_cb.setChecked(getattr(self.config.gui_config, 'font_italic', False))
-        font_italic_cb.setStyleSheet("font-size: 16px;")
-        font_block = QWidget()
-        font_block_layout = QGridLayout(font_block)
+        _set_widget_style(font_italic_cb, STYLE_CHECKBOX)
+        # 用 HBox 紧贴「标签 + 下拉」，避免 Grid 跨列把标签与选择框拉开
+        font_block = _prep_card_block()
+        font_block_layout = QVBoxLayout(font_block)
         font_block_layout.setContentsMargins(0, 0, 0, 0)
-        font_block_layout.setHorizontalSpacing(4)
-        font_block_layout.setVerticalSpacing(4)
-        font_block_layout.addWidget(font_family_label, 0, 0)
-        font_block_layout.addWidget(font_family_combo, 0, 1)
-        font_block_layout.addWidget(font_size_label, 0, 2)
-        font_block_layout.addWidget(font_size_combo, 0, 3)
-        font_block_layout.addWidget(font_bold_cb, 1, 0, 1, 2)
-        font_block_layout.addWidget(font_italic_cb, 1, 2, 1, 2)
-        font_block_layout.setColumnStretch(4, 1)
-        block1_layout.addWidget(font_block, 2, 0, 1, 4)
-        
-        # 显示时区
-        from utils.timezone_names_zh import get_tz_options, iana_to_display
-        timezone_options = get_tz_options()
-        timezone_label = QLabel("显示时区:")
-        timezone_label.setStyleSheet(STYLE_LABEL)
-        timezone_label.setMinimumWidth(80)
-        timezone_combo = QComboBox()
-        timezone_combo.setEditable(False)
-        for display, iana_id in timezone_options:
-            timezone_combo.addItem(display, iana_id)
-        current_tz = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
-        idx = timezone_combo.findData(current_tz)
-        if idx < 0:
-            idx = timezone_combo.findText(iana_to_display(current_tz))
-        if idx < 0:
-            idx = timezone_combo.findText("UTC+8 北京")
-        timezone_combo.setCurrentIndex(max(0, idx))
-        timezone_combo.setStyleSheet(STYLE_COMBOBOX)
-        timezone_combo.setFixedWidth(120)
-        timezone_hint = QLabel("修改时区后立即生效（新消息按新时区显示）。")
-        timezone_hint.setStyleSheet(STYLE_HINT)
-        timezone_hint.setWordWrap(True)
-        tz_row = QWidget()
-        tz_row_layout = QHBoxLayout(tz_row)
-        tz_row_layout.setContentsMargins(0, 0, 0, 0)
-        tz_row_layout.setSpacing(8)
-        tz_row_layout.addWidget(timezone_combo)
-        tz_row_layout.addWidget(timezone_hint)
-        tz_row_layout.addStretch()
-        block1_layout.addWidget(timezone_label, 3, 0)
-        block1_layout.addWidget(tz_row, 3, 1, 1, 5)
-        group_basic_layout = QVBoxLayout(group_basic)
-        group_basic_layout.setContentsMargins(10, 12, 10, 10)
-        group_basic_layout.addWidget(block1)
-        main_layout.addWidget(group_basic)
-        main_layout.addSpacing(10)
-        
-        # ---------- 2. 窗口 ----------
-        group_window = QGroupBox("窗口")
-        group_window.setStyleSheet(STYLE_GROUPBOX)
-        block2 = QWidget()
-        block2_layout = QVBoxLayout(block2)
-        block2_layout.setContentsMargins(0, 0, 0, 0)
-        block2_layout.setSpacing(6)
-        size_row = QHBoxLayout()
-        size_row.setSpacing(10)
-        width_label = QLabel("窗口宽度:")
-        width_label.setStyleSheet(STYLE_LABEL)
-        width_spin = QSpinBox()
-        width_spin.setMinimum(200)
-        width_spin.setMaximum(20000)  # 不受分辨率限制，允许超出屏幕
-        width_spin.setValue(min(20000, max(200, int(self.config.gui_config.window_width))))
-        width_spin.setStyleSheet(STYLE_SPINBOX)
-        height_label = QLabel("窗口高度:")
-        height_label.setStyleSheet(STYLE_LABEL)
-        height_spin = QSpinBox()
-        height_spin.setMinimum(50)
-        height_spin.setMaximum(5000)  # 不受分辨率限制，允许超出屏幕
-        height_spin.setValue(min(5000, max(50, int(self.config.gui_config.window_height))))
-        height_spin.setStyleSheet(STYLE_SPINBOX)
-        size_row.addWidget(width_label)
-        size_row.addWidget(width_spin)
-        size_row.addWidget(height_label)
-        size_row.addWidget(height_spin)
-        size_row.addStretch()
-        block2_layout.addLayout(size_row)
-        opacity_row = QWidget()
-        opacity_row_layout = QHBoxLayout(opacity_row)
-        opacity_row_layout.setContentsMargins(0, 0, 0, 0)
-        opacity_row_layout.setSpacing(8)
-        opacity_label = QLabel("窗口透明度:")
-        opacity_label.setStyleSheet(STYLE_LABEL)
-        opacity_label.setMinimumWidth(80)
-        opacity_row_layout.addWidget(opacity_label)
-        opacity_slider = QSlider(Qt.Horizontal)
-        opacity_slider.setMinimum(1)
-        opacity_slider.setMaximum(10)
-        opacity_slider.setValue(int(self.config.gui_config.opacity * 10))
-        opacity_slider.setStyleSheet(STYLE_SLIDER)
-        opacity_slider.setFixedWidth(240)
-        opacity_label_value = QLabel(f"{self.config.gui_config.opacity:.1f}")
-        opacity_label_value.setStyleSheet("font-size: 16px; color: #333333; min-width: 40px;")
-        opacity_slider.valueChanged.connect(lambda v: opacity_label_value.setText(f"{v / 10.0:.1f}"))
-        opacity_row_layout.addWidget(opacity_slider)
-        opacity_row_layout.addWidget(opacity_label_value)
-        opacity_row_layout.addStretch()
-        block2_layout.addWidget(opacity_row)
-        always_on_top_cb = QCheckBox("窗口置顶")
-        always_on_top_cb.setChecked(getattr(self.config.gui_config, 'always_on_top', False))
-        always_on_top_cb.setStyleSheet("font-size: 16px;")
-        always_on_top_cb.setToolTip("开启后主窗口始终置于其他窗口之上")
-        block2_layout.addWidget(always_on_top_cb)
-        minimize_tray_cb = QCheckBox("关闭窗口时最小化到系统托盘")
-        minimize_tray_cb.setChecked(getattr(self.config.gui_config, 'minimize_to_tray', False))
-        minimize_tray_cb.setStyleSheet("font-size: 16px;")
-        block2_layout.addWidget(minimize_tray_cb)
-        toast_notify_cb = QCheckBox("预警时显示系统通知")
-        toast_notify_cb.setChecked(getattr(self.config.gui_config, 'toast_notifications_enabled', False))
-        toast_notify_cb.setStyleSheet("font-size: 16px;")
-        block2_layout.addWidget(toast_notify_cb)
-        group_window_layout = QVBoxLayout(group_window)
-        group_window_layout.setContentsMargins(10, 12, 10, 10)
-        group_window_layout.addWidget(block2)
-        main_layout.addWidget(group_window)
-        main_layout.addSpacing(10)
+        font_block_layout.setSpacing(6)
+        font_row = QHBoxLayout()
+        font_row.setContentsMargins(0, 0, 0, 0)
+        font_row.setSpacing(6)
+        font_row.addWidget(font_family_label)
+        font_row.addWidget(font_family_combo)
+        font_row.addSpacing(12)
+        font_row.addWidget(font_size_label)
+        font_row.addWidget(font_size_combo)
+        font_row.addStretch(1)
+        font_block_layout.addLayout(font_row)
+        style_row = QHBoxLayout()
+        style_row.setContentsMargins(0, 0, 0, 0)
+        style_row.setSpacing(16)
+        style_row.addWidget(font_bold_cb)
+        style_row.addWidget(font_italic_cb)
+        style_row.addStretch(1)
+        font_block_layout.addLayout(style_row)
+        group_font_layout = QVBoxLayout(group_font)
+        group_font_layout.setContentsMargins(*GROUP_MARGINS)
+        group_font_layout.setSpacing(4)
+        group_font_layout.addWidget(font_block)
+        main_layout.addWidget(group_font)
+        main_layout.addSpacing(SPACING_BLOCK)
 
-        mc = self.config.message_config
-        group_filter = QGroupBox("消息过滤")
-        group_filter.setStyleSheet(STYLE_GROUPBOX)
-        gf_layout = QVBoxLayout(group_filter)
-        gf_layout.setContentsMargins(10, 12, 10, 10)
-        gf_layout.setSpacing(8)
-        min_report_mag_row = QHBoxLayout()
-        min_report_mag_label = QLabel("速报最低震级（0 表示不限制）：")
-        min_report_mag_label.setStyleSheet(STYLE_LABEL)
-        min_report_mag_spin = QDoubleSpinBox()
-        min_report_mag_spin.setRange(0.0, 10.0)
-        min_report_mag_spin.setDecimals(1)
-        min_report_mag_spin.setSingleStep(0.1)
-        min_report_mag_spin.setValue(float(getattr(mc, 'min_report_magnitude', 0) or 0))
-        min_report_mag_spin.setSuffix(" M")
-        min_report_mag_spin.setStyleSheet(STYLE_SPINBOX)
-        min_report_mag_row.addWidget(min_report_mag_label)
-        min_report_mag_row.addWidget(min_report_mag_spin)
-        min_report_mag_row.addStretch()
-        gf_layout.addLayout(min_report_mag_row)
-        geo_filter_cb = QCheckBox("启用关注区域过滤（圆心 + 半径）")
-        geo_filter_cb.setChecked(getattr(mc, 'geo_filter_enabled', False))
-        geo_filter_cb.setStyleSheet("font-size: 16px;")
-        gf_layout.addWidget(geo_filter_cb)
-        geo_lat_row = QHBoxLayout()
-        geo_lat_row.addWidget(QLabel("圆心纬度："))
-        geo_lat_spin = QDoubleSpinBox()
-        geo_lat_spin.setRange(-90, 90)
-        geo_lat_spin.setDecimals(4)
-        geo_lat_spin.setValue(float(getattr(mc, 'geo_filter_latitude', 39.9042)))
-        geo_lat_row.addWidget(geo_lat_spin)
-        geo_lat_row.addWidget(QLabel("经度："))
-        geo_lon_spin = QDoubleSpinBox()
-        geo_lon_spin.setRange(-180, 180)
-        geo_lon_spin.setDecimals(4)
-        geo_lon_spin.setValue(float(getattr(mc, 'geo_filter_longitude', 116.4074)))
-        geo_lat_row.addWidget(geo_lon_spin)
-        geo_lat_row.addWidget(QLabel("半径 km："))
-        geo_radius_spin = QSpinBox()
-        geo_radius_spin.setRange(1, 20000)
-        geo_radius_spin.setValue(int(getattr(mc, 'geo_filter_radius_km', 1000)))
-        geo_lat_row.addWidget(geo_radius_spin)
-        geo_lat_row.addStretch()
-        gf_layout.addLayout(geo_lat_row)
-        main_layout.addWidget(group_filter)
-        main_layout.addSpacing(10)
+        
+        # ---------- 自定义背景 / 毛玻璃（独立分组，避免挤在「窗口」内被裁切） ----------
+        from utils.builtin_backgrounds import (
+            BUILTIN_BACKGROUNDS,
+            builtin_display_name,
+            is_builtin_background,
+            make_builtin_path,
+        )
+
+        group_bg = QGroupBox("自定义背景")
+        _prep_groupbox(group_bg)
+        group_bg_layout = QVBoxLayout(group_bg)
+        group_bg_layout.setContentsMargins(*GROUP_MARGINS)
+        group_bg_layout.setSpacing(10)
+
+        _bg_label_w = 112
+        bg_preset_row = QHBoxLayout()
+        bg_preset_row.setSpacing(8)
+        bg_preset_label = QLabel("内置背景:")
+        _set_widget_style(bg_preset_label, STYLE_LABEL)
+        bg_preset_label.setFixedWidth(_bg_label_w)
+        bg_preset_combo = QComboBox()
+        _set_widget_style(bg_preset_combo, STYLE_COMBOBOX)
+        # 按控件宽度伸缩，不按最长选项撑破右侧边框
+        bg_preset_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        bg_preset_combo.setMinimumContentsLength(6)
+        bg_preset_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        bg_preset_combo.addItem("纯色（无图片）", "")
+        for _fname, _label in BUILTIN_BACKGROUNDS:
+            bg_preset_combo.addItem(_label, make_builtin_path(_fname))
+        bg_preset_combo.addItem("自定义图片", "__custom__")
+        bg_preset_row.addWidget(bg_preset_label)
+        bg_preset_row.addWidget(bg_preset_combo, 1)
+        group_bg_layout.addLayout(bg_preset_row)
+
+        bg_path_row = QHBoxLayout()
+        bg_path_row.setSpacing(8)
+        bg_path_label = QLabel("背景图片:")
+        _set_widget_style(bg_path_label, STYLE_LABEL)
+        bg_path_label.setFixedWidth(_bg_label_w)
+        bg_path_edit = QLineEdit()
+        bg_path_edit.setReadOnly(True)
+        bg_path_edit.setPlaceholderText("未选择（使用纯色背景）")
+        _set_widget_style(bg_path_edit, STYLE_LINEEDIT)
+        bg_path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        _bg_cur = str(getattr(self.config.gui_config, "background_image_path", "") or "").strip()
+        if _bg_cur:
+            bg_path_edit.setText(_bg_cur)
+        bg_browse_btn = QPushButton("选择…")
+        bg_browse_btn.setFixedWidth(72)
+        bg_browse_btn.setMinimumHeight(32)
+        bg_crop_btn = QPushButton("裁切…")
+        bg_crop_btn.setFixedWidth(72)
+        bg_crop_btn.setMinimumHeight(32)
+        bg_crop_btn.setToolTip("按当前字幕窗口尺寸裁切（内置与自定义均可）")
+        bg_clear_btn = QPushButton("清除")
+        bg_clear_btn.setFixedWidth(56)
+        bg_clear_btn.setMinimumHeight(32)
+
+        def _sync_bg_preset_combo(path: str) -> None:
+            path = (path or "").strip()
+            bg_preset_combo.blockSignals(True)
+            try:
+                if not path:
+                    bg_preset_combo.setCurrentIndex(0)
+                elif is_builtin_background(path):
+                    idx = bg_preset_combo.findData(path)
+                    bg_preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
+                else:
+                    idx = bg_preset_combo.findData("__custom__")
+                    if idx >= 0:
+                        bg_preset_combo.setCurrentIndex(idx)
+            finally:
+                bg_preset_combo.blockSignals(False)
+            bg_crop_btn.setEnabled(bool(path))
+
+        def _on_bg_preset_changed(index: int) -> None:
+            data = bg_preset_combo.itemData(index)
+            if data == "__custom__":
+                cur = (bg_path_edit.text() or "").strip()
+                if not cur or is_builtin_background(cur):
+                    _pick_background_image()
+                else:
+                    _sync_bg_preset_combo(cur)
+                return
+            if not data:
+                bg_path_edit.clear()
+                bg_path_edit.setToolTip("")
+            else:
+                path = str(data)
+                bg_path_edit.setText(path)
+                bg_path_edit.setToolTip(f"内置：{builtin_display_name(path)}")
+            _sync_bg_preset_combo(bg_path_edit.text())
+
+        def _pick_background_image():
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择背景图片",
+                "",
+                "图片文件 (*.png *.jpg *.jpeg *.bmp *.webp);;所有文件 (*.*)",
+            )
+            if not path:
+                cur = (bg_path_edit.text() or "").strip()
+                if not cur or is_builtin_background(cur):
+                    bg_path_edit.clear()
+                    _sync_bg_preset_combo("")
+                else:
+                    _sync_bg_preset_combo(cur)
+                return
+            cropped = self._crop_background_image(path)
+            if cropped is None:
+                # 用户取消裁切：保留原自定义图，否则清空回到纯色/内置
+                cur = (bg_path_edit.text() or "").strip()
+                if not cur or is_builtin_background(cur):
+                    bg_path_edit.clear()
+                    _sync_bg_preset_combo("")
+                else:
+                    _sync_bg_preset_combo(cur)
+                return
+            # 同时保留原图，便于之后点「裁切…」重新选区
+            stored = self._store_background_image(src_path=path, qimage=cropped)
+            if stored:
+                bg_path_edit.setText(stored)
+                bg_path_edit.setToolTip(f"自定义：{stored}")
+                _sync_bg_preset_combo(stored)
+
+        def _recrop_background_image():
+            from utils.builtin_backgrounds import resolve_background_image_file
+
+            cur = (bg_path_edit.text() or "").strip()
+            if not cur:
+                show_info(self, "提示", "请先选择背景图后再裁切。")
+                return
+            # 内置图：直接裁切资源文件，结果存为自定义图并保留原图供再次裁切
+            if is_builtin_background(cur):
+                source = resolve_background_image_file(cur)
+                if not source:
+                    show_critical(self, "错误", "找不到内置背景图文件。")
+                    return
+                cropped = self._crop_background_image(source)
+                if cropped is None:
+                    return
+                stored = self._store_background_image(src_path=source, qimage=cropped)
+                if stored:
+                    bg_path_edit.setText(stored)
+                    bg_path_edit.setToolTip(f"自定义：{stored}")
+                    _sync_bg_preset_combo(stored)
+                return
+            source = self._resolve_custom_background_source()
+            if not source:
+                show_critical(
+                    self,
+                    "错误",
+                    "找不到可裁切的原图。请重新「选择…」上传图片（上传时会保留原图供再次裁切）。",
+                )
+                return
+            cropped = self._crop_background_image(source)
+            if cropped is None:
+                return
+            stored = self._store_background_image(qimage=cropped, keep_source=True)
+            if stored:
+                bg_path_edit.setText(stored)
+                bg_path_edit.setToolTip(f"自定义：{stored}")
+                _sync_bg_preset_combo(stored)
+
+        def _clear_background_image():
+            bg_path_edit.clear()
+            bg_path_edit.setToolTip("")
+            _sync_bg_preset_combo("")
+
+        bg_browse_btn.clicked.connect(_pick_background_image)
+        bg_crop_btn.clicked.connect(_recrop_background_image)
+        bg_clear_btn.clicked.connect(_clear_background_image)
+        bg_preset_combo.currentIndexChanged.connect(_on_bg_preset_changed)
+        # 下拉列表宽度跟控件对齐，避免横向撑出设置页
+        _bg_combo_show_popup = bg_preset_combo.showPopup
+
+        def _show_bg_preset_popup():
+            view = bg_preset_combo.view()
+            w = max(int(bg_preset_combo.width()), 180)
+            view.setMinimumWidth(w)
+            view.setMaximumWidth(w + 48)
+            _bg_combo_show_popup()
+
+        bg_preset_combo.showPopup = _show_bg_preset_popup
+        self._sync_bg_preset_combo = _sync_bg_preset_combo
+        _sync_bg_preset_combo(_bg_cur)
+        if _bg_cur and is_builtin_background(_bg_cur):
+            bg_path_edit.setText(_bg_cur)
+            bg_path_edit.setToolTip(f"内置：{builtin_display_name(_bg_cur)}")
+        bg_path_row.addWidget(bg_path_label)
+        bg_path_row.addWidget(bg_path_edit, 1)
+        bg_path_row.addWidget(bg_browse_btn)
+        bg_path_row.addWidget(bg_crop_btn)
+        bg_path_row.addWidget(bg_clear_btn)
+        group_bg_layout.addLayout(bg_path_row)
+
+        blur_row = QHBoxLayout()
+        blur_row.setSpacing(8)
+        blur_label = QLabel("毛玻璃模糊:")
+        _set_widget_style(blur_label, STYLE_LABEL)
+        blur_label.setFixedWidth(_bg_label_w)
+        blur_slider = QSlider(Qt.Horizontal)
+        blur_slider.setMinimum(0)
+        blur_slider.setMaximum(40)
+        blur_slider.setValue(int(getattr(self.config.gui_config, "background_blur_radius", 12) or 0))
+        _set_widget_style(blur_slider, STYLE_SLIDER)
+        blur_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        blur_slider.setToolTip("0 = 关闭模糊；数值越大毛玻璃越强")
+        blur_value = QLabel(str(blur_slider.value()))
+        _set_widget_style(blur_value, STYLE_VALUE)
+        blur_slider.valueChanged.connect(lambda v: blur_value.setText(str(v)))
+        blur_row.addWidget(blur_label)
+        blur_row.addWidget(blur_slider, 1)
+        blur_row.addWidget(blur_value)
+        group_bg_layout.addLayout(blur_row)
+
+        overlay_row = QHBoxLayout()
+        overlay_row.setSpacing(8)
+        overlay_label = QLabel("遮罩浓度:")
+        _set_widget_style(overlay_label, STYLE_LABEL)
+        overlay_label.setFixedWidth(_bg_label_w)
+        overlay_slider = QSlider(Qt.Horizontal)
+        overlay_slider.setMinimum(0)
+        overlay_slider.setMaximum(90)
+        _ov = float(getattr(self.config.gui_config, "background_overlay_opacity", 0.35) or 0.0)
+        overlay_slider.setValue(int(round(max(0.0, min(0.9, _ov)) * 100)))
+        _set_widget_style(overlay_slider, STYLE_SLIDER)
+        overlay_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        overlay_slider.setToolTip("半透明深色遮罩，保证字幕可读；0=无遮罩")
+        overlay_value = QLabel(f"{overlay_slider.value() / 100.0:.2f}")
+        _set_widget_style(overlay_value, STYLE_VALUE)
+        overlay_slider.valueChanged.connect(
+            lambda v: overlay_value.setText(f"{v / 100.0:.2f}")
+        )
+        overlay_row.addWidget(overlay_label)
+        overlay_row.addWidget(overlay_slider, 1)
+        overlay_row.addWidget(overlay_value)
+        group_bg_layout.addLayout(overlay_row)
+
+        bg_hint = QLabel("上传后裁切，再调模糊与遮罩（与整窗透明度独立）。")
+        bg_hint.setToolTip("裁切比例随字幕窗口；液态玻璃效果与整窗不透明度相互独立。")
+        _set_widget_style(bg_hint, STYLE_HINT)
+        bg_hint.setWordWrap(True)
+        group_bg_layout.addWidget(bg_hint)
+
+        main_layout.addWidget(group_bg)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # 水印设置（QGroupBox，含背景水印文字 + 字体/字号/位置）
         group_wm = QGroupBox("水印设置")
-        group_wm.setStyleSheet(STYLE_GROUPBOX)
-        block_wm = QWidget()
+        _prep_groupbox(group_wm)
+        block_wm = _prep_card_block()
         block_wm_layout = QVBoxLayout(block_wm)
         block_wm_layout.setContentsMargins(0, 0, 0, 0)
         block_wm_layout.setSpacing(8)
         watermark_label = QLabel("背景水印:")
-        watermark_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(watermark_label, STYLE_LABEL)
         watermark_edit = QLineEdit()
         watermark_edit.setPlaceholderText("留空则不显示")
         watermark_edit.setText(getattr(self.config.gui_config, 'watermark_text', "") or "")
-        watermark_edit.setStyleSheet(STYLE_LINEEDIT)
+        _set_widget_style(watermark_edit, STYLE_LINEEDIT)
         watermark_text_row = QHBoxLayout()
         watermark_text_row.setSpacing(8)
         watermark_text_row.addWidget(watermark_label)
-        watermark_text_row.addWidget(watermark_edit)
-        watermark_text_row.addStretch()
+        watermark_text_row.addWidget(watermark_edit, 1)
         block_wm_layout.addLayout(watermark_text_row)
-        wm_hint = QLabel("可为背景水印单独设置字体/字号和显示位置；自动字号按主字体大小缩放。")
-        wm_hint.setStyleSheet(STYLE_HINT)
+        wm_hint = QLabel("可单独设置水印字体、字号与位置。")
+        wm_hint.setToolTip("自动字号按主字体大小缩放。")
+        _set_widget_style(wm_hint, STYLE_HINT)
         wm_hint.setWordWrap(True)
-        wm_hint.setMaximumWidth(380)
+        wm_hint.setMinimumWidth(0)
+        wm_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         block_wm_layout.addWidget(wm_hint)
         watermark_font_combo = QComboBox()
         watermark_font_combo.setEditable(False)
@@ -1343,16 +1843,19 @@ class SettingsWindow(QDialog):
             idx_ff = watermark_font_combo.findData(wm_ff)
             if idx_ff >= 0:
                 watermark_font_combo.setCurrentIndex(idx_ff)
-        watermark_font_combo.setStyleSheet(STYLE_COMBOBOX)
-        watermark_font_combo.setMaximumWidth(280)
+        _set_widget_style(watermark_font_combo, STYLE_COMBOBOX)
+        watermark_font_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        watermark_font_combo.setMinimumContentsLength(8)
+        watermark_font_combo.setMinimumWidth(120)
+        watermark_font_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         wm_font_row = QHBoxLayout()
         wm_adv_label = QLabel("水印字体:")
-        wm_adv_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(wm_adv_label, STYLE_LABEL)
         wm_font_row.addWidget(wm_adv_label)
-        wm_font_row.addWidget(watermark_font_combo)
-        wm_font_row.addStretch()
+        wm_font_row.addWidget(watermark_font_combo, 1)
         block_wm_layout.addLayout(wm_font_row)
         watermark_font_auto_cb = QCheckBox("自动字号")
+        _set_widget_style(watermark_font_auto_cb, STYLE_CHECKBOX)
         wm_fs = int(getattr(self.config.gui_config, 'watermark_font_size', 0) or 0)
         auto_initial = (wm_fs <= 0)
         watermark_font_auto_cb.setChecked(auto_initial)
@@ -1361,7 +1864,7 @@ class SettingsWindow(QDialog):
         base_fs = getattr(self.config.gui_config, 'font_size', 40)
         auto_fs = max(8, int(base_fs * 0.7))
         watermark_font_size_spin.setValue(wm_fs if wm_fs > 0 else auto_fs)
-        watermark_font_size_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(watermark_font_size_spin, STYLE_SPINBOX)
         watermark_font_size_spin.setFixedWidth(72)
         watermark_font_size_spin.setEnabled(not auto_initial)
         def _on_wm_font_auto_changed(checked: bool):
@@ -1375,7 +1878,7 @@ class SettingsWindow(QDialog):
         wm_size_row.addStretch()
         block_wm_layout.addLayout(wm_size_row)
         watermark_pos_combo = QComboBox()
-        watermark_pos_combo.setStyleSheet(STYLE_COMBOBOX)
+        _set_widget_style(watermark_pos_combo, STYLE_COMBOBOX)
         watermark_pos_combo.setMaximumWidth(200)
         watermark_pos_combo.addItem("斜向 45 度平铺（整屏）", "diagonal")
         watermark_pos_combo.addItem("左上角", "top_left")
@@ -1389,110 +1892,21 @@ class SettingsWindow(QDialog):
         watermark_pos_combo.setCurrentIndex(max(0, idx_pos))
         wm_pos_row = QHBoxLayout()
         wm_pos_label = QLabel("水印位置:")
-        wm_pos_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(wm_pos_label, STYLE_LABEL)
         wm_pos_row.addWidget(wm_pos_label)
         wm_pos_row.addWidget(watermark_pos_combo)
         wm_pos_row.addStretch()
         block_wm_layout.addLayout(wm_pos_row)
         group_wm_layout = QVBoxLayout(group_wm)
-        group_wm_layout.setContentsMargins(10, 12, 10, 10)
+        group_wm_layout.setContentsMargins(*GROUP_MARGINS)
         group_wm_layout.addWidget(block_wm)
         main_layout.addWidget(group_wm)
-        main_layout.addSpacing(10)
-
-        # ---------- 3. 性能与渲染 ----------
-        group_render = QGroupBox("性能与渲染")
-        group_render.setStyleSheet(STYLE_GROUPBOX)
-        block3 = QWidget()
-        block3_layout = QVBoxLayout(block3)
-        block3_layout.setContentsMargins(0, 0, 0, 0)
-        block3_layout.setSpacing(6)
-        preset_row = QHBoxLayout()
-        preset_label = QLabel("性能模式:")
-        preset_label.setStyleSheet(STYLE_LABEL)
-        performance_mode_combo = QComboBox()
-        performance_mode_combo.setStyleSheet(STYLE_SPINBOX)
-        for mode_id in PERFORMANCE_MODES:
-            performance_mode_combo.addItem(PERFORMANCE_MODE_LABELS[mode_id], mode_id)
-        current_mode = getattr(self.config.gui_config, "performance_mode", "standard") or "standard"
-        mode_index = performance_mode_combo.findData(current_mode)
-        if mode_index < 0:
-            mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_STANDARD)
-        performance_mode_combo.setCurrentIndex(max(0, mode_index))
-        performance_mode_combo.setToolTip(
-            "低配：降低帧率与数据源负载，保留核心预警；\n"
-            "标准：与程序默认配置接近；\n"
-            "高配：启用 GPU 渲染、完整数据源与告警体验。"
-        )
-        apply_preset_btn = QPushButton("应用性能模式")
-        apply_preset_btn.setStyleSheet("font-size: 16px; padding: 4px 12px;")
-        apply_preset_btn.setToolTip("按所选模式批量调整渲染、数据源与告警等设置")
-        apply_preset_btn.clicked.connect(self._apply_performance_preset)
-        preset_row.addWidget(preset_label)
-        preset_row.addWidget(performance_mode_combo)
-        preset_row.addWidget(apply_preset_btn)
-        preset_row.addStretch()
-        block3_layout.addLayout(preset_row)
-        preset_hint = QLabel(
-            "切换性能模式会覆盖渲染、数据源与告警等相关设置；预警显示能力保留。"
-            "应用后立即热重载生效。"
-        )
-        preset_hint.setWordWrap(True)
-        preset_hint.setStyleSheet(STYLE_HINT)
-        block3_layout.addWidget(preset_hint)
-        render_row = QHBoxLayout()
-        cpu_radio = QRadioButton("CPU 渲染（软件）")
-        opengl_radio = QRadioButton("GPU 渲染（OpenGL）")
-        cpu_radio.setStyleSheet(STYLE_LABEL)
-        opengl_radio.setStyleSheet(STYLE_LABEL)
-        backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
-        if backend == "opengl":
-            opengl_radio.setChecked(True)
-        else:
-            cpu_radio.setChecked(True)
-        cpu_radio.setToolTip("兼容性更好，修改后立即热切换生效")
-        opengl_radio.setToolTip("硬件加速（OpenGL），修改后立即热切换生效")
-        render_row.addWidget(cpu_radio)
-        render_row.addWidget(opengl_radio)
-        render_row.addStretch()
-        block3_layout.addLayout(render_row)
-        perf_row = QWidget()
-        perf_row_layout = QHBoxLayout(perf_row)
-        perf_row_layout.setContentsMargins(0, 0, 0, 0)
-        perf_row_layout.setSpacing(12)
-        vsync_checkbox = QCheckBox("启用垂直同步")
-        vsync_checkbox.setChecked(self.config.gui_config.vsync_enabled)
-        vsync_checkbox.setStyleSheet(STYLE_LABEL)
-        fps_label = QLabel("目标帧率:")
-        fps_label.setStyleSheet(STYLE_LABEL)
-        fps_spin = QSpinBox()
-        fps_spin.setMinimum(1)
-        fps_spin.setMaximum(240)
-        fps_spin.setValue(int(self.config.gui_config.target_fps))
-        fps_spin.setToolTip("1–240 fps。开启 VSync 时实际帧率跟随显示器。")
-        fps_spin.setStyleSheet(STYLE_SPINBOX)
-        # 目标帧率子组：标签 + 输入框 + 单位，内部紧凑 8px
-        fps_group = QWidget()
-        fps_group_layout = QHBoxLayout(fps_group)
-        fps_group_layout.setContentsMargins(0, 0, 0, 0)
-        fps_group_layout.setSpacing(8)
-        fps_group_layout.addWidget(fps_label)
-        fps_group_layout.addWidget(fps_spin)
-        fps_group_layout.addWidget(QLabel("fps"))
-        perf_row_layout.addWidget(vsync_checkbox)
-        perf_row_layout.addWidget(fps_group)
-        perf_row_layout.addStretch()
-        block3_layout.addWidget(perf_row)
-        group_render_layout = QVBoxLayout(group_render)
-        group_render_layout.setContentsMargins(10, 12, 10, 10)
-        group_render_layout.addWidget(block3)
-        main_layout.addWidget(group_render)
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # ---------- 4. 颜色 ----------
         group_color = QGroupBox("颜色")
-        group_color.setStyleSheet(STYLE_GROUPBOX)
-        block4 = QWidget()
+        _prep_groupbox(group_color)
+        block4 = _prep_card_block()
         block4_layout = QVBoxLayout(block4)
         block4_layout.setContentsMargins(0, 0, 0, 0)
         block4_layout.setSpacing(2)
@@ -1510,23 +1924,23 @@ class SettingsWindow(QDialog):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(8)
             lbl = QLabel(label_text)
-            lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(lbl, STYLE_LABEL)
             lbl.setMinimumWidth(120)  # 统一标签宽度，三行颜色预览/色值/按钮纵向对齐
             row_layout.addWidget(lbl)
             preview = QLabel()
             preview.setFixedSize(40, 25)
-            preview.setStyleSheet(f"background-color: {color_value}; border: 1px solid #000; border-radius: 3px;")
+            _set_widget_style(preview, f"background-color: {color_value}; border: 1px solid #000; border-radius: 3px;")
             row_layout.addWidget(preview)
             value_label = QLabel(color_value)
             value_label.setMinimumWidth(80)
-            value_label.setStyleSheet("font-size: 16px; color: #333333; font-family: monospace;")
+            _set_widget_style(value_label, STYLE_VALUE + " font-family: monospace;")
             # value_label 不加入 layout，仅保留引用供颜色更新使用
             btn = QPushButton("修改颜色")
-            btn.setStyleSheet("font-size: 16px; padding: 4px 10px;")
+            _set_widget_style(btn, STYLE_SECONDARY_BTN)
             btn.clicked.connect(lambda: self._open_color_picker(color_type))
             row_layout.addWidget(btn)
             reset_btn = QPushButton("恢复默认")
-            reset_btn.setStyleSheet(STYLE_HINT + " padding: 4px 10px;")
+            _set_widget_style(reset_btn, STYLE_HINT + " padding: 4px 10px;")
             reset_btn.clicked.connect(lambda: self._reset_color(color_type))
             row_layout.addWidget(reset_btn)
             row_layout.addStretch()
@@ -1537,15 +1951,407 @@ class SettingsWindow(QDialog):
         self.warning_color_preview, self.warning_color_label = _add_color_row(block4_layout, "地震预警颜色:", warning_color_value, 'warning')
         self.custom_text_color_preview, self.custom_text_color_label = _add_color_row(block4_layout, "自定义文本颜色:", custom_text_color_value, 'custom_text')
         group_color_layout = QVBoxLayout(group_color)
-        group_color_layout.setContentsMargins(10, 12, 10, 10)
+        group_color_layout.setContentsMargins(*GROUP_MARGINS)
         group_color_layout.addWidget(block4)
         main_layout.addWidget(group_color)
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(SPACING_BLOCK)
+
+        
+        self.display_vars.update({
+            'font_size': font_size_combo,
+            'font_family': font_family_combo,
+            'font_bold': font_bold_cb,
+            'font_italic': font_italic_cb,
+            'background_image_path': bg_path_edit,
+            'background_blur_radius': blur_slider,
+            'background_overlay_opacity': overlay_slider,
+            'watermark_text': watermark_edit,
+            'watermark_font_family': watermark_font_combo,
+            'watermark_font_auto': watermark_font_auto_cb,
+            'watermark_font_size': watermark_font_size_spin,
+            'watermark_position': watermark_pos_combo,
+        })
+
+        main_layout.addStretch()
+        _add_tab_save_row(main_layout, self._save_appearance_settings)
+        scroll_area.setWidget(scrollable_widget)
+        self.notebook.addTab(scroll_area, "外观")
+
+    def _create_display_tab(self):
+        """创建「显示」标签页：滚动/窗口/过滤/渲染/预警与自定义文本等。"""
+        scroll_area, scrollable_widget, main_layout = _make_settings_tab_shell()
+
+        # ---------- 1. 基本显示 ----------
+        group_basic = QGroupBox("基本显示")
+        _prep_groupbox(group_basic)
+        block1 = _prep_card_block()
+        block1_layout = QGridLayout(block1)
+        block1_layout.setContentsMargins(0, 0, 0, 0)
+        block1_layout.setHorizontalSpacing(8)
+        block1_layout.setVerticalSpacing(8)
+        
+        # 滚动速度
+        speed_label = QLabel("滚动速度:")
+        _set_widget_style(speed_label, STYLE_LABEL)
+        speed_label.setMinimumWidth(80)
+        speed_slider = QSlider(Qt.Horizontal)
+        speed_slider.setMinimum(1)
+        speed_slider.setMaximum(200)
+        speed_slider.setValue(int(self.config.gui_config.text_speed * 10))
+        _set_widget_style(speed_slider, STYLE_SLIDER)
+        speed_slider.setMinimumWidth(80)
+        speed_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        speed_label_value = QLabel(f"{self.config.gui_config.text_speed:.1f}")
+        _set_widget_style(speed_label_value, STYLE_VALUE)
+        speed_slider.valueChanged.connect(lambda v: speed_label_value.setText(f"{v / 10.0:.1f}"))
+        block1_layout.addWidget(speed_label, 1, 0)
+        block1_layout.addWidget(speed_slider, 1, 1)
+        block1_layout.addWidget(speed_label_value, 1, 2)
+        block1_layout.setColumnStretch(1, 1)
+        
+        # 显示时区：下拉与说明分行，避免窄宽度下换行被 GroupBox 底边裁切
+        from utils.timezone_names_zh import get_tz_options, iana_to_display
+        timezone_options = get_tz_options()
+        timezone_label = QLabel("显示时区:")
+        _set_widget_style(timezone_label, STYLE_LABEL)
+        timezone_label.setMinimumWidth(80)
+        timezone_combo = QComboBox()
+        timezone_combo.setEditable(False)
+        for display, iana_id in timezone_options:
+            timezone_combo.addItem(display, iana_id)
+        current_tz = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
+        idx = timezone_combo.findData(current_tz)
+        if idx < 0:
+            idx = timezone_combo.findText(iana_to_display(current_tz))
+        if idx < 0:
+            idx = timezone_combo.findText("UTC+8 北京")
+        timezone_combo.setCurrentIndex(max(0, idx))
+        _set_widget_style(timezone_combo, STYLE_COMBOBOX)
+        timezone_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        timezone_combo.setMinimumContentsLength(6)
+        timezone_combo.setMinimumWidth(140)
+        timezone_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        timezone_hint = QLabel("修改时区后立即生效（新消息按新时区显示）。")
+        _set_widget_style(timezone_hint, STYLE_HINT)
+        timezone_hint.setWordWrap(True)
+        timezone_hint.setMinimumWidth(0)
+        timezone_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        block1_layout.addWidget(timezone_label, 2, 0)
+        block1_layout.addWidget(timezone_combo, 2, 1, 1, 3)
+        block1_layout.addWidget(timezone_hint, 3, 1, 1, 3)
+        group_basic_layout = QVBoxLayout(group_basic)
+        group_basic_layout.setContentsMargins(*GROUP_MARGINS)
+        group_basic_layout.setSpacing(4)
+        group_basic_layout.addWidget(block1)
+        main_layout.addWidget(group_basic)
+        main_layout.addSpacing(SPACING_BLOCK)
+        
+        # ---------- 2. 窗口 ----------
+        group_window = QGroupBox("窗口")
+        _prep_groupbox(group_window)
+        block2 = _prep_card_block()
+        block2_layout = QVBoxLayout(block2)
+        block2_layout.setContentsMargins(0, 0, 0, 0)
+        block2_layout.setSpacing(6)
+        size_row = QHBoxLayout()
+        size_row.setSpacing(10)
+        width_label = QLabel("窗口宽度:")
+        _set_widget_style(width_label, STYLE_LABEL)
+        width_spin = QSpinBox()
+        width_spin.setMinimum(200)
+        width_spin.setMaximum(20000)  # 不受分辨率限制，允许超出屏幕
+        width_spin.setValue(min(20000, max(200, int(self.config.gui_config.window_width))))
+        _set_widget_style(width_spin, STYLE_SPINBOX)
+        height_label = QLabel("窗口高度:")
+        _set_widget_style(height_label, STYLE_LABEL)
+        height_spin = QSpinBox()
+        height_spin.setMinimum(50)
+        height_spin.setMaximum(5000)  # 不受分辨率限制，允许超出屏幕
+        height_spin.setValue(min(5000, max(50, int(self.config.gui_config.window_height))))
+        _set_widget_style(height_spin, STYLE_SPINBOX)
+        size_row.addWidget(width_label)
+        size_row.addWidget(width_spin)
+        size_row.addWidget(height_label)
+        size_row.addWidget(height_spin)
+        size_row.addStretch()
+        block2_layout.addLayout(size_row)
+        opacity_row = _prep_card_block()
+        opacity_row_layout = QHBoxLayout(opacity_row)
+        opacity_row_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_row_layout.setSpacing(8)
+        opacity_label = QLabel("窗口不透明度:")
+        _set_widget_style(opacity_label, STYLE_LABEL)
+        opacity_label.setMinimumWidth(100)
+        opacity_label.setToolTip("1.0 = 完全不透明；数值越小窗口越透明")
+        opacity_row_layout.addWidget(opacity_label)
+        opacity_slider = QSlider(Qt.Horizontal)
+        opacity_slider.setMinimum(1)
+        opacity_slider.setMaximum(10)
+        opacity_slider.setValue(int(self.config.gui_config.opacity * 10))
+        _set_widget_style(opacity_slider, STYLE_SLIDER)
+        opacity_slider.setMinimumWidth(80)
+        opacity_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        opacity_slider.setToolTip("1.0 = 完全不透明；数值越小窗口越透明")
+        opacity_label_value = QLabel(f"{self.config.gui_config.opacity:.1f}")
+        _set_widget_style(opacity_label_value, STYLE_VALUE)
+        opacity_slider.valueChanged.connect(lambda v: opacity_label_value.setText(f"{v / 10.0:.1f}"))
+        opacity_row_layout.addWidget(opacity_slider, 1)
+        opacity_row_layout.addWidget(opacity_label_value)
+        block2_layout.addWidget(opacity_row)
+        always_on_top_cb = QCheckBox("窗口置顶")
+        always_on_top_cb.setChecked(getattr(self.config.gui_config, 'always_on_top', False))
+        _set_widget_style(always_on_top_cb, STYLE_CHECKBOX)
+        always_on_top_cb.setToolTip("开启后主窗口始终置于其他窗口之上")
+        block2_layout.addWidget(always_on_top_cb)
+        borderless_cb = QCheckBox("无边框模式")
+        borderless_cb.setChecked(getattr(self.config.gui_config, "borderless", False))
+        _set_widget_style(borderless_cb, STYLE_CHECKBOX)
+        borderless_cb.setToolTip("隐藏系统标题栏与边框；左键拖拽可移动窗口，右键打开菜单")
+        block2_layout.addWidget(borderless_cb)
+        minimize_tray_cb = QCheckBox("关闭窗口时最小化到系统托盘")
+        minimize_tray_cb.setChecked(getattr(self.config.gui_config, 'minimize_to_tray', False))
+        _set_widget_style(minimize_tray_cb, STYLE_CHECKBOX)
+        block2_layout.addWidget(minimize_tray_cb)
+        toast_notify_cb = QCheckBox("预警时显示系统通知")
+        toast_notify_cb.setChecked(getattr(self.config.gui_config, 'toast_notifications_enabled', False))
+        _set_widget_style(toast_notify_cb, STYLE_CHECKBOX)
+        block2_layout.addWidget(toast_notify_cb)
+
+        group_window_layout = QVBoxLayout(group_window)
+        group_window_layout.setContentsMargins(*GROUP_MARGINS)
+        group_window_layout.addWidget(block2)
+        main_layout.addWidget(group_window)
+        main_layout.addSpacing(SPACING_BLOCK)
+
+        mc = self.config.message_config
+        group_filter = QGroupBox("消息过滤")
+        _prep_groupbox(group_filter)
+        gf_layout = QVBoxLayout(group_filter)
+        gf_layout.setContentsMargins(*GROUP_MARGINS)
+        gf_layout.setSpacing(8)
+
+        min_report_mag_row = QHBoxLayout()
+        min_report_mag_row.setSpacing(6)
+        min_report_mag_label = QLabel("速报最低震级：")
+        min_report_mag_label.setToolTip("0 表示不限制")
+        _set_widget_style(min_report_mag_label, STYLE_LABEL)
+        min_report_mag_spin = QDoubleSpinBox()
+        min_report_mag_spin.setRange(0.0, 10.0)
+        min_report_mag_spin.setDecimals(1)
+        min_report_mag_spin.setSingleStep(0.1)
+        min_report_mag_spin.setValue(float(getattr(mc, 'min_report_magnitude', 0) or 0))
+        min_report_mag_spin.setSuffix(" M")
+        _set_widget_style(min_report_mag_spin, STYLE_SPINBOX)
+        min_report_mag_spin.setFixedWidth(110)
+        min_report_mag_row.addWidget(min_report_mag_label)
+        min_report_mag_row.addWidget(min_report_mag_spin)
+        min_report_mag_row.addStretch(1)
+        gf_layout.addLayout(min_report_mag_row)
+
+        geo_filter_cb = QCheckBox("关注区域过滤")
+        geo_filter_cb.setChecked(getattr(mc, 'geo_filter_enabled', False))
+        _set_widget_style(geo_filter_cb, STYLE_CHECKBOX)
+        gf_layout.addWidget(geo_filter_cb)
+
+        geo_lat_row = QHBoxLayout()
+        geo_lat_row.setContentsMargins(18, 0, 0, 0)
+        geo_lat_row.setSpacing(6)
+        geo_lat_label = QLabel("圆心纬度：")
+        _set_widget_style(geo_lat_label, STYLE_LABEL)
+        geo_lat_spin = QDoubleSpinBox()
+        geo_lat_spin.setRange(-90, 90)
+        geo_lat_spin.setDecimals(4)
+        geo_lat_spin.setValue(float(getattr(mc, 'geo_filter_latitude', 39.9042)))
+        _set_widget_style(geo_lat_spin, STYLE_SPINBOX)
+        geo_lat_spin.setMinimumWidth(100)
+        geo_lat_spin.setMaximumWidth(120)
+        geo_lon_label = QLabel("经度：")
+        _set_widget_style(geo_lon_label, STYLE_LABEL)
+        geo_lon_spin = QDoubleSpinBox()
+        geo_lon_spin.setRange(-180, 180)
+        geo_lon_spin.setDecimals(4)
+        geo_lon_spin.setValue(float(getattr(mc, 'geo_filter_longitude', 116.4074)))
+        _set_widget_style(geo_lon_spin, STYLE_SPINBOX)
+        geo_lon_spin.setMinimumWidth(100)
+        geo_lon_spin.setMaximumWidth(120)
+        geo_lat_row.addWidget(geo_lat_label)
+        geo_lat_row.addWidget(geo_lat_spin)
+        geo_lat_row.addWidget(geo_lon_label)
+        geo_lat_row.addWidget(geo_lon_spin)
+        geo_lat_row.addStretch(1)
+        gf_layout.addLayout(geo_lat_row)
+
+        geo_radius_row = QHBoxLayout()
+        geo_radius_row.setContentsMargins(18, 0, 0, 0)
+        geo_radius_row.setSpacing(6)
+        geo_radius_label = QLabel("半径 km：")
+        _set_widget_style(geo_radius_label, STYLE_LABEL)
+        geo_radius_spin = QSpinBox()
+        geo_radius_spin.setRange(1, 20000)
+        geo_radius_spin.setValue(int(getattr(mc, 'geo_filter_radius_km', 1000)))
+        _set_widget_style(geo_radius_spin, STYLE_SPINBOX)
+        geo_radius_spin.setMinimumWidth(90)
+        geo_radius_spin.setMaximumWidth(110)
+        geo_radius_row.addWidget(geo_radius_label)
+        geo_radius_row.addWidget(geo_radius_spin)
+        geo_radius_row.addStretch(1)
+        gf_layout.addLayout(geo_radius_row)
+
+        weather_region_cb = QCheckBox("气象地区过滤")
+        weather_region_cb.setChecked(bool(getattr(mc, 'weather_region_filter_enabled', False)))
+        _set_widget_style(weather_region_cb, STYLE_CHECKBOX)
+        weather_region_cb.setToolTip(
+            "开启后仅显示标题/描述中包含所填地区名的气象预警。\n"
+            "多个地区用逗号、顿号或空格分隔，如：阳江,江门 或 海淀区、朝阳区。"
+        )
+        gf_layout.addWidget(weather_region_cb)
+
+        weather_region_row = QHBoxLayout()
+        weather_region_row.setContentsMargins(18, 0, 0, 0)
+        weather_region_row.setSpacing(6)
+        weather_region_label = QLabel("关注地区：")
+        _set_widget_style(weather_region_label, STYLE_LABEL)
+        weather_region_edit = QLineEdit()
+        weather_region_edit.setPlaceholderText("例如：阳江市,海淀区（留空则不过滤）")
+        weather_region_edit.setText(getattr(mc, 'weather_region_filter', '') or '')
+        _set_widget_style(weather_region_edit, STYLE_LINEEDIT)
+        weather_region_edit.setMinimumWidth(0)
+        weather_region_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        weather_region_row.addWidget(weather_region_label)
+        weather_region_row.addWidget(weather_region_edit, 1)
+        gf_layout.addLayout(weather_region_row)
+
+        weather_level_row = QHBoxLayout()
+        weather_level_row.setContentsMargins(18, 0, 0, 0)
+        weather_level_row.setSpacing(6)
+        weather_level_label = QLabel("气象等级过滤：")
+        _set_widget_style(weather_level_label, STYLE_LABEL)
+        weather_level_combo = QComboBox()
+        _set_widget_style(weather_level_combo, STYLE_COMBOBOX)
+        weather_level_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        weather_level_combo.setMinimumContentsLength(8)
+        weather_level_combo.setMinimumWidth(160)
+        weather_level_combo.setMaximumWidth(220)
+        weather_level_combo.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        weather_level_combo.setToolTip(
+            "不过滤：显示全部等级；\n"
+            "黄色预警及以上：黄/橙/红；\n"
+            "橙色预警及以上：橙/红；\n"
+            "红色预警：仅红色。\n"
+            "启用过滤后，无法识别等级的预警将被丢弃。"
+        )
+        _wl_options = (
+            ("none", "不过滤"),
+            ("yellow_up", "黄色预警及以上"),
+            ("orange_up", "橙色预警及以上"),
+            ("red", "红色预警"),
+        )
+        for _val, _label in _wl_options:
+            weather_level_combo.addItem(_label, _val)
+        _wl_cur = (getattr(mc, 'weather_level_filter', 'none') or 'none').strip().lower()
+        _wl_idx = weather_level_combo.findData(_wl_cur)
+        weather_level_combo.setCurrentIndex(_wl_idx if _wl_idx >= 0 else 0)
+        weather_level_row.addWidget(weather_level_label)
+        weather_level_row.addWidget(weather_level_combo)
+        weather_level_row.addStretch(1)
+        gf_layout.addLayout(weather_level_row)
+
+        main_layout.addWidget(group_filter)
+        main_layout.addSpacing(SPACING_BLOCK)
+
+        # ---------- 3. 性能与渲染 ----------
+        group_render = QGroupBox("性能与渲染")
+        _prep_groupbox(group_render)
+        block3 = _prep_card_block()
+        block3_layout = QVBoxLayout(block3)
+        block3_layout.setContentsMargins(0, 0, 0, 0)
+        block3_layout.setSpacing(6)
+        preset_row = QHBoxLayout()
+        preset_label = QLabel("性能模式:")
+        _set_widget_style(preset_label, STYLE_LABEL)
+        performance_mode_combo = QComboBox()
+        _set_widget_style(performance_mode_combo, STYLE_COMBOBOX)
+        performance_mode_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        performance_mode_combo.setMinimumContentsLength(6)
+        performance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        for mode_id in PERFORMANCE_MODES:
+            performance_mode_combo.addItem(PERFORMANCE_MODE_LABELS[mode_id], mode_id)
+        current_mode = getattr(self.config.gui_config, "performance_mode", "standard") or "standard"
+        mode_index = performance_mode_combo.findData(current_mode)
+        if mode_index < 0:
+            mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_STANDARD)
+        performance_mode_combo.setCurrentIndex(max(0, mode_index))
+        performance_mode_combo.setToolTip(
+            "低配：降低帧率与数据源负载，保留核心预警；\n"
+            "标准：与程序默认配置接近；\n"
+            "高配：启用 GPU 渲染、完整数据源与告警体验。"
+        )
+        apply_preset_btn = QPushButton("应用性能模式")
+        _set_widget_style(apply_preset_btn, STYLE_SECONDARY_BTN)
+        apply_preset_btn.setToolTip("按所选模式批量调整渲染、数据源与告警等设置")
+        apply_preset_btn.clicked.connect(self._apply_performance_preset)
+        preset_row.addWidget(preset_label)
+        preset_row.addWidget(performance_mode_combo, 1)
+        preset_row.addWidget(apply_preset_btn)
+        block3_layout.addLayout(preset_row)
+        preset_hint = QLabel("切换后覆盖渲染、数据源与告警等设置，立即生效。")
+        preset_hint.setToolTip("会覆盖相关设置；预警显示能力保留，应用后热重载。")
+        preset_hint.setWordWrap(True)
+        _set_widget_style(preset_hint, STYLE_HINT)
+        block3_layout.addWidget(preset_hint)
+        render_row = QHBoxLayout()
+        cpu_radio = QRadioButton("CPU 渲染（软件）")
+        opengl_radio = QRadioButton("GPU 渲染（OpenGL）")
+        _set_widget_style(cpu_radio, STYLE_LABEL)
+        _set_widget_style(opengl_radio, STYLE_LABEL)
+        backend = getattr(self.config.gui_config, 'render_backend', None) or ("opengl" if self.config.gui_config.use_gpu_rendering else "cpu")
+        if backend == "opengl":
+            opengl_radio.setChecked(True)
+        else:
+            cpu_radio.setChecked(True)
+        cpu_radio.setToolTip("兼容性更好，修改后立即热切换生效")
+        opengl_radio.setToolTip("硬件加速（OpenGL），修改后立即热切换生效")
+        render_row.addWidget(cpu_radio)
+        render_row.addWidget(opengl_radio)
+        render_row.addStretch()
+        block3_layout.addLayout(render_row)
+        perf_row = QWidget()
+        perf_row_layout = QHBoxLayout(perf_row)
+        perf_row_layout.setContentsMargins(0, 0, 0, 0)
+        perf_row_layout.setSpacing(12)
+        vsync_checkbox = QCheckBox("启用垂直同步")
+        vsync_checkbox.setChecked(self.config.gui_config.vsync_enabled)
+        _set_widget_style(vsync_checkbox, STYLE_CHECKBOX)
+        fps_label = QLabel("目标帧率:")
+        _set_widget_style(fps_label, STYLE_LABEL)
+        fps_spin = QSpinBox()
+        fps_spin.setMinimum(1)
+        fps_spin.setMaximum(240)
+        fps_spin.setValue(int(self.config.gui_config.target_fps))
+        fps_spin.setToolTip("1–240 fps。开启 VSync 时实际帧率跟随显示器。")
+        _set_widget_style(fps_spin, STYLE_SPINBOX)
+        # 目标帧率子组：标签 + 输入框 + 单位，内部紧凑 8px
+        fps_group = QWidget()
+        fps_group_layout = QHBoxLayout(fps_group)
+        fps_group_layout.setContentsMargins(0, 0, 0, 0)
+        fps_group_layout.setSpacing(8)
+        fps_group_layout.addWidget(fps_label)
+        fps_group_layout.addWidget(fps_spin)
+        fps_group_layout.addWidget(QLabel("fps"))
+        perf_row_layout.addWidget(vsync_checkbox)
+        perf_row_layout.addWidget(fps_group)
+        perf_row_layout.addStretch()
+        block3_layout.addWidget(perf_row)
+        group_render_layout = QVBoxLayout(group_render)
+        group_render_layout.setContentsMargins(*GROUP_MARGINS)
+        group_render_layout.addWidget(block3)
+        main_layout.addWidget(group_render)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # ---------- 预警/消息更新 ----------
         group_alert = QGroupBox("预警/消息更新")
-        group_alert.setStyleSheet(STYLE_GROUPBOX)
-        block_alert_update = QWidget()
+        _prep_groupbox(group_alert)
+        block_alert_update = _prep_card_block()
         block_alert_update_layout = QVBoxLayout(block_alert_update)
         block_alert_update_layout.setContentsMargins(0, 0, 0, 0)
         block_alert_update_layout.setSpacing(6)
@@ -1556,7 +2362,7 @@ class SettingsWindow(QDialog):
         self.show_one_alert_per_received_checkbox.setToolTip(
             "开启后，收到预警更新报时立即切换并显示最新内容；关闭时仅后台替换，不打断当前滚动。默认关闭。"
         )
-        self.show_one_alert_per_received_checkbox.setStyleSheet("font-size: 16px;")
+        _set_widget_style(self.show_one_alert_per_received_checkbox, STYLE_CHECKBOX)
         block_alert_update_layout.addWidget(self.show_one_alert_per_received_checkbox)
         self.force_single_line_checkbox = QCheckBox("强制单行")
         self.force_single_line_checkbox.setChecked(
@@ -1565,28 +2371,28 @@ class SettingsWindow(QDialog):
         self.force_single_line_checkbox.setToolTip(
             "开启后，将数据源中的换行符替换为空格，保证滚动字幕始终单行显示。关闭则保留多行（由数据源决定）。"
         )
-        self.force_single_line_checkbox.setStyleSheet("font-size: 16px;")
+        _set_widget_style(self.force_single_line_checkbox, STYLE_CHECKBOX)
         block_alert_update_layout.addWidget(self.force_single_line_checkbox)
         mc = self.config.message_config
-        self.custom_text_return_after_warning_checkbox = QCheckBox("预警后限时显示速报再回自定义（beta版）")
+        self.custom_text_return_after_warning_checkbox = QCheckBox("预警后限时显示速报（beta）")
         self.custom_text_return_after_warning_checkbox.setChecked(
             getattr(self.config.message_config, 'custom_text_return_after_warning', False)
         )
         self.custom_text_return_after_warning_checkbox.setToolTip(
             "仅在「数据源」为「自定义文本」时生效。开启后：默认显示自定义文本；有预警时优先显示预警；预警结束且有速报或在无预警时直接收到速报时，将限时显示速报，超时（默认 5 分钟，可在配置中调整）后自动恢复为仅显示自定义文本。"
         )
-        self.custom_text_return_after_warning_checkbox.setStyleSheet("font-size: 16px;")
+        _set_widget_style(self.custom_text_return_after_warning_checkbox, STYLE_CHECKBOX)
         block_alert_update_layout.addWidget(self.custom_text_return_after_warning_checkbox)
         custom_text_return_row = QHBoxLayout()
         custom_text_return_row.setSpacing(8)
         custom_text_return_label = QLabel("速报最多显示（分钟）:")
-        custom_text_return_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(custom_text_return_label, STYLE_LABEL)
         custom_text_return_minutes_spin = QSpinBox()
         custom_text_return_minutes_spin.setRange(1, 60)
         return_sec = getattr(mc, 'custom_text_return_seconds', 300) or 300
         current_return_min = max(1, min(60, return_sec // 60))
         custom_text_return_minutes_spin.setValue(current_return_min)
-        custom_text_return_minutes_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(custom_text_return_minutes_spin, STYLE_SPINBOX)
         custom_text_return_minutes_spin.setToolTip("默认 5 分钟；越大则速报展示越久再切回自定义文本。")
         return_after_checked = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
         custom_text_return_minutes_spin.setEnabled(return_after_checked)
@@ -1600,20 +2406,18 @@ class SettingsWindow(QDialog):
         warning_min_display_row = QHBoxLayout()
         warning_min_display_row.setSpacing(8)
         min_display_label = QLabel("预警最少展示时长（分钟）:")
-        min_display_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(min_display_label, STYLE_LABEL)
         warning_min_display_spin = QSpinBox()
         warning_min_display_spin.setRange(1, 60)
         current_min = max(1, int(getattr(mc, 'warning_min_display_seconds', 300)) // 60)
         warning_min_display_spin.setValue(current_min)
-        warning_min_display_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(warning_min_display_spin, STYLE_SPINBOX)
         warning_min_display_spin.setToolTip("一旦展示则在此时间内不因发震时间过期被移除。单位：分钟，默认 5 分钟。")
         warning_min_display_row.addWidget(min_display_label)
         warning_min_display_row.addWidget(warning_min_display_spin)
         warning_min_display_row.addStretch()
         block_alert_update_layout.addLayout(warning_min_display_row)
-        self.disable_warning_expiry_test_cb = QCheckBox(
-            "关闭预警有效期（仅供测试，勿长期开启）"
-        )
+        self.disable_warning_expiry_test_cb = QCheckBox("关闭预警有效期（测试用）")
         self.disable_warning_expiry_test_cb.setChecked(
             bool(getattr(mc, "disable_warning_expiry_for_test", False))
         )
@@ -1621,21 +2425,21 @@ class SettingsWindow(QDialog):
             "开启后：不按发震时间丢弃入队预警；缓冲区也不按发震时间或「展示满最少展示时长」移出预警。"
             "便于用历史报文测试告警条与分阶段文案。"
         )
-        self.disable_warning_expiry_test_cb.setStyleSheet("font-size: 16px;")
+        _set_widget_style(self.disable_warning_expiry_test_cb, STYLE_CHECKBOX)
         block_alert_update_layout.addWidget(self.disable_warning_expiry_test_cb)
         alert_hint = QLabel("保存后立即生效，无需重启。")
-        alert_hint.setStyleSheet(STYLE_HINT)
+        _set_widget_style(alert_hint, STYLE_HINT)
         block_alert_update_layout.addWidget(alert_hint)
         group_alert_layout = QVBoxLayout(group_alert)
-        group_alert_layout.setContentsMargins(10, 12, 10, 10)
+        group_alert_layout.setContentsMargins(*GROUP_MARGINS)
         group_alert_layout.addWidget(block_alert_update)
         main_layout.addWidget(group_alert)
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # ---------- 自动更新 ----------
         group_auto_update = QGroupBox("自动更新")
-        group_auto_update.setStyleSheet(STYLE_GROUPBOX)
-        block_auto_update = QWidget()
+        _prep_groupbox(group_auto_update)
+        block_auto_update = _prep_card_block()
         block_auto_update_layout = QVBoxLayout(block_auto_update)
         block_auto_update_layout.setContentsMargins(0, 0, 0, 0)
         block_auto_update_layout.setSpacing(6)
@@ -1643,23 +2447,23 @@ class SettingsWindow(QDialog):
         auto_update_startup_cb.setChecked(
             getattr(self.config.gui_config, 'auto_update_check_on_startup', True)
         )
-        auto_update_startup_cb.setStyleSheet("font-size: 16px;")
+        _set_widget_style(auto_update_startup_cb, STYLE_CHECKBOX)
         block_auto_update_layout.addWidget(auto_update_startup_cb)
         check_update_btn = QPushButton("检查更新")
         check_update_btn.clicked.connect(self._on_auto_update_check_clicked)
         block_auto_update_layout.addWidget(check_update_btn)
         group_auto_update_layout = QVBoxLayout(group_auto_update)
-        group_auto_update_layout.setContentsMargins(10, 12, 10, 10)
+        group_auto_update_layout.setContentsMargins(*GROUP_MARGINS)
         group_auto_update_layout.addWidget(block_auto_update)
         main_layout.addWidget(group_auto_update)
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # ---------- 5. 非预警时显示 ----------
         group_mode = QGroupBox("非预警时显示")
-        group_mode.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_mode)
         gm_layout = QVBoxLayout(group_mode)
-        gm_layout.setContentsMargins(12, 14, 12, 12)
-        gm_layout.setSpacing(12)
+        gm_layout.setContentsMargins(*GROUP_MARGINS)
+        gm_layout.setSpacing(GROUP_SPACING)
         self.report_mode_group = QButtonGroup(scrollable_widget)
         self.radio_report = QRadioButton("地震速报")
         self.radio_custom_text = QRadioButton("自定义文本")
@@ -1668,26 +2472,27 @@ class SettingsWindow(QDialog):
         use_custom = getattr(self.config.message_config, 'use_custom_text', False)
         self.radio_report.setChecked(not use_custom)
         self.radio_custom_text.setChecked(use_custom)
-        self.radio_report.setStyleSheet(STYLE_LABEL + " padding: 2px 0;")
-        self.radio_custom_text.setStyleSheet(STYLE_LABEL + " padding: 2px 0;")
+        _set_widget_style(self.radio_report, STYLE_LABEL + " padding: 2px 0;")
+        _set_widget_style(self.radio_custom_text, STYLE_LABEL + " padding: 2px 0;")
         gm_layout.addWidget(self.radio_report)
         gm_layout.addWidget(self.radio_custom_text)
-        mode_hint = QLabel("提示：切换「地震速报」/「自定义文本」保存后立即生效。自定义文本内容请在下方「自定义文本」区块编辑。")
-        mode_hint.setStyleSheet(STYLE_HINT)
+        mode_hint = QLabel("切换后立即生效；自定义文本在下方编辑。")
+        _set_widget_style(mode_hint, STYLE_HINT)
         mode_hint.setWordWrap(True)
         gm_layout.addWidget(mode_hint)
         main_layout.addWidget(group_mode)
-        main_layout.addSpacing(10)
+        main_layout.addSpacing(SPACING_BLOCK)
 
         # ---------- 6. 自定义文本 ----------
         group_custom = QGroupBox("自定义文本")
-        group_custom.setStyleSheet(STYLE_GROUPBOX)
-        block5 = QWidget()
+        _prep_groupbox(group_custom)
+        block5 = _prep_card_block()
         block5_layout = QVBoxLayout(block5)
         block5_layout.setContentsMargins(0, 0, 0, 0)
         block5_layout.setSpacing(6)
-        custom_hint = QLabel("在「数据源」页选择「自定义文本」后，非预警时将显示此处编辑的文本。修改并保存后立即生效，无需重启。")
-        custom_hint.setStyleSheet(STYLE_HINT)
+        custom_hint = QLabel("数据源选「自定义文本」后，非预警时显示此处内容。")
+        custom_hint.setToolTip("修改并保存后立即生效，无需重启。")
+        _set_widget_style(custom_hint, STYLE_HINT)
         custom_hint.setWordWrap(True)
         custom_hint.setMaximumWidth(360)
         block5_layout.addWidget(custom_hint)
@@ -1698,17 +2503,13 @@ class SettingsWindow(QDialog):
         self.custom_text_edit.setPlainText(self.config.message_config.custom_text or "")
         block5_layout.addWidget(self.custom_text_edit)
         group_custom_layout = QVBoxLayout(group_custom)
-        group_custom_layout.setContentsMargins(10, 12, 10, 10)
+        group_custom_layout.setContentsMargins(*GROUP_MARGINS)
         group_custom_layout.addWidget(block5)
         main_layout.addWidget(group_custom)
 
-        # 保存变量引用（供 _save_appearance_settings 使用）
-        self.display_vars = {
+
+        self.display_vars.update({
             'speed': speed_slider,
-            'font_size': font_size_combo,
-            'font_family': font_family_combo,
-            'font_bold': font_bold_cb,
-            'font_italic': font_italic_cb,
             'width': width_spin,
             'height': height_spin,
             'opacity': opacity_slider,
@@ -1716,6 +2517,7 @@ class SettingsWindow(QDialog):
             'target_fps': fps_spin,
             'timezone': timezone_combo,
             'always_on_top': always_on_top_cb,
+            'borderless': borderless_cb,
             'minimize_to_tray': minimize_tray_cb,
             'toast_notifications_enabled': toast_notify_cb,
             'min_report_magnitude': min_report_mag_spin,
@@ -1723,15 +2525,14 @@ class SettingsWindow(QDialog):
             'geo_filter_latitude': geo_lat_spin,
             'geo_filter_longitude': geo_lon_spin,
             'geo_filter_radius_km': geo_radius_spin,
-            'watermark_text': watermark_edit,
-            'watermark_font_family': watermark_font_combo,
-            'watermark_font_auto': watermark_font_auto_cb,
-            'watermark_font_size': watermark_font_size_spin,
-            'watermark_position': watermark_pos_combo,
+            'weather_region_filter_enabled': weather_region_cb,
+            'weather_region_filter': weather_region_edit,
+            'weather_level_filter': weather_level_combo,
             'auto_update_check_on_startup': auto_update_startup_cb,
             'warning_min_display_seconds': warning_min_display_spin,
             'custom_text_return_seconds': custom_text_return_minutes_spin,
-        }
+        })
+
         self.render_vars = {'cpu_radio': cpu_radio, 'opengl_radio': opengl_radio}
         self.performance_vars = {
             'performance_mode_combo': performance_mode_combo,
@@ -1739,23 +2540,9 @@ class SettingsWindow(QDialog):
         }
         
         main_layout.addStretch()
-        
-        # 保存按钮
-        button_frame = QWidget()
-        button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 6, 0, 0)
-        button_layout.addStretch()
-        save_btn = QPushButton("保存")
-        save_btn.setMinimumWidth(120)
-        save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet(STYLE_SAVE_BTN)
-        save_btn.clicked.connect(self._save_appearance_settings)
-        button_layout.addWidget(save_btn)
-        button_layout.addStretch()
-        main_layout.addWidget(button_frame)
-        
+        _add_tab_save_row(main_layout, self._save_appearance_settings)
         scroll_area.setWidget(scrollable_widget)
-        self.notebook.addTab(scroll_area, "外观与显示")
+        self.notebook.addTab(scroll_area, "显示")
 
     def _audio_is_sound_mode(self) -> bool:
         """当前音频反馈方式是否为预设提示音（非 TTS）。"""
@@ -1992,37 +2779,35 @@ class SettingsWindow(QDialog):
 
     def _create_audio_tab(self):
         """创建音频与语音播报设置标签页。"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
-        scrollable_widget.setMinimumWidth(0)
-        scrollable_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        _prepare_scroll_body(scrollable_widget)
         main_layout = QVBoxLayout(scrollable_widget)
         main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(SPACING_TAB)
 
         ac = self.config.alert_config
         _tts_lbl_w = 72
         _tts_field_gap = 12
         _tts_field_x = _tts_lbl_w + _tts_field_gap
         _tts_repeat_col_gap = 24
-        _spin_w = 42
+        # 需容纳 STYLE_SPINBOX 左右 padding + 上下箭头，过窄会只剩按钮看不见数字
+        _spin_w = 64
         _test_w = 72
 
         mode_group = QGroupBox("音频设置")
-        mode_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(mode_group)
         mode_layout = QVBoxLayout(mode_group)
-        mode_layout.setContentsMargins(10, 12, 10, 10)
+        mode_layout.setContentsMargins(*GROUP_MARGINS)
         mode_layout.setSpacing(4)
-        mode_hint = QLabel("预设提示音与语音播报只能启用一种，避免同时响起造成干扰。")
-        mode_hint.setStyleSheet(STYLE_HINT)
+        mode_hint = QLabel("提示音与语音播报二选一。")
+        _set_widget_style(mode_hint, STYLE_HINT)
         mode_hint.setWordWrap(True)
         mode_layout.addWidget(mode_hint)
         feedback_sound_radio = QRadioButton("预设提示音（WAV）")
         feedback_tts_radio = QRadioButton("语音播报（TTS / Windows SAPI）")
-        feedback_sound_radio.setStyleSheet("font-size: 16px;")
-        feedback_tts_radio.setStyleSheet("font-size: 16px;")
+        _set_widget_style(feedback_sound_radio, STYLE_RADIO)
+        _set_widget_style(feedback_tts_radio, STYLE_RADIO)
         current_mode = str(getattr(ac, 'alert_feedback_mode', 'sound') or 'sound')
         feedback_sound_radio.setChecked(current_mode != 'tts')
         feedback_tts_radio.setChecked(current_mode == 'tts')
@@ -2031,9 +2816,9 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(mode_group)
 
         tier_group = QGroupBox("预警分级开关")
-        tier_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(tier_group)
         tier_grid = QGridLayout(tier_group)
-        tier_grid.setContentsMargins(10, 12, 10, 10)
+        tier_grid.setContentsMargins(*GROUP_MARGINS)
         tier_grid.setHorizontalSpacing(8)
         tier_grid.setVerticalSpacing(10)
         tier_grid.setColumnStretch(0, 1)
@@ -2043,7 +2828,7 @@ class SettingsWindow(QDialog):
         def _tier_event_label(text: str) -> QLabel:
             """创建分级表格左侧事件类型标签。"""
             lbl = QLabel(text)
-            lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(lbl, STYLE_LABEL)
             return lbl
 
         def _tier_half_row(label_text: str, cb: QCheckBox) -> QWidget:
@@ -2061,7 +2846,7 @@ class SettingsWindow(QDialog):
         tier_critical_cb = QCheckBox()
         nhk_news_bell_cb = QCheckBox()
         nhk_news_bell_cb.setChecked(bool(getattr(ac, 'nhk_news_bell_enabled', False)))
-        nhk_news_bell_cb.setToolTip("仅地震情报：情报震度达到6弱及以上时播放（不含地震预警）。")
+        nhk_news_bell_cb.setToolTip("仅地震情报：震度 6 弱及以上时播放（不含预警）。")
         jma_eew_alert_cb = QCheckBox()
         jma_eew_alert_cb.setChecked(bool(getattr(ac, 'jma_eew_alert_sound_enabled', True)))
         jma_eew_alert_cb.setToolTip("JMA 緊急地震速報由「予報」升级为「警報」时播放。")
@@ -2078,7 +2863,7 @@ class SettingsWindow(QDialog):
         divider.setFrameShadow(QFrame.Sunken)
         divider.setFixedWidth(2)
 
-        left_panel = QWidget()
+        left_panel = _prep_card_block()
         left_lay = QVBoxLayout(left_panel)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.setSpacing(10)
@@ -2098,9 +2883,9 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(tier_group)
 
         sound_group = QGroupBox("预设提示音")
-        sound_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(sound_group)
         sound_outer = QVBoxLayout(sound_group)
-        sound_outer.setContentsMargins(10, 12, 10, 10)
+        sound_outer.setContentsMargins(*GROUP_MARGINS)
         sound_outer.setSpacing(8)
 
         _sound_title_w = 72
@@ -2136,12 +2921,12 @@ class SettingsWindow(QDialog):
         ):
             """构建预设提示音一行：标题、文件选择、重复次数与测试按钮。"""
             title_lbl = QLabel(title)
-            title_lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(title_lbl, STYLE_LABEL)
             title_lbl.setToolTip(tooltip)
             title_lbl.setFixedWidth(_sound_title_w)
             path_btn = QPushButton()
             path_btn.setCursor(Qt.PointingHandCursor)
-            path_btn.setStyleSheet(STYLE_AUDIO_FILE_BTN)
+            _set_widget_style(path_btn, STYLE_AUDIO_FILE_BTN)
             path_btn.setFixedWidth(_sound_path_w)
             path_btn.setFixedHeight(_sound_row_h)
             path_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -2175,7 +2960,7 @@ class SettingsWindow(QDialog):
             path_btn.clicked.connect(_pick_sound)
             _refresh_path_btn()
             repeat_lbl = QLabel("重复")
-            repeat_lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(repeat_lbl, STYLE_LABEL)
             repeat_lbl.setFixedWidth(_repeat_lbl_w)
             repeat_lbl.setAlignment(Qt.AlignCenter)
             repeat_spin = QSpinBox()
@@ -2183,11 +2968,11 @@ class SettingsWindow(QDialog):
             repeat_spin.setValue(max(1, min(10, int(repeat_value or 1))))
             repeat_spin.setFixedWidth(_spin_w)
             repeat_spin.setFixedHeight(_sound_row_h)
-            repeat_spin.setStyleSheet(STYLE_SPINBOX)
+            _set_widget_style(repeat_spin, STYLE_SPINBOX)
             test_btn = QPushButton("测试")
             test_btn.setFixedWidth(_test_w)
             test_btn.setFixedHeight(_sound_row_h)
-            test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+            _set_widget_style(test_btn, STYLE_AUDIO_COMPACT_BTN)
 
             def _test_sound():
                 """保存设置后播放当前行对应分级的测试提示音。"""
@@ -2219,14 +3004,15 @@ class SettingsWindow(QDialog):
         sound_outer.addLayout(sound_grid)
 
         nhk_group = QGroupBox()
-        nhk_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(nhk_group)
         nhk_outer = QVBoxLayout(nhk_group)
-        nhk_outer.setContentsMargins(10, 12, 10, 10)
+        nhk_outer.setContentsMargins(*GROUP_MARGINS)
         nhk_outer.setSpacing(8)
         nhk_title_lbl = QLabel("NHK 一级新闻铃")
-        nhk_title_lbl.setStyleSheet("font-size: 18px; font-weight: bold;")
-        nhk_desc_lbl = QLabel("仅地震情报：情报震度达到6弱及以上时播放 NHK 一级新闻铃（不含地震预警）。")
-        nhk_desc_lbl.setStyleSheet(STYLE_HINT)
+        _set_widget_style(nhk_title_lbl, STYLE_SECTION_TITLE)
+        nhk_desc_lbl = QLabel("仅地震情报，震度 6 弱及以上时播放。")
+        nhk_desc_lbl.setToolTip("不含地震预警；与 JMA 警报音无关。")
+        _set_widget_style(nhk_desc_lbl, STYLE_HINT)
         nhk_desc_lbl.setWordWrap(True)
         nhk_outer.addWidget(nhk_title_lbl)
         nhk_outer.addWidget(nhk_desc_lbl)
@@ -2262,17 +3048,15 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(nhk_group)
 
         jma_eew_group = QGroupBox()
-        jma_eew_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(jma_eew_group)
         jma_eew_outer = QVBoxLayout(jma_eew_group)
-        jma_eew_outer.setContentsMargins(10, 12, 10, 10)
+        jma_eew_outer.setContentsMargins(*GROUP_MARGINS)
         jma_eew_outer.setSpacing(8)
         jma_eew_title_lbl = QLabel("JMA 紧急地震速报警报音")
-        jma_eew_title_lbl.setStyleSheet("font-size: 18px; font-weight: bold;")
-        jma_eew_desc_lbl = QLabel(
-            "日本气象厅緊急地震速報由「予報」升级为「警報」时播放（含首报即为警報）。"
-            "与 NHK 一级新闻铃无关；一级新闻铃仅用于地震情报。"
-        )
-        jma_eew_desc_lbl.setStyleSheet(STYLE_HINT)
+        _set_widget_style(jma_eew_title_lbl, STYLE_SECTION_TITLE)
+        jma_eew_desc_lbl = QLabel("予報升为警報时播放（含首报即为警報）。")
+        jma_eew_desc_lbl.setToolTip("与 NHK 一级新闻铃无关；一级新闻铃仅用于地震情报。")
+        _set_widget_style(jma_eew_desc_lbl, STYLE_HINT)
         jma_eew_desc_lbl.setWordWrap(True)
         jma_eew_outer.addWidget(jma_eew_title_lbl)
         jma_eew_outer.addWidget(jma_eew_desc_lbl)
@@ -2301,16 +3085,13 @@ class SettingsWindow(QDialog):
         main_layout.addWidget(jma_eew_group)
 
         tts_group = QGroupBox("语音播报 (TTS)")
-        tts_group.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(tts_group)
         tts_outer = QVBoxLayout(tts_group)
-        tts_outer.setContentsMargins(10, 12, 10, 10)
+        tts_outer.setContentsMargins(*GROUP_MARGINS)
         tts_outer.setSpacing(6)
-        tts_hint = QLabel(
-            "地震预警/速报：精简脚本朗读。"
-            "气象/海啸：与滚动字幕一致（不含左侧图标）。"
-            "需 Windows 10+ 且中文语音包。"
-        )
-        tts_hint.setStyleSheet(STYLE_HINT)
+        tts_hint = QLabel("预警/速报精简朗读；气象/海啸与字幕一致。")
+        tts_hint.setToolTip("需 Windows 10+ 且中文语音包。气象/海啸不含左侧图标。")
+        _set_widget_style(tts_hint, STYLE_HINT)
         tts_hint.setWordWrap(True)
         tts_outer.addWidget(tts_hint)
 
@@ -2321,7 +3102,7 @@ class SettingsWindow(QDialog):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(_tts_field_gap)
             lbl = QLabel(label_text)
-            lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(lbl, STYLE_LABEL)
             lbl.setFixedWidth(_tts_lbl_w)
             row_layout.addWidget(lbl)
             row_layout.addWidget(widget, 1)
@@ -2331,7 +3112,7 @@ class SettingsWindow(QDialog):
         tts_rate_spin.setRange(80, 300)
         tts_rate_spin.setValue(max(80, min(300, int(getattr(ac, 'tts_rate', 150) or 150))))
         tts_rate_spin.setSuffix(" 字/分")
-        tts_rate_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(tts_rate_spin, STYLE_SPINBOX)
         tts_rate_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         tts_outer.addWidget(_form_row("语速", tts_rate_spin, tts_group))
 
@@ -2350,12 +3131,12 @@ class SettingsWindow(QDialog):
             cell_layout.setContentsMargins(0, 0, 0, 0)
             cell_layout.setSpacing(2)
             lbl = QLabel(label)
-            lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(lbl, STYLE_LABEL)
             spin = QSpinBox(cell)
             spin.setRange(1, 10)
             spin.setValue(max(1, min(10, int(value or 1))))
             spin.setFixedWidth(_spin_w)
-            spin.setStyleSheet(STYLE_SPINBOX)
+            _set_widget_style(spin, STYLE_SPINBOX)
             cell_layout.addWidget(lbl)
             cell_layout.addWidget(spin)
             return cell, spin
@@ -2368,7 +3149,7 @@ class SettingsWindow(QDialog):
         tts_repeat_cells_grid.setColumnStretch(2, 1)
 
         tts_repeat_lbl = QLabel("连播")
-        tts_repeat_lbl.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(tts_repeat_lbl, STYLE_LABEL)
         tts_repeat_lbl.setFixedWidth(_tts_lbl_w)
         warning_cell, warning_tts_repeat_spin = _add_tts_repeat_cell(
             tts_repeat_cells, "预警", int(getattr(ac, 'felt_tts_repeat', 1) or 1))
@@ -2388,7 +3169,7 @@ class SettingsWindow(QDialog):
         tts_outer.addWidget(tts_repeat_row)
 
         tts_policy_combo = QComboBox(tts_group)
-        tts_policy_combo.setStyleSheet(STYLE_COMBOBOX)
+        _set_widget_style(tts_policy_combo, STYLE_COMBOBOX)
         tts_policy_combo.addItem("智能（首报/变化）", "smart")
         tts_policy_combo.addItem("仅首报", "first_only")
         tts_policy_combo.addItem("每次更新", "always")
@@ -2410,7 +3191,7 @@ class SettingsWindow(QDialog):
         tts_cooldown_spin.setRange(0, 600)
         tts_cooldown_spin.setValue(max(0, min(600, int(getattr(ac, 'tts_cooldown_seconds', 60) or 60))))
         tts_cooldown_spin.setSuffix(" 秒")
-        tts_cooldown_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(tts_cooldown_spin, STYLE_SPINBOX)
         tts_cooldown_spin.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         tts_cooldown_spin.setToolTip(
             "适用于气象/海啸预警的重复策略。\n"
@@ -2419,10 +3200,9 @@ class SettingsWindow(QDialog):
             "地震预警不受此间隔限制；地震速报按同事件去重，不使用此间隔。"
         )
         tts_outer.addWidget(_form_row("最短间隔", tts_cooldown_spin, tts_group))
-        tts_cooldown_hint = QLabel(
-            "最短间隔仅作用于气象/海啸；地震预警收到更新报即朗读，速报按同事件去重（CENC 自动/正式测定分别朗读）。"
-        )
-        tts_cooldown_hint.setStyleSheet(STYLE_HINT)
+        tts_cooldown_hint = QLabel("最短间隔仅作用于气象/海啸。")
+        tts_cooldown_hint.setToolTip("预警更新报即朗读；速报按同事件去重（CENC 自动/正式测定分别朗读）。")
+        _set_widget_style(tts_cooldown_hint, STYLE_HINT)
         tts_cooldown_hint.setWordWrap(True)
         tts_cooldown_hint_row = QWidget()
         tts_cooldown_hint_layout = QHBoxLayout(tts_cooldown_hint_row)
@@ -2445,13 +3225,13 @@ class SettingsWindow(QDialog):
         tts_test_row2.setContentsMargins(0, 0, 0, 0)
         tts_test_row2.setSpacing(6)
         warning_tts_test_btn = QPushButton("预警")
-        warning_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        _set_widget_style(warning_tts_test_btn, STYLE_AUDIO_COMPACT_BTN)
         report_tts_test_btn = QPushButton("速报")
-        report_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        _set_widget_style(report_tts_test_btn, STYLE_AUDIO_COMPACT_BTN)
         weather_tts_test_btn = QPushButton("气象")
-        weather_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        _set_widget_style(weather_tts_test_btn, STYLE_AUDIO_COMPACT_BTN)
         tsunami_tts_test_btn = QPushButton("海啸")
-        tsunami_tts_test_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        _set_widget_style(tsunami_tts_test_btn, STYLE_AUDIO_COMPACT_BTN)
         for btn in (
             warning_tts_test_btn, report_tts_test_btn,
             weather_tts_test_btn, tsunami_tts_test_btn,
@@ -2500,7 +3280,7 @@ class SettingsWindow(QDialog):
         tts_test_row_layout.setContentsMargins(0, 0, 0, 0)
         tts_test_row_layout.setSpacing(_tts_field_gap)
         tts_test_lbl = QLabel("测试")
-        tts_test_lbl.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(tts_test_lbl, STYLE_LABEL)
         tts_test_lbl.setFixedWidth(_tts_lbl_w)
         tts_test_lbl.setAlignment(Qt.AlignTop)
         tts_test_wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -2556,7 +3336,7 @@ class SettingsWindow(QDialog):
         save_btn = QPushButton("保存音频设置")
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet(STYLE_SAVE_BTN)
+        _set_widget_style(save_btn, STYLE_SAVE_BTN)
         save_btn.clicked.connect(self._save_audio_settings_and_persist)
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
@@ -2626,15 +3406,12 @@ class SettingsWindow(QDialog):
 
     def _create_data_source_tab(self):
         """创建数据源设置标签页（顶部三选一：Fan Studio / WeJet / 官方+Wolfx）。"""
-        scroll_area = QScrollArea()  # 可滚动容器
-        scroll_area.setWidgetResizable(True)  # 内容区随窗口宽度自适应
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # 禁用横向滚动条
+        scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
-        scrollable_widget.setMinimumWidth(0)  # 允许窄窗口下压缩内容
-        scrollable_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        _prepare_scroll_body(scrollable_widget)
         scroll_layout = QVBoxLayout(scrollable_widget)
         scroll_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
-        scroll_layout.setSpacing(22)
+        scroll_layout.setSpacing(SPACING_BLOCK)
 
         fanstudio_http_poll_sources = [
             (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
@@ -2663,10 +3440,10 @@ class SettingsWindow(QDialog):
 
         # 顶部：主数据源提供者三选一（并排）
         group_provider = QGroupBox("主数据源")
-        group_provider.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_provider)
         gp_layout = QVBoxLayout(group_provider)
-        gp_layout.setContentsMargins(12, 14, 12, 12)
-        gp_layout.setSpacing(12)
+        gp_layout.setContentsMargins(*GROUP_MARGINS)
+        gp_layout.setSpacing(GROUP_SPACING)
         provider_row = QHBoxLayout()
         provider_row.setSpacing(24)
         self.data_provider_group = QButtonGroup(self)
@@ -2678,56 +3455,52 @@ class SettingsWindow(QDialog):
             self.radio_provider_whews,
             self.radio_provider_official,
         ):
-            rb.setStyleSheet("font-size: 16px; font-weight: bold; padding: 6px 4px;")
+            _set_widget_style(rb, STYLE_PROVIDER_RADIO)
             provider_row.addWidget(rb)
         self.data_provider_group.addButton(self.radio_provider_fanstudio, 0)
         self.data_provider_group.addButton(self.radio_provider_whews, 1)
         self.data_provider_group.addButton(self.radio_provider_official, 2)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel(
-            "三者只能选其一：保存后仅连接当前提供者，不会同时连接 Fan Studio / 无界 / 官方+Wolfx。"
-            "切换提供者会清空全部缓冲，并由新数据源重新拉取。"
-            "下方台风 / CENC 烈度速报 / P2PQuake 为全局辅助项，切换后仍会重新接入。"
+        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。")
+        provider_hint.setToolTip(
+            "保存后仅连接当前提供者。台风 / CENC 烈度速报 / EQSC / P2PQuake 为全局辅助项，切换后仍会重新接入。"
         )
-        provider_hint.setStyleSheet(STYLE_HINT)
+        _set_widget_style(provider_hint, STYLE_HINT)
         provider_hint.setWordWrap(True)
         gp_layout.addWidget(provider_hint)
         scroll_layout.addWidget(group_provider)
 
         # ---------- Fan Studio 面板 ----------
         self.ds_panel_fanstudio = QWidget()
+        apply_light_palette(self.ds_panel_fanstudio, COLOR_PAGE_BG, COLOR_TEXT)
+        self.ds_panel_fanstudio.setAttribute(Qt.WA_StyledBackground, True)
+        _set_widget_style(self.ds_panel_fanstudio, f"background-color: {COLOR_PAGE_BG};")
         fs_panel_layout = QVBoxLayout(self.ds_panel_fanstudio)
         fs_panel_layout.setContentsMargins(0, 0, 0, 0)
-        fs_panel_layout.setSpacing(12)
+        fs_panel_layout.setSpacing(SPACING_BLOCK)
 
         group_warning = QGroupBox("Fan Studio")
-        group_warning.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_warning)
         gw_layout = QVBoxLayout(group_warning)
-        gw_layout.setContentsMargins(12, 14, 12, 12)
-        gw_layout.setSpacing(12)
-        fs_all_label = QLabel("Fan Studio")
-        fs_all_label.setStyleSheet(STYLE_SOURCE_TITLE + " line-height: 22pt;")
-        gw_layout.addWidget(fs_all_label)
+        gw_layout.setContentsMargins(*GROUP_MARGINS)
+        gw_layout.setSpacing(GROUP_SPACING)
         fs_apply_hint = QLabel(
-            'Fan Studio 数据源需要 API Key 鉴权。'
-            '<a href="https://api.fanstudio.tech/dev-platform/" style="color: #4A90E2;">前往申请</a>'
-            '（应用列表选择「地震情报实况栏」，填写信息等待审核即可）'
+            '需 API Key 鉴权。<a href="https://api.fanstudio.tech/dev-platform/" style="color: #3B82F6;">前往申请</a>'
         )
+        fs_apply_hint.setToolTip("应用列表选择「地震情报实况栏」，填写信息等待审核。")
         fs_apply_hint.setOpenExternalLinks(True)
-        fs_apply_hint.setStyleSheet(STYLE_HINT)
+        _set_widget_style(fs_apply_hint, STYLE_HINT)
         fs_apply_hint.setWordWrap(True)
         gw_layout.addWidget(fs_apply_hint)
-        fs_hint = QLabel(
-            "勾选「Fan Studio」后连接；填写 API Key 点「连接」鉴权后即可接入完整数据流（无需重启）。"
-            "未鉴权时服务器仅返回公开精简数据（如 FSSN）。下方子源决定解析范围。"
-        )
-        fs_hint.setStyleSheet(STYLE_HINT)
+        fs_hint = QLabel("勾选后连接；鉴权后接入完整数据流。")
+        fs_hint.setToolTip("未鉴权仅返回公开精简数据（如 FSSN）。下方子源决定解析范围，无需重启。")
+        _set_widget_style(fs_hint, STYLE_HINT)
         fs_hint.setWordWrap(True)
         gw_layout.addWidget(fs_hint)
 
         api_key_label = QLabel("Fan Studio API Key：")
-        api_key_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(api_key_label, STYLE_LABEL)
         gw_layout.addWidget(api_key_label)
         api_key_row = QHBoxLayout()
         api_key_row.setSpacing(8)
@@ -2737,7 +3510,7 @@ class SettingsWindow(QDialog):
         self.fanstudio_api_key_entry.setText(
             getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
         )
-        self.fanstudio_api_key_entry.setStyleSheet(STYLE_LINEEDIT)
+        _set_widget_style(self.fanstudio_api_key_entry, STYLE_LINEEDIT)
         self.fanstudio_api_key_entry.setToolTip(
             "连接 /all 后发送鉴权；未填写时仍可连接，但仅接收公开精简数据流。"
         )
@@ -2746,29 +3519,29 @@ class SettingsWindow(QDialog):
         )
         api_key_row.addWidget(self.fanstudio_api_key_entry, 1)
         self.fanstudio_auth_btn = QPushButton("连接")
-        self.fanstudio_auth_btn.setStyleSheet(STYLE_AUDIO_COMPACT_BTN)
+        _set_widget_style(self.fanstudio_auth_btn, STYLE_AUDIO_COMPACT_BTN)
         self.fanstudio_auth_btn.setToolTip("测试 API Key 鉴权（发送 auth 并等待 auth_success / error）")
         self.fanstudio_auth_btn.clicked.connect(self._on_fanstudio_auth_test_clicked)
         api_key_row.addWidget(self.fanstudio_auth_btn)
         gw_layout.addLayout(api_key_row)
         self.fanstudio_auth_status_label = QLabel("请输入 Key")
-        self.fanstudio_auth_status_label.setStyleSheet("color: #888888; font-size: 14px;")
+        _set_widget_style(self.fanstudio_auth_status_label, STYLE_HINT)
         self.fanstudio_auth_status_label.setWordWrap(True)
         gw_layout.addWidget(self.fanstudio_auth_status_label)
         self._refresh_fanstudio_auth_status_label(force=True)
 
         self.fanstudio_all_connect_cb = QCheckBox("Fan Studio")  # /all 聚合 WebSocket 总开关
         self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
-        self.fanstudio_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(self.fanstudio_all_connect_cb, STYLE_CHECKBOX_SOURCE)
         gw_layout.addWidget(self.fanstudio_all_connect_cb)
 
         def _fs_cb(cfg_name: str, text: str) -> QCheckBox:
             """创建 Fan Studio 子源复选框行（含解析状态标签）。"""
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
-            cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
             status_label = QLabel("未解析")
-            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            _set_widget_style(status_label, STYLE_STATUS_NEUTRAL)
             status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             self.source_parse_labels[cfg_name] = status_label
@@ -2809,43 +3582,43 @@ class SettingsWindow(QDialog):
 
         # ---------- WeJet 面板 ----------
         self.ds_panel_whews = QWidget()
+        apply_light_palette(self.ds_panel_whews, COLOR_PAGE_BG, COLOR_TEXT)
+        self.ds_panel_whews.setAttribute(Qt.WA_StyledBackground, True)
+        _set_widget_style(self.ds_panel_whews, f"background-color: {COLOR_PAGE_BG};")
         wh_panel_layout = QVBoxLayout(self.ds_panel_whews)
         wh_panel_layout.setContentsMargins(0, 0, 0, 0)
-        wh_panel_layout.setSpacing(12)
+        wh_panel_layout.setSpacing(SPACING_BLOCK)
 
         group_whews = QGroupBox("WeJet")
-        group_whews.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_whews)
         wh_layout = QVBoxLayout(group_whews)
-        wh_layout.setContentsMargins(12, 14, 12, 12)
-        wh_layout.setSpacing(12)
+        wh_layout.setContentsMargins(*GROUP_MARGINS)
+        wh_layout.setSpacing(GROUP_SPACING)
         wh_apply_hint = QLabel(
-            'WeJet 数据源需要 WAuth 令牌鉴权。推荐使用下方「统一登录」自动获取；'
-            '也可<a href="https://auth.beecld.com/login?redirect=%2Fprofile" style="color: #4A90E2;">前往个人中心</a>'
-            '手动复制 wat_ 开头的令牌。'
+            '需 WAuth 令牌。推荐「统一登录」，或'
+            '<a href="https://auth.beecld.com/login?redirect=%2Fprofile" style="color: #3B82F6;">个人中心</a>'
+            '复制 wat_ 令牌。'
         )
         wh_apply_hint.setOpenExternalLinks(True)
-        wh_apply_hint.setStyleSheet(STYLE_HINT)
+        _set_widget_style(wh_apply_hint, STYLE_HINT)
         wh_apply_hint.setWordWrap(True)
         wh_layout.addWidget(wh_apply_hint)
-        wh_hint = QLabel(
-            "登录或填写令牌后勾选连接；建连后以纯文本发送令牌（须在 5 秒内）。"
-            "CEA / CENC 等子源均经 /ws/all 聚合流解析，由下方勾选控制。"
-            "JMA 预警/情报请使用下方 P2PQuake。"
-        )
-        wh_hint.setStyleSheet(STYLE_HINT)
+        wh_hint = QLabel("填写令牌后勾选连接；子源由下方勾选控制。")
+        wh_hint.setToolTip("建连后 5 秒内以纯文本发送令牌。JMA 预警/情报请用下方 P2PQuake。")
+        _set_widget_style(wh_hint, STYLE_HINT)
         wh_hint.setWordWrap(True)
         wh_layout.addWidget(wh_hint)
 
         host_row = QHBoxLayout()
         host_row.setSpacing(16)
         host_label = QLabel("API 主机：")
-        host_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(host_label, STYLE_LABEL)
         host_row.addWidget(host_label)
         self.whews_host_group = QButtonGroup(self)
         self.radio_whews_host_primary = QRadioButton("主站")
         self.radio_whews_host_backup = QRadioButton("备站")
         for rb in (self.radio_whews_host_primary, self.radio_whews_host_backup):
-            rb.setStyleSheet("font-size: 16px; padding: 2px 0;")
+            _set_widget_style(rb, STYLE_RADIO)
             host_row.addWidget(rb)
         self.whews_host_group.addButton(self.radio_whews_host_primary, 0)
         self.whews_host_group.addButton(self.radio_whews_host_backup, 1)
@@ -2858,20 +3631,20 @@ class SettingsWindow(QDialog):
             self.radio_whews_host_primary.setChecked(True)
 
         token_label = QLabel("WeJet 令牌：")
-        token_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(token_label, STYLE_LABEL)
         wh_layout.addWidget(token_label)
         self.whews_token_entry = QLineEdit()
         self.whews_token_entry.setPlaceholderText("wat_ 开头的令牌")
         self.whews_token_entry.setEchoMode(QLineEdit.Password)
         self.whews_token_entry.setText(getattr(self.config.ws_config, "whews_token", "") or "")
-        self.whews_token_entry.setStyleSheet(STYLE_LINEEDIT)
+        _set_widget_style(self.whews_token_entry, STYLE_LINEEDIT)
         self.whews_token_entry.setToolTip("建连后以纯文本首帧发送；5 秒内未发送则断开；鉴权失败关闭码 4401")
         wh_layout.addWidget(self.whews_token_entry)
 
         login_row = QHBoxLayout()
         login_row.setSpacing(8)
         self.whews_login_btn = QPushButton("WeJet 统一登录")
-        self.whews_login_btn.setStyleSheet("font-size: 15px; padding: 6px 14px;")
+        _set_widget_style(self.whews_login_btn, STYLE_SECONDARY_BTN)
         self.whews_login_btn.setToolTip(
             "打开浏览器完成 WAuth 登录，自动写入本应用专用 wat_ 令牌。"
             "开发者后台须登记回调：http://127.0.0.1:18765/callback"
@@ -2879,7 +3652,7 @@ class SettingsWindow(QDialog):
         self.whews_login_btn.clicked.connect(self._on_whews_unified_login)
         login_row.addWidget(self.whews_login_btn)
         self.whews_login_status = QLabel("")
-        self.whews_login_status.setStyleSheet(STYLE_HINT)
+        _set_widget_style(self.whews_login_status, STYLE_HINT)
         self.whews_login_status.setWordWrap(True)
         login_row.addWidget(self.whews_login_status, 1)
         wh_layout.addLayout(login_row)
@@ -2889,16 +3662,16 @@ class SettingsWindow(QDialog):
         self.whews_all_connect_cb.setChecked(
             self.config.enabled_sources.get(whews_urls.get("all", WHEWS_ALL_URL), False)
         )
-        self.whews_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(self.whews_all_connect_cb, STYLE_CHECKBOX_SOURCE)
         wh_layout.addWidget(self.whews_all_connect_cb)
 
         def _wh_cb(cfg_name: str, text: str) -> QCheckBox:
             """创建 WeJet 子源复选框行。"""
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
-            cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
             status_label = QLabel("未解析")
-            status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            _set_widget_style(status_label, STYLE_STATUS_NEUTRAL)
             status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             self.source_parse_labels[cfg_name] = status_label
@@ -2919,6 +3692,10 @@ class SettingsWindow(QDialog):
         self.whews_parse_cea_pr_cb = _wh_cb("whews_parse_cea_pr", "中国地震预警省网")
         self.whews_parse_weatheralarm_cb = _wh_cb("whews_parse_weatheralarm", "中国气象局气象预警")
         self.whews_parse_tsunami_cb = _wh_cb("whews_parse_tsunami", "自然资源部海啸预警中心")
+        self.whews_parse_ntwc_cb = _wh_cb("whews_parse_ntwc", "美国国家海啸预警中心 (NTWC)")
+        self.whews_parse_ptwc_cb = _wh_cb("whews_parse_ptwc", "太平洋海啸预警中心 (PTWC)")
+        self.whews_parse_incois_cb = _wh_cb("whews_parse_incois", "印度海啸早期预警中心 (INCOIS)")
+        self.whews_parse_jma_tsunami_cb = _wh_cb("whews_parse_jma_tsunami", "日本气象厅海啸预警")
         self.whews_parse_cenc_cb = _wh_cb("whews_parse_cenc", "中国地震台网中心")
         self.whews_parse_cwa_cb = _wh_cb("whews_parse_cwa", "台湾气象署速报")
         self.whews_parse_hko_cb = _wh_cb("whews_parse_hko", "香港天文台速报")
@@ -2935,13 +3712,13 @@ class SettingsWindow(QDialog):
         self.whews_parse_ingv_cb = _wh_cb("whews_parse_ingv", "INGV 意大利地震速报")
         self.whews_parse_nrcan_cb = _wh_cb("whews_parse_nrcan", "加拿大自然资源部速报")
         self.whews_parse_mmd_cb = _wh_cb("whews_parse_mmd", "马来西亚气象局速报")
-        self.whews_parse_fujian_cb = _wh_cb("whews_parse_fujian", "福建地震局速报")
+        self.whews_parse_phivolcs_cb = _wh_cb("whews_parse_phivolcs", "菲律宾火山地震研究所速报")
+        self.whews_parse_sgc_cb = _wh_cb("whews_parse_sgc", "哥伦比亚地质服务局速报")
+        self.whews_parse_ga_cb = _wh_cb("whews_parse_ga", "澳大利亚地球科学局速报")
+        self.whews_parse_cenais_cb = _wh_cb("whews_parse_cenais", "古巴国家地震研究中心速报")
         self.whews_parse_beijing_cb = _wh_cb("whews_parse_beijing", "北京地震局速报")
-        self.whews_parse_sichuan_cb = _wh_cb("whews_parse_sichuan", "四川地震局速报")
         self.whews_parse_yunnan_cb = _wh_cb("whews_parse_yunnan", "云南地震局速报")
         self.whews_parse_ningxia_cb = _wh_cb("whews_parse_ningxia", "宁夏地震局速报")
-        self.whews_parse_shaanxi_cb = _wh_cb("whews_parse_shaanxi", "陕西地震局速报")
-        self.whews_parse_hubei_cb = _wh_cb("whews_parse_hubei", "湖北地震局速报")
 
         def _update_whews_host_ui():
             """切换主站/备用时显示或隐藏 CEA 解析项（备用站无 CEA）。"""
@@ -2962,35 +3739,36 @@ class SettingsWindow(QDialog):
 
         # ---------- 官方数据源+Wolfx 面板 ----------
         self.ds_panel_official = QWidget()
+        apply_light_palette(self.ds_panel_official, COLOR_PAGE_BG, COLOR_TEXT)
+        self.ds_panel_official.setAttribute(Qt.WA_StyledBackground, True)
+        _set_widget_style(self.ds_panel_official, f"background-color: {COLOR_PAGE_BG};")
         of_panel_layout = QVBoxLayout(self.ds_panel_official)
         of_panel_layout.setContentsMargins(0, 0, 0, 0)
-        of_panel_layout.setSpacing(12)
+        of_panel_layout.setSpacing(SPACING_BLOCK)
 
         group_ali = QGroupBox("Wolfx")
-        group_ali.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_ali)
         ga_layout = QVBoxLayout(group_ali)
-        ga_layout.setContentsMargins(12, 14, 12, 12)
-        ga_layout.setSpacing(12)
-        ali_hint = QLabel(
-            "勾选「Wolfx」后连接 all_eew；台湾中央气象署走独立通道；"
-            "中国地震台网/JMA 地震情報经 all_eew 推送（需同时勾选下方对应项）。"
-        )
-        ali_hint.setStyleSheet(STYLE_HINT)
+        ga_layout.setContentsMargins(*GROUP_MARGINS)
+        ga_layout.setSpacing(GROUP_SPACING)
+        ali_hint = QLabel("勾选后连接 all_eew；台湾走独立通道。")
+        ali_hint.setToolTip("中国地震台网/JMA 地震情報经 all_eew 推送，需同时勾选对应项。")
+        _set_widget_style(ali_hint, STYLE_HINT)
         ali_hint.setWordWrap(True)
         ga_layout.addWidget(ali_hint)
         wolfx_url = WOLFX_ALL_EEW_URL
         self.wolfx_all_connect_cb = QCheckBox("Wolfx")
         self.wolfx_all_connect_cb.setChecked(self.config.enabled_sources.get(wolfx_url, True))
-        self.wolfx_all_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(self.wolfx_all_connect_cb, STYLE_CHECKBOX_SOURCE)
         ga_layout.addWidget(self.wolfx_all_connect_cb)
 
         def _wolfx_row(parse_key: str, title: str):
             """创建 Wolfx 子源复选框行（含解析状态标签）。"""
             cb = QCheckBox(title)
             cb.setChecked(getattr(self.config.message_config, parse_key, True))
-            cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
             st = QLabel("未解析")
-            st.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            _set_widget_style(st, STYLE_STATUS_NEUTRAL)
             st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             st.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             self.source_parse_labels[parse_key] = st
@@ -3037,12 +3815,12 @@ class SettingsWindow(QDialog):
         of_panel_layout.addWidget(group_ali)
 
         group_intl = QGroupBox("国际数据源")
-        group_intl.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_intl)
         gi_layout = QVBoxLayout(group_intl)
-        gi_layout.setContentsMargins(12, 14, 12, 12)
-        gi_layout.setSpacing(12)
-        intl_hint = QLabel("勾选后启用对应 HTTP 拉取或 WebSocket 连接。")
-        intl_hint.setStyleSheet(STYLE_HINT)
+        gi_layout.setContentsMargins(*GROUP_MARGINS)
+        gi_layout.setSpacing(GROUP_SPACING)
+        intl_hint = QLabel("勾选后启用对应连接。")
+        _set_widget_style(intl_hint, STYLE_HINT)
         intl_hint.setWordWrap(True)
         gi_layout.addWidget(intl_hint)
         for url, label, default_on in intl_sources:
@@ -3062,22 +3840,21 @@ class SettingsWindow(QDialog):
         of_panel_layout.addWidget(group_intl)
 
         group_history = QGroupBox("P2PQuake")
-        group_history.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_history)
         gh_layout = QVBoxLayout(group_history)
-        gh_layout.setContentsMargins(12, 14, 12, 12)
-        gh_layout.setSpacing(12)
-        p2p_hint = QLabel(
-            "勾选后连接 P2PQuake WebSocket；启动时 HTTP 补拉一次最新地震/海啸情报，之后仅靠 WSS 推送。"
-            "下方两项决定地震情報 / 津波予報是否参与解析。"
-        )
-        p2p_hint.setStyleSheet(STYLE_HINT)
+        gh_layout.setContentsMargins(*GROUP_MARGINS)
+        gh_layout.setSpacing(GROUP_SPACING)
+        p2p_hint = QLabel("勾选后连接；启动时 HTTP 补拉，之后靠 WSS。")
+        p2p_hint.setToolTip("下方两项决定地震情報 / 津波予報是否参与解析。")
+        _set_widget_style(p2p_hint, STYLE_HINT)
         p2p_hint.setWordWrap(True)
         gh_layout.addWidget(p2p_hint)
         p2p_wss_url = P2PQUAKE_WSS_URL
         p2p_status_col_w = 88
-        self.p2pquake_connect_cb = QCheckBox("P2PQuake（启动 HTTP 补拉 + WebSocket）")
+        self.p2pquake_connect_cb = QCheckBox("P2PQuake")
+        self.p2pquake_connect_cb.setToolTip("启动 HTTP 补拉 + WebSocket")
         self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
-        self.p2pquake_connect_cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(self.p2pquake_connect_cb, STYLE_CHECKBOX_SOURCE)
         gh_layout.addWidget(self.p2pquake_connect_cb)
         if p2p_wss_url not in self.individual_source_urls:
             self.individual_source_urls.append(p2p_wss_url)
@@ -3086,11 +3863,11 @@ class SettingsWindow(QDialog):
             """创建 P2PQuake 解析范围复选框行。"""
             cb = QCheckBox(title)
             cb.setChecked(getattr(self.config.message_config, parse_key, True))
-            cb.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
             st = QLabel("未解析")
             st.setMinimumWidth(p2p_status_col_w)
             st.setFixedWidth(p2p_status_col_w)
-            st.setStyleSheet(STYLE_STATUS_NEUTRAL)
+            _set_widget_style(st, STYLE_STATUS_NEUTRAL)
             st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             st.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
             self.source_parse_labels[parse_key] = st
@@ -3110,15 +3887,13 @@ class SettingsWindow(QDialog):
 
         # CENC 烈度速报（Nowquake）：与 P2P / 台风一样固定在提供者面板下方，任意提供者均可启用
         group_cenc_ir = QGroupBox("CENC 烈度速报")
-        group_cenc_ir.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_cenc_ir)
         gci_layout = QVBoxLayout(group_cenc_ir)
-        gci_layout.setContentsMargins(12, 14, 12, 12)
-        gci_layout.setSpacing(12)
-        cenc_ir_hint = QLabel(
-            "通过 Nowquake 接入中国地震台网烈度速报（WebSocket 推送；建连时 HTTP 拉取最新一条）。"
-            "数据仅供参考，请遵循接口使用说明与免责声明。"
-        )
-        cenc_ir_hint.setStyleSheet(STYLE_HINT)
+        gci_layout.setContentsMargins(*GROUP_MARGINS)
+        gci_layout.setSpacing(GROUP_SPACING)
+        cenc_ir_hint = QLabel("经 Nowquake 接入 CENC 烈度速报。")
+        cenc_ir_hint.setToolTip("WebSocket 推送；建连时 HTTP 拉取最新一条。数据仅供参考。")
+        _set_widget_style(cenc_ir_hint, STYLE_HINT)
         cenc_ir_hint.setWordWrap(True)
         gci_layout.addWidget(cenc_ir_hint)
         self._add_source_checkbox(
@@ -3132,16 +3907,130 @@ class SettingsWindow(QDialog):
             status_disconnected_text="未启用",
         )
 
+        # EQSC：全局辅助源，任意主提供者下均可启用
+        group_eqsc = QGroupBox("EQSC")
+        _prep_groupbox(group_eqsc)
+        ge_layout = QVBoxLayout(group_eqsc)
+        ge_layout.setContentsMargins(*GROUP_MARGINS)
+        ge_layout.setSpacing(GROUP_SPACING)
+        eqsc_hint = QLabel(
+            '全局辅助源（HTTP 轮询；官方称 WebSocket 不稳定故不用）。登录密钥在 '
+            '<a href="https://equake.top/auth" style="color: #3B82F6;">equake.top/auth</a>'
+            ' 申请；软件自动换取 AccessToken。任意主提供者下可用。'
+        )
+        eqsc_hint.setOpenExternalLinks(True)
+        _set_widget_style(eqsc_hint, STYLE_HINT)
+        eqsc_hint.setWordWrap(True)
+        ge_layout.addWidget(eqsc_hint)
+
+        eqsc_token_label = QLabel("EQSC 登录密钥：")
+        _set_widget_style(eqsc_token_label, STYLE_LABEL)
+        ge_layout.addWidget(eqsc_token_label)
+        eqsc_token_row = QHBoxLayout()
+        eqsc_token_row.setSpacing(8)
+        self.eqsc_login_token_entry = QLineEdit()
+        self.eqsc_login_token_entry.setPlaceholderText("在 equake.top/auth 申请的登录密钥")
+        self.eqsc_login_token_entry.setEchoMode(QLineEdit.Password)
+        self.eqsc_login_token_entry.setText(
+            getattr(self.config.ws_config, "eqsc_login_token", "") or ""
+        )
+        _set_widget_style(self.eqsc_login_token_entry, STYLE_LINEEDIT)
+        self.eqsc_login_token_entry.setToolTip(
+            "仅填写登录密钥；软件内部自动换取 AccessToken 用于 HTTP 鉴权。"
+        )
+        self.eqsc_login_token_entry.textChanged.connect(
+            lambda _text: self._refresh_eqsc_auth_status_label(force=True)
+        )
+        eqsc_token_row.addWidget(self.eqsc_login_token_entry, 1)
+        self.eqsc_auth_btn = QPushButton("连接")
+        _set_widget_style(self.eqsc_auth_btn, STYLE_AUDIO_COMPACT_BTN)
+        self.eqsc_auth_btn.setToolTip("测试登录密钥并换取 AccessToken")
+        self.eqsc_auth_btn.clicked.connect(self._on_eqsc_auth_test_clicked)
+        eqsc_token_row.addWidget(self.eqsc_auth_btn)
+        ge_layout.addLayout(eqsc_token_row)
+        self.eqsc_auth_status_label = QLabel("请输入登录密钥")
+        _set_widget_style(self.eqsc_auth_status_label, STYLE_HINT)
+        self.eqsc_auth_status_label.setWordWrap(True)
+        ge_layout.addWidget(self.eqsc_auth_status_label)
+        self._refresh_eqsc_auth_status_label(force=True)
+
+        self._add_source_checkbox(
+            group_eqsc,
+            EQSC_HTTP_MASTER,
+            "EQSC HTTP 轮询",
+            default_value=False,
+            status_key=EQSC_HTTP_MASTER,
+            status_tooltip="启用状态：已启用 / 未启用（勾选后按下方子项 HTTP 轮询）",
+            status_connected_text="已启用",
+            status_disconnected_text="未启用",
+        )
+
+        eqsc_status_col_w = 88
+
+        def _eqsc_parse_row(parse_key: str, title: str, default: bool = True) -> QCheckBox:
+            """创建 EQSC 解析范围复选框行。"""
+            cb = QCheckBox(title)
+            cb.setChecked(getattr(self.config.message_config, parse_key, default))
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
+            st = QLabel("未解析")
+            st.setMinimumWidth(eqsc_status_col_w)
+            st.setFixedWidth(eqsc_status_col_w)
+            _set_widget_style(st, STYLE_STATUS_NEUTRAL)
+            st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            st.setToolTip("解析状态：本会话已解析到该源数据（含 initial；过期未上屏也算） / 尚未解析")
+            self.source_parse_labels[parse_key] = st
+            self.source_status_texts[parse_key] = (
+                "已解析",
+                "未解析",
+                "解析状态：本会话已解析到该源数据（含 initial；过期未上屏也算） / 尚未解析",
+            )
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(cb)
+            row.addStretch()
+            row.addWidget(st)
+            ge_layout.addLayout(row)
+            cb.stateChanged.connect(self._update_parse_status_labels)
+            return cb
+
+        self.eqsc_parse_jma_eew_cb = _eqsc_parse_row("eqsc_parse_jma_eew", "JMA 紧急地震速报")
+        self.eqsc_parse_jma_report_cb = _eqsc_parse_row("eqsc_parse_jma_report", "JMA 地震情报")
+        self.eqsc_parse_jma_tsunami_cb = _eqsc_parse_row("eqsc_parse_jma_tsunami", "JMA 海啸情报")
+        self.eqsc_parse_cenc_cb = _eqsc_parse_row("eqsc_parse_cenc", "CENC 地震列表")
+        self.eqsc_parse_cenc_ir_cb = _eqsc_parse_row("eqsc_parse_cenc_ir", "CENC 烈度速报")
+        self.eqsc_parse_cwa_cb = _eqsc_parse_row("eqsc_parse_cwa", "CWA 地震列表")
+        self.eqsc_parse_hko_cb = _eqsc_parse_row("eqsc_parse_hko", "HKO 地震列表")
+        self.eqsc_parse_usgs_cb = _eqsc_parse_row("eqsc_parse_usgs", "USGS 地震列表")
+        self.eqsc_parse_emsc_cb = _eqsc_parse_row("eqsc_parse_emsc", "EMSC 地震列表")
+        self.eqsc_parse_typhoon_cb = _eqsc_parse_row("eqsc_parse_typhoon", "NMC 台风")
+        self.eqsc_parse_volcano_cb = _eqsc_parse_row("eqsc_parse_volcano", "JMA 火山", default=False)
+        eqsc_poll_sources = [
+            (url, label)
+            for url, label in (
+                (EQSC_HTTP_SOURCE_KEYS[0], "JMA EEW"),
+                (EQSC_HTTP_SOURCE_KEYS[1], "JMA 情报"),
+                (EQSC_HTTP_SOURCE_KEYS[2], "JMA 海啸"),
+                (EQSC_HTTP_SOURCE_KEYS[3], "CENC"),
+                (EQSC_HTTP_SOURCE_KEYS[4], "CENC 烈度"),
+                (EQSC_HTTP_SOURCE_KEYS[5], "CWA"),
+                (EQSC_HTTP_SOURCE_KEYS[6], "HKO"),
+                (EQSC_HTTP_SOURCE_KEYS[7], "USGS"),
+                (EQSC_HTTP_SOURCE_KEYS[8], "EMSC"),
+                (EQSC_HTTP_SOURCE_KEYS[9], "台风"),
+                (EQSC_HTTP_SOURCE_KEYS[10], "火山"),
+            )
+        ]
+        self._add_http_poll_interval_grid(ge_layout, eqsc_poll_sources)
+
         # 台风 HTTP：全局辅助源，任意主提供者下均可启用
         group_typhoon = QGroupBox("台风实时与历史数据")
-        group_typhoon.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_typhoon)
         gt_layout = QVBoxLayout(group_typhoon)
-        gt_layout.setContentsMargins(12, 14, 12, 12)
-        gt_layout.setSpacing(12)
-        typhoon_hint = QLabel(
-            "通过 Fan Studio HTTP 轮询台风路径与强度（与上方主数据源提供者无关，切换 Fan Studio / 无界 / 官方时均生效）。"
-        )
-        typhoon_hint.setStyleSheet(STYLE_HINT)
+        gt_layout.setContentsMargins(*GROUP_MARGINS)
+        gt_layout.setSpacing(GROUP_SPACING)
+        typhoon_hint = QLabel("经 Fan Studio HTTP 轮询台风数据（全局可用）。")
+        typhoon_hint.setToolTip("与主数据源提供者无关，切换提供者后仍生效。")
+        _set_widget_style(typhoon_hint, STYLE_HINT)
         typhoon_hint.setWordWrap(True)
         gt_layout.addWidget(typhoon_hint)
         self._add_source_checkbox(
@@ -3160,21 +4049,22 @@ class SettingsWindow(QDialog):
             (url, label) for url, label, _ in intl_sources if not str(url).startswith(("ws://", "wss://"))
         ]
         group_poll = QGroupBox("数据源访问间隔")
-        group_poll.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_poll)
         gp_layout = QVBoxLayout(group_poll)
-        gp_layout.setContentsMargins(12, 14, 12, 12)
-        gp_layout.setSpacing(12)
-        poll_hint = QLabel("Get 轮询间隔（秒），最低 1 秒；各数据源独立设置。")
-        poll_hint.setStyleSheet(STYLE_HINT)
+        gp_layout.setContentsMargins(*GROUP_MARGINS)
+        gp_layout.setSpacing(GROUP_SPACING)
+        poll_hint = QLabel("各源独立设置轮询间隔（秒，最低 1）。")
+        _set_widget_style(poll_hint, STYLE_HINT)
         poll_hint.setWordWrap(True)
         gp_layout.addWidget(poll_hint)
         self._add_http_poll_interval_grid(gp_layout, poll_interval_sources)
         of_panel_layout.addWidget(group_poll)
         scroll_layout.addWidget(self.ds_panel_official)
 
-        # 台风 / CENC 烈度速报 / P2PQuake：固定在三个提供者面板下方（切换提供者时始终可见）
+        # 台风 / CENC 烈度速报 / EQSC / P2PQuake：固定在三个提供者面板下方（切换提供者时始终可见）
         scroll_layout.addWidget(group_typhoon)
         scroll_layout.addWidget(group_cenc_ir)
+        scroll_layout.addWidget(group_eqsc)
         scroll_layout.addWidget(group_history)
 
         # 按配置选中提供者并切换可见性（参考百度翻译区域 setVisible）
@@ -3187,7 +4077,7 @@ class SettingsWindow(QDialog):
             self.radio_provider_fanstudio.setChecked(True)
 
         def _update_data_provider_panels_visible():
-            """切换数据源提供者时显示/隐藏对应配置面板（台风 / 烈度速报 / P2PQuake 始终可见）。"""
+            """切换数据源提供者时显示/隐藏对应配置面板（台风 / 烈度速报 / EQSC / P2PQuake 始终可见）。"""
             show_fs = self.radio_provider_fanstudio.isChecked()
             show_wh = self.radio_provider_whews.isChecked()
             show_of = self.radio_provider_official.isChecked()
@@ -3209,14 +4099,14 @@ class SettingsWindow(QDialog):
         self.select_all_btn = QPushButton("全选")
         self.select_all_btn.setMinimumWidth(100)
         self.select_all_btn.setMinimumHeight(35)
-        self.select_all_btn.setStyleSheet(STYLE_SELECT_ALL_BTN)
+        _set_widget_style(self.select_all_btn, STYLE_SELECT_ALL_BTN)
         self.select_all_btn.clicked.connect(self._toggle_select_all)
         button_layout.addWidget(self.select_all_btn)
         button_layout.addSpacing(10)
         save_btn = QPushButton("保存")
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet(STYLE_SAVE_BTN)
+        _set_widget_style(save_btn, STYLE_SAVE_BTN)
         save_btn.clicked.connect(self._save_data_source_settings)
         button_layout.addWidget(save_btn)
         button_layout.addStretch()
@@ -3261,7 +4151,7 @@ class SettingsWindow(QDialog):
                 status.setText(msg)
 
         def _on_finished(result) -> None:
-            """登录结束后回填令牌并清理线程。"""
+            """登录结束后回填令牌；线程退出由 finished 信号链清理。"""
             try:
                 if btn is not None:
                     btn.setEnabled(True)
@@ -3309,14 +4199,13 @@ class SettingsWindow(QDialog):
                     )
             finally:
                 self._whews_login_worker = None
-                try:
-                    thread.quit()
-                    thread.wait(2000)
-                except Exception:
-                    pass
+                self._whews_login_thread = None
 
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
+        worker.finished.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         self._whews_login_worker = worker
         self._whews_login_thread = thread
         thread.start()
@@ -3338,7 +4227,7 @@ class SettingsWindow(QDialog):
         default_val = self.config.get_http_poll_interval(url)  # 从配置读取当前间隔
         spin.setValue(default_val)
         spin.setToolTip("HTTP 数据源 Get 轮询间隔（秒）")
-        spin.setStyleSheet("font-size: 14px; min-width: 90px;")
+        _set_widget_style(spin, "font-size: 14px; min-width: 90px;")
         self.http_poll_spinboxes[url] = spin  # 保存引用供保存时写回配置
         return spin
 
@@ -3361,14 +4250,14 @@ class SettingsWindow(QDialog):
         spin_col_w = 110  # 间隔输入框列宽
         hdr_style = "font-size: 14px; color: #666666; font-weight: bold;"
         hdr_name = QLabel("数据源")
-        hdr_name.setStyleSheet(hdr_style)
+        _set_widget_style(hdr_name, hdr_style)
         hdr_interval = QLabel("Get 间隔")
-        hdr_interval.setStyleSheet(hdr_style)
+        _set_widget_style(hdr_interval, hdr_style)
         grid.addWidget(hdr_name, 0, 0, Qt.AlignLeft | Qt.AlignVCenter)
         grid.addWidget(hdr_interval, 0, 1, Qt.AlignLeft | Qt.AlignVCenter)
         for row, (url, label) in enumerate(sources, start=1):
             name_lbl = QLabel(label)
-            name_lbl.setStyleSheet(STYLE_LABEL)
+            _set_widget_style(name_lbl, STYLE_LABEL)
             name_lbl.setMinimumWidth(label_col_w)
             poll_spin = self._make_http_poll_spinbox(url)  # 每个 HTTP 源独立间隔控件
             poll_spin.setFixedWidth(spin_col_w)
@@ -3390,14 +4279,14 @@ class SettingsWindow(QDialog):
         initial_value = default_value if config_value is None else bool(config_value)
         checkbox = QCheckBox(name, parent)  # HTTP 源连接开关
         checkbox.setChecked(initial_value)
-        checkbox.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(checkbox, STYLE_CHECKBOX_SOURCE)
         self.source_vars[url] = checkbox  # 保存引用供保存/全选时使用
         if url not in self.individual_source_urls:
             self.individual_source_urls.append(url)
         poll_spin = self._make_http_poll_spinbox(url)  # 同行展示 Get 间隔
         sk = status_key or url
         status_label = QLabel("未解析")
-        status_label.setStyleSheet(STYLE_STATUS_NEUTRAL)
+        _set_widget_style(status_label, STYLE_STATUS_NEUTRAL)
         status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
         self.source_parse_labels[sk] = status_label
@@ -3445,7 +4334,7 @@ class SettingsWindow(QDialog):
 
         checkbox = QCheckBox(name, parent)  # 数据源连接/解析开关
         checkbox.setChecked(initial_value)
-        checkbox.setStyleSheet("font-size: 16px; line-height: 22pt; padding: 2px 0;")
+        _set_widget_style(checkbox, STYLE_CHECKBOX_SOURCE)
         self.source_vars[url] = checkbox  # 以 URL 为键保存，供保存/全选时使用
         
         # 如果不是All源，记录到单项数据源列表
@@ -3457,7 +4346,7 @@ class SettingsWindow(QDialog):
 
         if status_key:
             status_label = QLabel(status_connected_text if initial_value else status_disconnected_text)
-            status_label.setStyleSheet(STYLE_STATUS_CONNECTED if initial_value else STYLE_STATUS_NEUTRAL)
+            _set_widget_style(status_label, STYLE_STATUS_CONNECTED if initial_value else STYLE_STATUS_NEUTRAL)
             status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             status_label.setToolTip(status_tooltip)
             self.source_parse_labels[status_key] = status_label
@@ -3568,17 +4457,32 @@ class SettingsWindow(QDialog):
             'whews_parse_ingv_cb',
             'whews_parse_nrcan_cb',
             'whews_parse_mmd_cb',
-            'whews_parse_fujian_cb',
             'whews_parse_beijing_cb',
-            'whews_parse_sichuan_cb',
             'whews_parse_yunnan_cb',
             'whews_parse_ningxia_cb',
-            'whews_parse_shaanxi_cb',
-            'whews_parse_hubei_cb',
             'whews_parse_tsunami_cb',
+            'whews_parse_ntwc_cb',
+            'whews_parse_ptwc_cb',
+            'whews_parse_incois_cb',
+            'whews_parse_jma_tsunami_cb',
+            'whews_parse_phivolcs_cb',
+            'whews_parse_sgc_cb',
+            'whews_parse_ga_cb',
+            'whews_parse_cenais_cb',
             'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
             'p2pquake_parse_552_cb',
+            'eqsc_parse_jma_eew_cb',
+            'eqsc_parse_jma_report_cb',
+            'eqsc_parse_jma_tsunami_cb',
+            'eqsc_parse_cenc_cb',
+            'eqsc_parse_cenc_ir_cb',
+            'eqsc_parse_cwa_cb',
+            'eqsc_parse_hko_cb',
+            'eqsc_parse_usgs_cb',
+            'eqsc_parse_emsc_cb',
+            'eqsc_parse_typhoon_cb',
+            'eqsc_parse_volcano_cb',
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -3649,17 +4553,32 @@ class SettingsWindow(QDialog):
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
             ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
             ('whews_parse_mmd_cb', 'whews_parse_mmd'),
-            ('whews_parse_fujian_cb', 'whews_parse_fujian'),
             ('whews_parse_beijing_cb', 'whews_parse_beijing'),
-            ('whews_parse_sichuan_cb', 'whews_parse_sichuan'),
             ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
             ('whews_parse_ningxia_cb', 'whews_parse_ningxia'),
-            ('whews_parse_shaanxi_cb', 'whews_parse_shaanxi'),
-            ('whews_parse_hubei_cb', 'whews_parse_hubei'),
             ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
+            ('whews_parse_ntwc_cb', 'whews_parse_ntwc'),
+            ('whews_parse_ptwc_cb', 'whews_parse_ptwc'),
+            ('whews_parse_incois_cb', 'whews_parse_incois'),
+            ('whews_parse_jma_tsunami_cb', 'whews_parse_jma_tsunami'),
+            ('whews_parse_phivolcs_cb', 'whews_parse_phivolcs'),
+            ('whews_parse_sgc_cb', 'whews_parse_sgc'),
+            ('whews_parse_ga_cb', 'whews_parse_ga'),
+            ('whews_parse_cenais_cb', 'whews_parse_cenais'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
             ('p2pquake_parse_552_cb', 'p2pquake_parse_552'),
+            ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
+            ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
+            ('eqsc_parse_jma_tsunami_cb', 'eqsc_parse_jma_tsunami'),
+            ('eqsc_parse_cenc_cb', 'eqsc_parse_cenc'),
+            ('eqsc_parse_cenc_ir_cb', 'eqsc_parse_cenc_ir'),
+            ('eqsc_parse_cwa_cb', 'eqsc_parse_cwa'),
+            ('eqsc_parse_hko_cb', 'eqsc_parse_hko'),
+            ('eqsc_parse_usgs_cb', 'eqsc_parse_usgs'),
+            ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
+            ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
+            ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -3675,49 +4594,46 @@ class SettingsWindow(QDialog):
     
     def _create_advanced_tab(self):
         """创建高级设置标签页（地名修正、日志、自定义数据源）"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
+        _prepare_scroll_body(scrollable_widget)
         main_layout = QVBoxLayout(scrollable_widget)
         main_layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         main_layout.setSpacing(SPACING_TAB)
         
         # ---------- 1. 地名处理方式（二选一） ----------
-        sec1_title = QLabel("地名处理方式")
-        sec1_title.setStyleSheet(STYLE_SECTION_TITLE)
-        main_layout.addWidget(sec1_title)
+        group_place = QGroupBox("地名处理方式")
+        _prep_groupbox(group_place)
+        place_layout = QVBoxLayout(group_place)
+        place_layout.setContentsMargins(*GROUP_MARGINS)
+        place_layout.setSpacing(GROUP_SPACING)
 
-        mode_hint = QLabel("非中文数据源统一使用以下方式之一处理地名，二者不可同时启用。")
-        mode_hint.setStyleSheet(STYLE_HINT + " line-height: 1.5;")
+        mode_hint = QLabel("二选一，不可同时启用。")
+        _set_widget_style(mode_hint, STYLE_HINT)
         mode_hint.setWordWrap(True)
-        main_layout.addWidget(mode_hint)
+        place_layout.addWidget(mode_hint)
 
         place_mode_group = QButtonGroup(scrollable_widget)
 
         fix_radio = QRadioButton("地名修正")
-        fix_radio.setStyleSheet("font-size: 16px; padding: 5px;")
+        _set_widget_style(fix_radio, STYLE_RADIO)
         place_mode_group.addButton(fix_radio, 0)
-        main_layout.addWidget(fix_radio)
-        fix_info = QLabel(
-            "国外数据源根据经纬度使用 FE 区域库修正地名（usgs、emsc、bcsf、gfz、usp、kma、bmkg、geonet、ingv 等）。"
-            "CENC、CWA、JMA、HKO、P2PQuake 使用原始地名，无需 API 密钥。"
-        )
-        fix_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
+        place_layout.addWidget(fix_radio)
+        fix_info = QLabel("按经纬度用 FE 区域库修正国外地名。")
+        fix_info.setToolTip("CENC、CWA、JMA、HKO、P2PQuake 使用原始地名，无需 API 密钥。")
+        _set_widget_style(fix_info, STYLE_HINT + " padding-left: 22px;")
         fix_info.setWordWrap(True)
-        main_layout.addWidget(fix_info)
+        place_layout.addWidget(fix_info)
 
         baidu_radio = QRadioButton("百度翻译")
-        baidu_radio.setStyleSheet("font-size: 16px; padding: 5px;")
+        _set_widget_style(baidu_radio, STYLE_RADIO)
         place_mode_group.addButton(baidu_radio, 1)
-        main_layout.addWidget(baidu_radio)
-        baidu_info = QLabel(
-            "将英语等非中文地名翻译为中文，适用于国外数据源。"
-            "CENC、CWA、JMA、HKO、P2PQuake 仍使用原始地名。需要配置百度翻译 API 密钥。"
-        )
-        baidu_info.setStyleSheet(STYLE_HINT + " padding-left: 25px; line-height: 1.5;")
+        place_layout.addWidget(baidu_radio)
+        baidu_info = QLabel("将非中文地名译为中文，需 API 密钥。")
+        baidu_info.setToolTip("CENC、CWA、JMA、HKO、P2PQuake 仍使用原始地名。")
+        _set_widget_style(baidu_info, STYLE_HINT + " padding-left: 22px;")
         baidu_info.setWordWrap(True)
-        main_layout.addWidget(baidu_info)
+        place_layout.addWidget(baidu_info)
 
         tc = self.config.translation_config
         if getattr(tc, "enabled", False):
@@ -3726,29 +4642,29 @@ class SettingsWindow(QDialog):
             fix_radio.setChecked(True)
 
         baidu_app_id_label = QLabel("百度翻译 AppID：")
-        baidu_app_id_label.setStyleSheet(STYLE_LABEL)
-        main_layout.addWidget(baidu_app_id_label)
+        _set_widget_style(baidu_app_id_label, STYLE_LABEL)
+        place_layout.addWidget(baidu_app_id_label)
         baidu_app_id_entry = QLineEdit()
         baidu_app_id_entry.setPlaceholderText("在百度翻译开放平台申请")
         baidu_app_id_entry.setText(getattr(tc, "baidu_app_id", "") or "")
-        baidu_app_id_entry.setStyleSheet(STYLE_LINEEDIT)
-        main_layout.addWidget(baidu_app_id_entry)
+        _set_widget_style(baidu_app_id_entry, STYLE_LINEEDIT)
+        place_layout.addWidget(baidu_app_id_entry)
         baidu_secret_label = QLabel("百度翻译密钥：")
-        baidu_secret_label.setStyleSheet(STYLE_LABEL)
-        main_layout.addWidget(baidu_secret_label)
+        _set_widget_style(baidu_secret_label, STYLE_LABEL)
+        place_layout.addWidget(baidu_secret_label)
         baidu_secret_entry = QLineEdit()
         baidu_secret_entry.setPlaceholderText("与 AppID 对应的密钥")
         baidu_secret_entry.setEchoMode(QLineEdit.Password)
         baidu_secret_entry.setText(getattr(tc, "baidu_secret", "") or "")
-        baidu_secret_entry.setStyleSheet(STYLE_LINEEDIT)
-        main_layout.addWidget(baidu_secret_entry)
+        _set_widget_style(baidu_secret_entry, STYLE_LINEEDIT)
+        place_layout.addWidget(baidu_secret_entry)
 
         link_label = QLabel(
-            '获取 API 密钥：<a href="https://fanyi-api.baidu.com/" style="color: #4A90E2;">百度翻译开放平台</a>'
+            '获取 API 密钥：<a href="https://fanyi-api.baidu.com/" style="color: #3B82F6;">百度翻译开放平台</a>'
         )
         link_label.setOpenExternalLinks(True)
-        link_label.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
-        main_layout.addWidget(link_label)
+        _set_widget_style(link_label, STYLE_HINT + " padding-left: 22px;")
+        place_layout.addWidget(link_label)
 
         def _update_baidu_api_visible():
             """切换翻译引擎时显示/隐藏百度 API 密钥输入区。"""
@@ -3762,25 +4678,19 @@ class SettingsWindow(QDialog):
         fix_radio.toggled.connect(lambda _: _update_baidu_api_visible())
         baidu_radio.toggled.connect(lambda _: _update_baidu_api_visible())
         _update_baidu_api_visible()
-        
-        # 分隔线
-        sep1 = QFrame()
-        sep1.setFrameShape(QFrame.HLine)
-        sep1.setFrameShadow(QFrame.Sunken)
-        sep1.setStyleSheet("color: #E0E0E0;")
-        main_layout.addWidget(sep1)
+        main_layout.addWidget(group_place)
 
-        # ---------- 2. 预估烈度与告警闪烁（卡片布局，与「外观与显示」QGroupBox 风格一致） ----------
+        # ---------- 2. 预估烈度与告警闪烁（卡片布局，与「外观/显示」QGroupBox 风格一致） ----------
         ac = self.config.alert_config
         group_alert = QGroupBox("预警闪烁与有感提示")
-        group_alert.setStyleSheet(STYLE_GROUPBOX)
+        _prep_groupbox(group_alert)
         alert_outer = QVBoxLayout(group_alert)
-        alert_outer.setContentsMargins(10, 12, 10, 10)
-        alert_outer.setSpacing(4)
+        alert_outer.setContentsMargins(*GROUP_MARGINS)
+        alert_outer.setSpacing(GROUP_SPACING)
 
-        alert_enable_cb = QCheckBox("启用预警闪烁与有感/强有感提示")
+        alert_enable_cb = QCheckBox("启用预警闪烁与有感提示")
         alert_enable_cb.setChecked(bool(getattr(ac, 'enabled', False)))
-        alert_enable_cb.setStyleSheet("font-size: 16px;")
+        _set_widget_style(alert_enable_cb, STYLE_CHECKBOX)
         alert_enable_cb.setToolTip(
             "收到地震预警且满足最低震级与烈度条件时，先展示带安全提示的预警全文（提示期），"
             "再切回纯预警条文；日台类源不拼接提示、不进入本序列。"
@@ -3802,7 +4712,7 @@ class SettingsWindow(QDialog):
             dlg.setMinimumWidth(460)
             dlg.setMaximumWidth(520)
             apply_light_palette(dlg, "#FFFFFF")
-            dlg.setStyleSheet(light_dialog_stylesheet("#FFFFFF"))
+            _set_widget_style(dlg, light_dialog_stylesheet("#FFFFFF"))
             root = QVBoxLayout(dlg)
             root.setContentsMargins(24, 22, 24, 22)
             root.setSpacing(20)
@@ -3824,15 +4734,14 @@ class SettingsWindow(QDialog):
 
             sub = QLabel("在开启本功能前，请阅读以下说明。")
             sub.setWordWrap(True)
-            sub.setStyleSheet("font-size: 13px; color: #616161; line-height: 1.5;")
-
+            _set_widget_style(sub, STYLE_HINT)
             body = QLabel()
             body.setTextFormat(Qt.RichText)
             body.setWordWrap(True)
             body.setOpenExternalLinks(False)
             body.setText(
                 '<p style="margin: 0; line-height: 1.7;">'
-                '<span style="font-size: 14pt; color: #333333;">'
+                f'<span style="font-size: 14px; color: {COLOR_TEXT};">'
                 "启用后，满足震级与烈度条件的地震预警将先展示带安全提示的全文，"
                 "滚动完成后切回纯预警条文；日台类数据源不进入本序列。"
                 "</span></p>"
@@ -3854,17 +4763,8 @@ class SettingsWindow(QDialog):
             cancel_btn.setMinimumWidth(96)
             ok_btn.setCursor(Qt.PointingHandCursor)
             cancel_btn.setCursor(Qt.PointingHandCursor)
-            ok_btn.setStyleSheet(
-                "QPushButton { font-size: 14px; padding: 8px 16px; "
-                "background: #1565C0; color: white; border: none; border-radius: 6px; }"
-                "QPushButton:hover { background: #1976D2; }"
-                "QPushButton:pressed { background: #0D47A1; }"
-            )
-            cancel_btn.setStyleSheet(
-                "QPushButton { font-size: 14px; padding: 8px 16px; "
-                "background: #F5F5F5; color: #333333; border: 1px solid #BDBDBD; border-radius: 6px; }"
-                "QPushButton:hover { background: #EEEEEE; }"
-            )
+            _set_widget_style(ok_btn, STYLE_SAVE_BTN)
+            _set_widget_style(cancel_btn, STYLE_SECONDARY_BTN)
             btn_row.addWidget(ok_btn)
             btn_row.addWidget(cancel_btn)
             root.addLayout(btn_row)
@@ -3892,7 +4792,7 @@ class SettingsWindow(QDialog):
         def _subhead(text: str) -> QLabel:
             """创建告警设置卡片内的小节标题标签。"""
             h = QLabel(text)
-            h.setStyleSheet(STYLE_CARD_SUBHEAD)
+            _set_widget_style(h, STYLE_CARD_SUBHEAD)
             return h
 
         _al_w = 108  # 单列纵向：标签列略宽以免截断
@@ -3917,7 +4817,7 @@ class SettingsWindow(QDialog):
         grid_trigger = _v_field_grid()
 
         min_mag_label = QLabel("最低震级")
-        min_mag_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(min_mag_label, STYLE_LABEL)
         min_mag_label.setToolTip("低于该震级的预警不进入告警序列。")
         min_mag_spin = QDoubleSpinBox()
         min_mag_spin.setRange(0.0, 10.0)
@@ -3926,7 +4826,7 @@ class SettingsWindow(QDialog):
         min_mag_spin.setValue(float(getattr(ac, 'min_magnitude', 3.0)))
         min_mag_spin.setSuffix(" M")
         min_mag_spin.setFixedWidth(100)
-        min_mag_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(min_mag_spin, STYLE_SPINBOX)
         _v_add_row(grid_trigger, 0, min_mag_label, min_mag_spin)
 
         alert_outer.addLayout(grid_trigger)
@@ -3935,34 +4835,32 @@ class SettingsWindow(QDialog):
         alert_outer.addWidget(_subhead("闪烁与颜色"))
         grid_flash = _v_field_grid()
 
-        hint_dur_label = QLabel(
-            "提示期时长与「预警/消息更新」中的发震时间有效期（及 JMA/四川 单独窗口）一致，"
-            "按当前报文剩余有效时间兜底；字幕滚完一周可提前结束。"
-        )
+        hint_dur_label = QLabel("提示期随预警有效期；滚完一周可提前结束。")
+        hint_dur_label.setToolTip("与「预警/消息更新」中的发震时间有效期（及 JMA/四川单独窗口）一致。")
         hint_dur_label.setWordWrap(True)
-        hint_dur_label.setStyleSheet(STYLE_LABEL + " color: #555555;")
+        _set_widget_style(hint_dur_label, STYLE_HINT)
         grid_flash.addWidget(hint_dur_label, 0, 0, 1, 2)
 
         int_label = QLabel("闪烁间隔")
-        int_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(int_label, STYLE_LABEL)
         flash_interval_spin = QSpinBox()
         flash_interval_spin.setRange(50, 2000)
         flash_interval_spin.setSingleStep(50)
         flash_interval_spin.setValue(int(getattr(ac, 'flash_interval_ms', 400)))
         flash_interval_spin.setSuffix(" 毫秒")
         flash_interval_spin.setFixedWidth(120)
-        flash_interval_spin.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(flash_interval_spin, STYLE_SPINBOX)
         _v_add_row(grid_flash, 1, int_label, flash_interval_spin)
 
         color_label = QLabel("告警色")
-        color_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(color_label, STYLE_LABEL)
         color_label.setToolTip("点击选择左侧标识闪烁颜色。")
         flash_color_btn = QPushButton(getattr(ac, 'flash_color', '#FF0000'))
         flash_color_btn.setFixedWidth(140)
         flash_color_btn.setCursor(Qt.PointingHandCursor)
-        flash_color_btn.setStyleSheet(
+        _set_widget_style(flash_color_btn, 
             f"QPushButton {{ background-color: {getattr(ac, 'flash_color', '#FF0000')}; "
-            f"color: white; padding: 6px 10px; border-radius: 4px; font-size: 14px; border: 1px solid #CCCCCC; }}"
+            f"color: white; padding: 6px 10px; border-radius: 8px; font-size: 13px; border: 1px solid #E5E2DC; }}"
         )
 
         def _on_pick_color():
@@ -3972,9 +4870,9 @@ class SettingsWindow(QDialog):
             if picked.isValid():
                 hex_color = picked.name(QColor.HexRgb).upper()
                 flash_color_btn.setText(hex_color)
-                flash_color_btn.setStyleSheet(
+                _set_widget_style(flash_color_btn, 
                     f"QPushButton {{ background-color: {hex_color}; "
-                    f"color: white; padding: 6px 10px; border-radius: 4px; font-size: 14px; border: 1px solid #CCCCCC; }}"
+                    f"color: white; padding: 6px 10px; border-radius: 8px; font-size: 13px; border: 1px solid #E5E2DC; }}"
                 )
         flash_color_btn.clicked.connect(_on_pick_color)
         _v_add_row(grid_flash, 2, color_label, flash_color_btn)
@@ -3984,127 +4882,113 @@ class SettingsWindow(QDialog):
         # —— 模拟 ——
         alert_outer.addWidget(_subhead("模拟"))
         sim_btn = QPushButton("模拟预警")
-        sim_btn.setStyleSheet(STYLE_SELECT_ALL_BTN)
+        _set_widget_style(sim_btn, STYLE_SELECT_ALL_BTN)
         sim_btn.setCursor(Qt.PointingHandCursor)
         sim_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         sim_btn.clicked.connect(self._simulate_alert)
         alert_outer.addWidget(sim_btn)
 
         main_layout.addWidget(group_alert)
-        main_layout.addSpacing(10)
 
-        # 分隔线
-        sep1b = QFrame()
-        sep1b.setFrameShape(QFrame.HLine)
-        sep1b.setFrameShadow(QFrame.Sunken)
-        sep1b.setStyleSheet("color: #E0E0E0;")
-        main_layout.addWidget(sep1b)
-        
         # ---------- 3. 日志设置 ----------
-        sec2_title = QLabel("日志设置")
-        sec2_title.setStyleSheet(STYLE_SECTION_TITLE)
-        main_layout.addWidget(sec2_title)
+        group_log = QGroupBox("日志设置")
+        _prep_groupbox(group_log)
+        log_layout = QVBoxLayout(group_log)
+        log_layout.setContentsMargins(*GROUP_MARGINS)
+        log_layout.setSpacing(GROUP_SPACING)
         output_file_checkbox = QCheckBox("输出日志到文件")
         output_file_checkbox.setChecked(self.config.log_config.output_to_file)
-        output_file_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(output_file_checkbox)
-        output_file_desc = QLabel("启用后，日志将保存到 log.txt 文件中")
-        output_file_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
+        _set_widget_style(output_file_checkbox, STYLE_CHECKBOX_LOG)
+        log_layout.addWidget(output_file_checkbox)
+        output_file_desc = QLabel("保存到 log.txt")
+        _set_widget_style(output_file_desc, STYLE_HINT + " padding-left: 22px;")
         output_file_desc.setWordWrap(True)
-        main_layout.addWidget(output_file_desc)
+        log_layout.addWidget(output_file_desc)
         clear_log_checkbox = QCheckBox("每次程序启动前清空日志")
         clear_log_checkbox.setChecked(self.config.log_config.clear_log_on_startup)
-        clear_log_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(clear_log_checkbox)
-        clear_log_desc = QLabel("启用后，每次启动程序时会清空日志文件")
-        clear_log_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
+        _set_widget_style(clear_log_checkbox, STYLE_CHECKBOX_LOG)
+        log_layout.addWidget(clear_log_checkbox)
+        clear_log_desc = QLabel("每次启动时清空")
+        _set_widget_style(clear_log_desc, STYLE_HINT + " padding-left: 22px;")
         clear_log_desc.setWordWrap(True)
-        main_layout.addWidget(clear_log_desc)
+        log_layout.addWidget(clear_log_desc)
         split_date_checkbox = QCheckBox("按日期分割日志")
         split_date_checkbox.setChecked(self.config.log_config.split_by_date)
-        split_date_checkbox.setStyleSheet("font-size: 16px; padding: 5px;")
-        main_layout.addWidget(split_date_checkbox)
-        split_date_desc = QLabel("启用后，日志文件将按日期命名（log_YYYYMMDD.txt），每天自动创建新文件")
-        split_date_desc.setStyleSheet(STYLE_HINT + " padding-left: 25px;")
+        _set_widget_style(split_date_checkbox, STYLE_CHECKBOX_LOG)
+        log_layout.addWidget(split_date_checkbox)
+        split_date_desc = QLabel("按日期命名（log_YYYYMMDD.txt）")
+        _set_widget_style(split_date_desc, STYLE_HINT + " padding-left: 22px;")
         split_date_desc.setWordWrap(True)
-        main_layout.addWidget(split_date_desc)
+        log_layout.addWidget(split_date_desc)
         log_size_layout = QHBoxLayout()
         log_size_label = QLabel("日志文件最大大小（MB）：")
-        log_size_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(log_size_label, STYLE_LABEL)
         log_size_layout.addWidget(log_size_label)
         log_size_spinbox = QSpinBox()
         log_size_spinbox.setMinimum(1)
         log_size_spinbox.setMaximum(1000)
         log_size_spinbox.setValue(self.config.log_config.max_log_size)
         log_size_spinbox.setSuffix(" MB")
-        log_size_spinbox.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(log_size_spinbox, STYLE_SPINBOX)
         log_size_layout.addWidget(log_size_spinbox)
         log_size_layout.addStretch()
-        main_layout.addLayout(log_size_layout)
-        log_size_desc = QLabel("当日志文件达到此大小时，将自动创建备份文件（仅在未启用按日期分割时生效）")
-        log_size_desc.setStyleSheet(STYLE_HINT)
+        log_layout.addLayout(log_size_layout)
+        log_size_desc = QLabel("达此大小后自动备份（未按日分割时）")
+        _set_widget_style(log_size_desc, STYLE_HINT)
         log_size_desc.setWordWrap(True)
-        main_layout.addWidget(log_size_desc)
+        log_layout.addWidget(log_size_desc)
+        main_layout.addWidget(group_log)
         
-        # 分隔线
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.HLine)
-        sep2.setFrameShadow(QFrame.Sunken)
-        sep2.setStyleSheet("color: #E0E0E0;")
-        main_layout.addWidget(sep2)
-        
-        # ---------- 3. 自定义数据源 ----------
-        sec3_title = QLabel("自定义数据源")
-        sec3_title.setStyleSheet(STYLE_SECTION_TITLE)
-        main_layout.addWidget(sec3_title)
+        # ---------- 4. 自定义数据源 ----------
+        group_custom_src = QGroupBox("自定义数据源")
+        _prep_groupbox(group_custom_src)
+        custom_src_layout = QVBoxLayout(group_custom_src)
+        custom_src_layout.setContentsMargins(*GROUP_MARGINS)
+        custom_src_layout.setSpacing(GROUP_SPACING)
         custom_url_label = QLabel("自定义数据源 URL：")
-        custom_url_label.setStyleSheet(STYLE_LABEL)
-        main_layout.addWidget(custom_url_label)
+        _set_widget_style(custom_url_label, STYLE_LABEL)
+        custom_src_layout.addWidget(custom_url_label)
         custom_url_entry = QLineEdit()
         custom_url_entry.setPlaceholderText("输入 http/https/ws/wss URL，留空则关闭")
         custom_url_entry.setText(self.config.custom_data_source_url or "")
-        custom_url_entry.setStyleSheet(STYLE_LINEEDIT)
-        main_layout.addWidget(custom_url_entry)
-        custom_insecure_ssl_cb = QCheckBox("自定义 HTTP 源跳过 SSL 证书校验（仅当 URL 为 https 且证书无效时使用）")
+        _set_widget_style(custom_url_entry, STYLE_LINEEDIT)
+        custom_src_layout.addWidget(custom_url_entry)
+        custom_insecure_ssl_cb = QCheckBox("跳过 SSL 证书校验")
         custom_insecure_ssl_cb.setChecked(
             bool(getattr(self.config, 'custom_data_source_insecure_ssl', False))
         )
-        custom_insecure_ssl_cb.setStyleSheet("font-size: 14px;")
+        _set_widget_style(custom_insecure_ssl_cb, STYLE_CHECKBOX_SMALL)
         custom_insecure_ssl_cb.setToolTip(
             "适用于自签名证书等场景；会降低 HTTPS 连接安全性，请仅在信任的数据源上开启。"
         )
-        main_layout.addWidget(custom_insecure_ssl_cb)
+        custom_src_layout.addWidget(custom_insecure_ssl_cb)
         custom_poll_layout = QHBoxLayout()
         custom_poll_label = QLabel("HTTP Get 间隔（秒）：")
-        custom_poll_label.setStyleSheet(STYLE_LABEL)
+        _set_widget_style(custom_poll_label, STYLE_LABEL)
         custom_poll_layout.addWidget(custom_poll_label)
         custom_http_poll_spinbox = QSpinBox()
         custom_http_poll_spinbox.setMinimum(1)
         custom_http_poll_spinbox.setMaximum(2147483647)
         custom_http_poll_spinbox.setSuffix(" 秒")
         custom_http_poll_spinbox.setValue(self.config.get_http_poll_interval("__custom_http__"))
-        custom_http_poll_spinbox.setStyleSheet(STYLE_SPINBOX)
+        _set_widget_style(custom_http_poll_spinbox, STYLE_SPINBOX)
         custom_http_poll_spinbox.setToolTip("自定义 HTTP 数据源轮询间隔（仅 http/https 生效）")
         custom_poll_layout.addWidget(custom_http_poll_spinbox)
         custom_poll_layout.addStretch()
-        main_layout.addLayout(custom_poll_layout)
+        custom_src_layout.addLayout(custom_poll_layout)
         self.custom_http_poll_spinbox = custom_http_poll_spinbox
         custom_source_status_label = QLabel("状态：—")
-        custom_source_status_label.setStyleSheet(STYLE_HINT)
+        _set_widget_style(custom_source_status_label, STYLE_HINT)
         custom_source_status_label.setObjectName("custom_source_status_label")
         self.custom_source_status_label = custom_source_status_label
-        main_layout.addWidget(custom_source_status_label)
-        custom_hint = QLabel(
-            "• HTTP/HTTPS：按上方 Get 间隔向该 URL 轮询；留空即关闭。\n"
-            "• WS/WSS：请确保数据格式符合要求并能连接到服务器。"
-        )
-        custom_hint.setStyleSheet(STYLE_HINT + " line-height: 1.5;")
+        custom_src_layout.addWidget(custom_source_status_label)
+        custom_hint = QLabel("HTTP 按间隔轮询；WS 需格式正确。留空关闭。")
+        _set_widget_style(custom_hint, STYLE_HINT)
         custom_hint.setWordWrap(True)
-        main_layout.addWidget(custom_hint)
-        # 格式示例
+        custom_src_layout.addWidget(custom_hint)
         format_label = QLabel("预警源数据格式示例（二选一）：")
-        format_label.setStyleSheet(STYLE_LABEL + " margin-top: 8px;")
-        main_layout.addWidget(format_label)
+        _set_widget_style(format_label, STYLE_LABEL + " margin-top: 4px;")
+        custom_src_layout.addWidget(format_label)
         example_flat = (
             '格式一（平铺）：\n'
             '{\n'
@@ -4124,11 +5008,12 @@ class SettingsWindow(QDialog):
         example_flat_edit.setPlainText(example_flat)
         example_flat_edit.setReadOnly(True)
         example_flat_edit.setMaximumHeight(145)
-        example_flat_edit.setStyleSheet(
-            "QPlainTextEdit { font-family: Consolas,Monaco,monospace; font-size: 11px; "
-            "background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 6px; }"
+        _set_widget_style(example_flat_edit, 
+            f"QPlainTextEdit {{ font-family: Consolas,Monaco,monospace; font-size: 11px; "
+            f"background: {COLOR_PAGE_BG}; border: 1px solid {COLOR_BORDER}; "
+            f"border-radius: 8px; padding: 6px; color: {COLOR_TEXT}; }}"
         )
-        main_layout.addWidget(example_flat_edit)
+        custom_src_layout.addWidget(example_flat_edit)
         example_nested = (
             '格式二（嵌套 Data）：\n'
             '{\n'
@@ -4148,11 +5033,13 @@ class SettingsWindow(QDialog):
         example_nested_edit.setPlainText(example_nested)
         example_nested_edit.setReadOnly(True)
         example_nested_edit.setMaximumHeight(145)
-        example_nested_edit.setStyleSheet(
-            "QPlainTextEdit { font-family: Consolas,Monaco,monospace; font-size: 11px; "
-            "background: #f5f5f5; border: 1px solid #ddd; border-radius: 4px; padding: 6px; }"
+        _set_widget_style(example_nested_edit, 
+            f"QPlainTextEdit {{ font-family: Consolas,Monaco,monospace; font-size: 11px; "
+            f"background: {COLOR_PAGE_BG}; border: 1px solid {COLOR_BORDER}; "
+            f"border-radius: 8px; padding: 6px; color: {COLOR_TEXT}; }}"
         )
-        main_layout.addWidget(example_nested_edit)
+        custom_src_layout.addWidget(example_nested_edit)
+        main_layout.addWidget(group_custom_src)
         
         main_layout.addStretch()
         
@@ -4164,7 +5051,7 @@ class SettingsWindow(QDialog):
         save_btn = QPushButton("保存高级设置")
         save_btn.setMinimumWidth(120)
         save_btn.setMinimumHeight(35)
-        save_btn.setStyleSheet(STYLE_SAVE_BTN)
+        _set_widget_style(save_btn, STYLE_SAVE_BTN)
         save_btn.clicked.connect(lambda: self._save_advanced_settings(
             fix_radio, baidu_radio, output_file_checkbox, clear_log_checkbox,
             split_date_checkbox, log_size_spinbox, custom_url_entry,
@@ -4304,133 +5191,172 @@ class SettingsWindow(QDialog):
     
     def _create_about_tab(self):
         """创建关于标签页"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
+        _prepare_scroll_body(scrollable_widget)
         layout = QVBoxLayout(scrollable_widget)
         layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         layout.setSpacing(SPACING_TAB)
-        sep_style = "background-color: #E0E0E0; max-height: 1px;"
+        sep_style = f"background-color: {COLOR_BORDER}; max-height: 1px;"
         body_style = STYLE_ABOUT_ITEM + " padding-left: 10px; padding-bottom: 2px;"
 
         # 标题与版本（上方留白，避免贴顶）
         layout.addSpacing(12)
         title_label = QLabel("地震预警及速报滚动实况")
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #0066CC; padding-bottom: 2px;")
+        _set_widget_style(title_label, f"font-size: 22px; font-weight: bold; color: {COLOR_TEXT}; padding-bottom: 2px;")
         layout.addWidget(title_label)
         version_label = QLabel(f"版本 v{APP_VERSION}")
-        version_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FF6600; padding-bottom: 6px;")
+        _set_widget_style(version_label, f"font-size: 14px; font-weight: bold; color: {COLOR_ACCENT}; padding-bottom: 6px;")
         layout.addWidget(version_label)
 
         sep1 = QFrame()
         sep1.setFrameShape(QFrame.HLine)
         sep1.setFrameShadow(QFrame.Sunken)
-        sep1.setStyleSheet(sep_style)
+        _set_widget_style(sep1, sep_style)
         layout.addWidget(sep1)
         layout.addSpacing(4)
 
         # 声明（与主窗口「更新说明」弹窗内红色声明一致）
+        # 必须可水平压缩：否则最长一行 sizeHint 会把整个设置窗撑「胖」
         about_declaration = QLabel(APP_DECLARATION_TEXT)
         about_declaration.setWordWrap(True)
+        about_declaration.setMinimumWidth(0)
+        about_declaration.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         about_declaration.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         about_declaration.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        about_declaration.setStyleSheet(
-            "color: #B22222; font-weight: bold; font-size: 15px; "
-            "line-height: 1.4; padding: 4px 0 0 0; margin: 0; background: transparent;"
+        _set_widget_style(about_declaration, 
+            "color: #B22222; font-weight: bold; font-size: 14px; "
+            "line-height: 1.55; padding: 6px 0 2px 0; margin: 0; background: transparent;"
         )
         layout.addWidget(about_declaration)
         layout.addSpacing(SPACING_BLOCK - 8)
         sep_decl = QFrame()
         sep_decl.setFrameShape(QFrame.HLine)
         sep_decl.setFrameShadow(QFrame.Sunken)
-        sep_decl.setStyleSheet(sep_style)
+        _set_widget_style(sep_decl, sep_style)
         layout.addWidget(sep_decl)
         layout.addSpacing(4)
 
-        # 数据源支持
+        # 数据源支持（聚合平台 + 主要机构；文案宜短，避免撑宽关于页）
         data_source_label = QLabel("数据源支持")
-        data_source_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(data_source_label, STYLE_SECTION_TITLE)
         layout.addWidget(data_source_label)
         for name in [
             "Fan Studio API",
+            "无界科技 Whews API",
             "Wolfx Open API",
-            "新西兰GeoNet",
-            "P2PQuake地震情報",
+            "P2PQuake 地震情報",
+            "Nowquake CENC 烈度速报",
+            "中国地震台网中心",
+            "中国气象局",
+            "自然资源部海啸预警中心",
+            "日本气象厅",
+            "台湾气象署",
+            "香港天文台",
+            "美国地质调查局 USGS",
+            "美国 ShakeAlert",
+            "太平洋海啸预警中心 PTWC",
+            "美国国家海啸预警中心 NTWC",
+            "印度海啸早期预警中心 INCOIS",
+            "欧洲地中海地震中心 EMSC",
             "意大利 Early-est",
-            "太平洋海啸预警中心PTWC",
-            "日本火山情報JMA-Atom",
-            "意大利意大利国家地球物理与火山学研究",
-            "印度尼西亚印度尼西亚气象气候和地球物理局",
+            "意大利国家地球物理与火山学研究所 INGV",
+            "印尼气象气候和地球物理局 BMKG",
+            "新西兰 GeoNet",
+            "韩国气象厅",
+            "德国地学研究中心 GFZ",
+            "法国中央地震研究所 BCSF",
+            "巴西圣保罗大学 USP",
+            "泰国地震局",
+            "马来西亚气象局",
+            "加拿大自然资源部",
+            "菲律宾火山地震研究所",
+            "哥伦比亚地质服务局",
+            "澳大利亚地球科学局",
+            "古巴国家地震研究中心",
         ]:
             lb = QLabel(f"• {name}")
-            lb.setStyleSheet(body_style)
+            lb.setWordWrap(True)
+            lb.setMinimumWidth(0)
+            lb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            _set_widget_style(lb, body_style)
             layout.addWidget(lb)
         layout.addSpacing(SPACING_BLOCK - 4)
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.HLine)
         sep2.setFrameShadow(QFrame.Sunken)
-        sep2.setStyleSheet(sep_style)
+        _set_widget_style(sep2, sep_style)
         layout.addWidget(sep2)
         layout.addSpacing(4)
 
         # 开发者
         developer_label = QLabel("开发者")
-        developer_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(developer_label, STYLE_SECTION_TITLE)
         layout.addWidget(developer_label)
         for name in ["星落"]:
             lb = QLabel(f"• {name}")
-            lb.setStyleSheet(body_style)
+            _set_widget_style(lb, body_style)
             layout.addWidget(lb)
         layout.addSpacing(SPACING_BLOCK - 4)
         sep2b = QFrame()
         sep2b.setFrameShape(QFrame.HLine)
         sep2b.setFrameShadow(QFrame.Sunken)
-        sep2b.setStyleSheet(sep_style)
+        _set_widget_style(sep2b, sep_style)
         layout.addWidget(sep2b)
         layout.addSpacing(4)
 
         # QQ群
         qq_label = QLabel("QQ群")
-        qq_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(qq_label, STYLE_SECTION_TITLE)
         layout.addWidget(qq_label)
-        qq_value = QLabel("947523679")
-        qq_value.setStyleSheet(body_style)
+        qq_join_url = "https://qm.qq.com/q/KJUJZTdpE2"
+        qq_value = QLabel(
+            f'947523679　'
+            f'<a href="{qq_join_url}" style="color: {COLOR_LINK};">加入群聊</a>'
+        )
+        _set_widget_style(qq_value, body_style)
+        qq_value.setTextFormat(Qt.RichText)
+        qq_value.setOpenExternalLinks(True)
+        qq_value.setWordWrap(True)
+        qq_value.setMinimumWidth(0)
+        qq_value.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(qq_value)
         layout.addSpacing(SPACING_BLOCK - 4)
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.HLine)
         sep3.setFrameShadow(QFrame.Sunken)
-        sep3.setStyleSheet(sep_style)
+        _set_widget_style(sep3, sep_style)
         layout.addWidget(sep3)
         layout.addSpacing(4)
 
         # 项目地址（GitHub）
         github_label = QLabel("项目地址")
-        github_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(github_label, STYLE_SECTION_TITLE)
         layout.addWidget(github_label)
         github_url = "https://github.com/Jian11323/Rolling-Subtitle"
         github_link = QLabel(f'<a href="{github_url}">{github_url}</a>')
-        github_link.setStyleSheet(body_style)
+        _set_widget_style(github_link, body_style)
         github_link.setOpenExternalLinks(True)
         github_link.setTextFormat(Qt.RichText)
         github_link.setWordWrap(True)
+        github_link.setMinimumWidth(0)
+        github_link.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(github_link)
         layout.addSpacing(SPACING_BLOCK - 4)
         sep_github = QFrame()
         sep_github.setFrameShape(QFrame.HLine)
         sep_github.setFrameShadow(QFrame.Sunken)
-        sep_github.setStyleSheet(sep_style)
+        _set_widget_style(sep_github, sep_style)
         layout.addWidget(sep_github)
         layout.addSpacing(4)
 
         # 特别致谢
         thanks_label = QLabel("特别致谢")
-        thanks_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(thanks_label, STYLE_SECTION_TITLE)
         layout.addWidget(thanks_label)
         thanks_frame = QWidget()
-        thanks_frame.setStyleSheet(
-            "QWidget { background-color: #F5F5F5; border-radius: 4px; }"
+        _set_widget_style(thanks_frame, 
+            f"QWidget {{ background-color: {COLOR_CARD_BG}; border: 1px solid {COLOR_BORDER}; border-radius: 12px; }}"
         )
         thanks_layout = QVBoxLayout(thanks_frame)
         thanks_layout.setContentsMargins(12, 10, 12, 10)
@@ -4438,31 +5364,33 @@ class SettingsWindow(QDialog):
         for text in ["感谢所有数据源提供方为地震监测事业做出的贡献。", "感谢所有用户的支持与反馈。"]:
             tl = QLabel(text)
             tl.setWordWrap(True)
-            tl.setStyleSheet(STYLE_ABOUT_ITEM + " line-height: 1.4;")
+            tl.setMinimumWidth(0)
+            tl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            _set_widget_style(tl, STYLE_ABOUT_ITEM + " line-height: 1.4;")
             thanks_layout.addWidget(tl)
         layout.addWidget(thanks_frame)
         layout.addSpacing(SPACING_BLOCK - 4)
         sep_thanks = QFrame()
         sep_thanks.setFrameShape(QFrame.HLine)
         sep_thanks.setFrameShadow(QFrame.Sunken)
-        sep_thanks.setStyleSheet(sep_style)
+        _set_widget_style(sep_thanks, sep_style)
         layout.addWidget(sep_thanks)
         layout.addSpacing(4)
 
         # 支持我们（支付宝收款码 / 微信赞赏码）
         support_label = QLabel("支持我们")
-        support_label.setStyleSheet(STYLE_SECTION_TITLE)
+        _set_widget_style(support_label, STYLE_SECTION_TITLE)
         layout.addWidget(support_label)
-        support_hint = QLabel("如果本软件对你有帮助，欢迎扫码支持开发者继续维护。")
+        support_hint = QLabel("欢迎扫码支持开发。")
         support_hint.setWordWrap(True)
-        support_hint.setStyleSheet(body_style)
+        _set_widget_style(support_hint, body_style)
         layout.addWidget(support_hint)
 
         qr_row = QWidget()
         qr_layout = QHBoxLayout(qr_row)
-        qr_layout.setContentsMargins(10, 8, 10, 4)
-        qr_layout.setSpacing(24)
-        qr_size = 180
+        qr_layout.setContentsMargins(4, 8, 4, 4)
+        qr_layout.setSpacing(16)
+        qr_size = 150
         for caption, rel_path in (
             ("支付宝", "logo/donate_alipay.png"),
             ("微信赞赏", "logo/donate_wechat.png"),
@@ -4473,8 +5401,8 @@ class SettingsWindow(QDialog):
             img = QLabel()
             img.setAlignment(Qt.AlignCenter)
             img.setFixedSize(qr_size, qr_size)
-            img.setStyleSheet(
-                "background-color: #FFFFFF; border: 1px solid #E0E0E0; border-radius: 4px;"
+            _set_widget_style(img, 
+                "background-color: #FFFFFF; border: 1px solid #E5E2DC; border-radius: 12px;"
             )
             path = get_resource_path(rel_path)
             pixmap = QPixmap(str(path))
@@ -4489,12 +5417,12 @@ class SettingsWindow(QDialog):
                 )
             else:
                 img.setText("图片缺失")
-                img.setStyleSheet(
-                    body_style + " background-color: #FAFAFA; border: 1px dashed #CCCCCC;"
+                _set_widget_style(img, 
+                    body_style + f" background-color: {COLOR_CARD_BG}; border: 1px dashed {COLOR_BORDER};"
                 )
             name_lb = QLabel(caption)
             name_lb.setAlignment(Qt.AlignCenter)
-            name_lb.setStyleSheet(STYLE_ABOUT_ITEM + " font-weight: bold;")
+            _set_widget_style(name_lb, STYLE_ABOUT_ITEM + " font-weight: bold;")
             col.addWidget(img)
             col.addWidget(name_lb)
             qr_layout.addLayout(col)
@@ -4507,23 +5435,21 @@ class SettingsWindow(QDialog):
 
     def _create_data_source_status_tab(self):
         """创建数据源状态标签页（紧凑：数据源 + 状态 + 分钟条）"""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setStyleSheet("QScrollArea { border: none; background: #F7F8FA; }")
+        scroll_area = _FittingScrollArea()
+        _set_widget_style(scroll_area, f"QScrollArea {{ border: none; background: {COLOR_PAGE_BG}; }}")
         container = QWidget()
-        container.setStyleSheet("background: #F7F8FA;")
+        _prepare_scroll_body(container)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(MARGIN_TAB, MARGIN_TAB, MARGIN_TAB, MARGIN_TAB)
         layout.setSpacing(12)
 
         title = QLabel("服务器状态")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #1F1F1F;")
+        _set_widget_style(title, f"font-size: 20px; font-weight: bold; color: {COLOR_TEXT};")
         layout.addWidget(title)
 
-        hint = QLabel("每分钟记录一次状态，最多显示最近60分钟")
+        hint = QLabel("每分钟记录一次，最多最近 60 分钟")
         hint.setWordWrap(True)
-        hint.setStyleSheet("font-size: 13px; color: #6D7580;")
+        _set_widget_style(hint, STYLE_HINT)
         layout.addWidget(hint)
 
         self.data_source_status_cards_container = QWidget()
@@ -4575,8 +5501,8 @@ class SettingsWindow(QDialog):
             return "#E74C3C"
         return "#95A5A6"
 
-    def _build_health_strip_widget(self, minute_bars: List[bool]) -> QWidget:
-        """构建近 60 分钟健康度条带（绿/红/灰分钟块）。"""
+    def _build_health_strip_widget(self, minute_bars: List[bool]) -> Tuple[QWidget, List[QFrame]]:
+        """构建近 60 分钟健康度条带，并返回条带控件与各分钟块以便原地刷新。"""
         strip = QWidget()
         row = QHBoxLayout(strip)
         row.setContentsMargins(0, 0, 0, 0)
@@ -4584,24 +5510,44 @@ class SettingsWindow(QDialog):
         total = 60
         # 未产生历史记录的分钟显示为灰色；仅真实异常分钟显示红色
         padded: List[Any] = ([None] * max(0, total - len(minute_bars))) + minute_bars[-total:]
+        bars: List[QFrame] = []
         for ok in padded:
             bar = QFrame(strip)
             bar.setFixedSize(5, 14)
-            if ok is True:
-                bar.setStyleSheet("background: #2ECC71; border-radius: 2px;")
-            elif ok is False:
-                bar.setStyleSheet("background: #E74C3C; border-radius: 2px;")
-            else:
-                bar.setStyleSheet("background: #DDE2E6; border-radius: 2px;")
+            self._apply_health_bar_style(bar, ok)
             row.addWidget(bar)
+            bars.append(bar)
         row.addStretch()
-        return strip
+        return strip, bars
+
+    @staticmethod
+    def _apply_health_bar_style(bar: QFrame, ok: Any) -> None:
+        """仅在状态变化时更新分钟块样式，减少无效 setStyleSheet。"""
+        state = True if ok is True else (False if ok is False else None)
+        if getattr(bar, "_ok_state", object()) == state:
+            return
+        bar._ok_state = state
+        if state is True:
+            _set_widget_style(bar, "background: #2ECC71; border-radius: 2px;")
+        elif state is False:
+            _set_widget_style(bar, "background: #E74C3C; border-radius: 2px;")
+        else:
+            _set_widget_style(bar, "background: #DDE2E6; border-radius: 2px;")
+
+    def _refresh_health_strip_bars(self, bars: List[QFrame], minute_bars: List[Any]) -> None:
+        """原地刷新 60 分钟健康度条带颜色。"""
+        total = 60
+        padded: List[Any] = ([None] * max(0, total - len(minute_bars))) + list(minute_bars)[-total:]
+        for bar, ok in zip(bars, padded):
+            self._apply_health_bar_style(bar, ok)
 
     def _compact_source_label(self, url: str, source_name: str) -> str:
         """将 WebSocket URL 压缩为设置页卡片上的短标签。"""
         low = (url or "").lower()
         if "api.p2pquake.net" in low:
             return "P2PQuake"
+        if "equake.top" in low:
+            return "EQSC"
         if "ws-api.wolfx.jp/all_eew" in low:
             return "Wolfx all"
         if "ws-api.wolfx.jp/cwa_eew" in low:
@@ -4647,14 +5593,78 @@ class SettingsWindow(QDialog):
         """清空「数据源状态」页全部卡片控件。"""
         if not hasattr(self, "data_source_status_cards_layout"):
             return
+        for info in list(self._status_card_by_url.values()):
+            card = info.get("card")
+            if card is not None:
+                card.setParent(None)
+                card.deleteLater()
+        self._status_card_by_url.clear()
+        self._status_cards_url_order = []
+        if self._status_cards_empty_label is not None:
+            self._status_cards_empty_label.setParent(None)
+            self._status_cards_empty_label.deleteLater()
+            self._status_cards_empty_label = None
         while self.data_source_status_cards_layout.count():
             item = self.data_source_status_cards_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        self._status_cards_stretch_item = None
+
+    def _create_status_card(self, url: str, title: str, status_text: str, status_color: str, history: List[Any]) -> Dict[str, Any]:
+        """创建单条数据源状态卡片（仅在 URL 集合变化时调用）。"""
+        card = QFrame()
+        _set_widget_style(card, 
+            f"QFrame {{ background: {COLOR_CARD_BG}; border: 1px solid {COLOR_BORDER}; border-radius: 12px; }}"
+        )
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 10, 12, 10)
+        card_layout.setSpacing(6)
+
+        top_row = QHBoxLayout()
+        left_title = QLabel(title)
+        _set_widget_style(left_title, f"font-size: 14px; color: {COLOR_TEXT}; font-weight: bold;")
+        top_row.addWidget(left_title)
+        top_row.addStretch()
+        right_status = QLabel(f"状态：{status_text}")
+        _set_widget_style(right_status, f"font-size: 13px; color: {status_color};")
+        top_row.addWidget(right_status)
+        card_layout.addLayout(top_row)
+        strip, bars = self._build_health_strip_widget(history)
+        card_layout.addWidget(strip)
+        self.data_source_status_cards_layout.addWidget(card)
+        return {
+            "url": url,
+            "card": card,
+            "title_label": left_title,
+            "status_label": right_status,
+            "bars": bars,
+            "title": title,
+            "status_text": status_text,
+            "status_color": status_color,
+        }
+
+    def _update_status_card_content(
+        self,
+        info: Dict[str, Any],
+        title: str,
+        status_text: str,
+        status_color: str,
+        history: List[Any],
+    ) -> None:
+        """原地更新已有卡片的标题、状态与分钟条。"""
+        if info.get("title") != title:
+            info["title_label"].setText(title)
+            info["title"] = title
+        if info.get("status_text") != status_text or info.get("status_color") != status_color:
+            info["status_label"].setText(f"状态：{status_text}")
+            _set_widget_style(info["status_label"], f"font-size: 13px; color: {status_color};")
+            info["status_text"] = status_text
+            info["status_color"] = status_color
+        self._refresh_health_strip_bars(info.get("bars") or [], history)
 
     def _update_data_source_health_table(self):
-        """刷新「数据源状态」页卡片列表。"""
+        """刷新「数据源状态」页卡片列表（URL 集合不变时复用控件）。"""
         try:
             if not hasattr(self, "data_source_status_cards_layout") or self.data_source_status_cards_layout is None:
                 return
@@ -4669,12 +5679,35 @@ class SettingsWindow(QDialog):
             urls = sorted(set(list(status_map.keys()) + list(health_map.keys())))
             # 不展示已废弃的无界科技 cea_all / cenc 专用线
             urls = [u for u in urls if not is_whews_dedicated_endpoint(u)]
-            self._clear_status_cards()
+
             if not urls:
-                empty_label = QLabel("暂无可展示的数据源状态")
-                empty_label.setStyleSheet("font-size: 15px; color: #8A8A8A; padding: 8px 0;")
-                self.data_source_status_cards_layout.addWidget(empty_label)
+                if self._status_card_by_url or self._status_cards_empty_label is None:
+                    self._clear_status_cards()
+                    empty_label = QLabel("暂无可展示的数据源状态")
+                    _set_widget_style(empty_label, "font-size: 15px; color: #8A8A8A; padding: 8px 0;")
+                    self.data_source_status_cards_layout.addWidget(empty_label)
+                    self._status_cards_empty_label = empty_label
                 return
+
+            # 去掉空状态提示
+            if self._status_cards_empty_label is not None:
+                self._status_cards_empty_label.setParent(None)
+                self._status_cards_empty_label.deleteLater()
+                self._status_cards_empty_label = None
+
+            # 移除已不存在的源
+            for old_url in list(self._status_card_by_url.keys()):
+                if old_url not in urls:
+                    info = self._status_card_by_url.pop(old_url)
+                    card = info.get("card")
+                    if card is not None:
+                        self.data_source_status_cards_layout.removeWidget(card)
+                        card.setParent(None)
+                        card.deleteLater()
+            self._status_cards_url_order = [u for u in self._status_cards_url_order if u in self._status_card_by_url]
+
+            # 结构变化（新增/顺序变化）时重建布局顺序
+            need_rebuild_order = self._status_cards_url_order != urls
 
             for url in urls:
                 health = health_map.get(url, {})
@@ -4702,26 +5735,36 @@ class SettingsWindow(QDialog):
                     self._status_last_minute_key[url] = minute_key
                 history = self._status_minute_bars.get(url, [])
 
-                card = QFrame()  # 单数据源状态卡片
-                card.setStyleSheet("QFrame { background: white; border: 1px solid #ECECEC; border-radius: 8px; }")
-                card_layout = QVBoxLayout(card)
-                card_layout.setContentsMargins(10, 8, 10, 8)
-                card_layout.setSpacing(6)
+                info = self._status_card_by_url.get(url)
+                if info is None:
+                    info = self._create_status_card(url, compact_name, status_text, status_color, history)
+                    self._status_card_by_url[url] = info
+                    need_rebuild_order = True
+                else:
+                    self._update_status_card_content(info, compact_name, status_text, status_color, history)
 
-                top_row = QHBoxLayout()
-                left_title = QLabel(compact_name)
-                left_title.setStyleSheet("font-size: 14px; color: #2F2F2F; font-weight: bold;")
-                top_row.addWidget(left_title)
-                top_row.addStretch()
-                right_status = QLabel(f"状态：{status_text}")
-                right_status.setStyleSheet(f"font-size: 13px; color: {status_color};")
-                top_row.addWidget(right_status)
-                card_layout.addLayout(top_row)
-                card_layout.addWidget(self._build_health_strip_widget(history))
-
-                self.data_source_status_cards_layout.addWidget(card)
-
-            self.data_source_status_cards_layout.addStretch()
+            if need_rebuild_order:
+                # 先摘掉 stretch，再按 urls 顺序 re-add 卡片，最后补 stretch
+                while self.data_source_status_cards_layout.count():
+                    item = self.data_source_status_cards_layout.takeAt(0)
+                    # 不 delete 卡片；仅脱离布局，稍后再 add
+                    if item is not None and item.widget() is None and item.spacerItem() is not None:
+                        continue
+                for url in urls:
+                    info = self._status_card_by_url.get(url)
+                    if info and info.get("card") is not None:
+                        self.data_source_status_cards_layout.addWidget(info["card"])
+                self.data_source_status_cards_layout.addStretch()
+                self._status_cards_url_order = list(urls)
+            else:
+                has_stretch = False
+                for i in range(self.data_source_status_cards_layout.count()):
+                    item = self.data_source_status_cards_layout.itemAt(i)
+                    if item is not None and item.spacerItem() is not None:
+                        has_stretch = True
+                        break
+                if not has_stretch:
+                    self.data_source_status_cards_layout.addStretch()
         except Exception as e:
             logger.debug(f"更新数据源健康状态失败: {e}")
     
@@ -4729,39 +5772,38 @@ class SettingsWindow(QDialog):
         """创建底部按钮区域"""
         button_frame = QWidget()
         button_layout = QHBoxLayout(button_frame)
-        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setContentsMargins(0, 2, 0, 0)
+        button_layout.setSpacing(6)
         
-        # 恢复默认按钮（左侧）
         restore_btn = QPushButton("恢复默认")
-        restore_btn.setStyleSheet("background-color: #6c9ecc; color: white;")
+        _set_widget_style(restore_btn, STYLE_SECONDARY_BTN)
         restore_btn.clicked.connect(self._restore_default_and_confirm)
         button_layout.addWidget(restore_btn)
         
-        button_layout.addStretch()
+        button_layout.addStretch(1)
 
-        self.auto_save_settings_cb = QCheckBox("修改后自动保存")  # 开启后修改即自动落盘
+        self.auto_save_settings_cb = QCheckBox("自动保存")
         self.auto_save_settings_cb.setChecked(
             getattr(self.config.gui_config, "auto_save_settings", False)
         )
         self.auto_save_settings_cb.setToolTip(
-            "勾选后，修改任意设置约 0.8 秒后自动写入配置文件，关闭窗口时不再询问是否保存。"
+            "修改后约 0.8 秒自动写入配置；关闭窗口时不再询问是否保存。"
         )
-        self.auto_save_settings_cb.setStyleSheet("font-size: 14px;")
+        _set_widget_style(self.auto_save_settings_cb, STYLE_CHECKBOX_SMALL)
         button_layout.addWidget(self.auto_save_settings_cb)
 
         save_tab_btn = QPushButton("保存当前页")
-        save_tab_btn.setStyleSheet(STYLE_SAVE_BTN)
+        _set_widget_style(save_tab_btn, STYLE_SECONDARY_BTN)
         save_tab_btn.clicked.connect(self._save_current_tab_settings)
-        button_layout.addWidget(save_tab_btn)  # 仅保存当前标签页
+        button_layout.addWidget(save_tab_btn)
 
         save_all_btn = QPushButton("保存全部")
-        save_all_btn.setStyleSheet(STYLE_SAVE_BTN)
+        _set_widget_style(save_all_btn, STYLE_SAVE_BTN)
         save_all_btn.clicked.connect(lambda: self._save_all_settings())
-        button_layout.addWidget(save_all_btn)  # 一次保存所有标签页
+        button_layout.addWidget(save_all_btn)
         
-        # 取消按钮（灰色）
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet("background-color: #cccccc; color: black;")
+        _set_widget_style(cancel_btn, STYLE_CANCEL_BTN)
         cancel_btn.clicked.connect(self._on_cancel_clicked)
         button_layout.addWidget(cancel_btn)
         
@@ -4850,13 +5892,16 @@ class SettingsWindow(QDialog):
     def _save_current_tab_settings(self) -> None:
         """保存当前标签页的设置。"""
         idx = self.notebook.currentIndex()
-        if idx == 0:
+        if idx in (
+            getattr(self, '_appearance_tab_index', 0),
+            getattr(self, '_display_tab_index', 1),
+        ):
             self._save_appearance_settings()
-        elif idx == getattr(self, '_audio_tab_index', 1):
+        elif idx == getattr(self, '_audio_tab_index', 2):
             self._save_audio_settings_and_persist()
-        elif idx == getattr(self, '_data_source_tab_index', 2):
+        elif idx == getattr(self, '_data_source_tab_index', 3):
             self._save_data_source_settings()
-        elif idx == getattr(self, '_advanced_tab_index', 4):
+        elif idx == getattr(self, '_advanced_tab_index', 5):
             adv = getattr(self, 'advanced_vars', {}) or {}
             required = (
                 'fix_radio', 'baidu_radio', 'output_file_checkbox', 'clear_log_checkbox',
@@ -4890,6 +5935,8 @@ class SettingsWindow(QDialog):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
         if hasattr(self, "fanstudio_api_key_entry"):
             self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        if hasattr(self, "eqsc_login_token_entry"):
+            self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "whews_token_entry"):
             self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
         if hasattr(self, "_current_whews_host_from_ui"):
@@ -4950,15 +5997,30 @@ class SettingsWindow(QDialog):
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
             ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
             ('whews_parse_mmd_cb', 'whews_parse_mmd'),
-            ('whews_parse_fujian_cb', 'whews_parse_fujian'),
             ('whews_parse_beijing_cb', 'whews_parse_beijing'),
-            ('whews_parse_sichuan_cb', 'whews_parse_sichuan'),
             ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
             ('whews_parse_ningxia_cb', 'whews_parse_ningxia'),
-            ('whews_parse_shaanxi_cb', 'whews_parse_shaanxi'),
-            ('whews_parse_hubei_cb', 'whews_parse_hubei'),
             ('whews_parse_tsunami_cb', 'whews_parse_tsunami'),
+            ('whews_parse_ntwc_cb', 'whews_parse_ntwc'),
+            ('whews_parse_ptwc_cb', 'whews_parse_ptwc'),
+            ('whews_parse_incois_cb', 'whews_parse_incois'),
+            ('whews_parse_jma_tsunami_cb', 'whews_parse_jma_tsunami'),
+            ('whews_parse_phivolcs_cb', 'whews_parse_phivolcs'),
+            ('whews_parse_sgc_cb', 'whews_parse_sgc'),
+            ('whews_parse_ga_cb', 'whews_parse_ga'),
+            ('whews_parse_cenais_cb', 'whews_parse_cenais'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
+            ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
+            ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
+            ('eqsc_parse_jma_tsunami_cb', 'eqsc_parse_jma_tsunami'),
+            ('eqsc_parse_cenc_cb', 'eqsc_parse_cenc'),
+            ('eqsc_parse_cenc_ir_cb', 'eqsc_parse_cenc_ir'),
+            ('eqsc_parse_cwa_cb', 'eqsc_parse_cwa'),
+            ('eqsc_parse_hko_cb', 'eqsc_parse_hko'),
+            ('eqsc_parse_usgs_cb', 'eqsc_parse_usgs'),
+            ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
+            ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
+            ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -4992,7 +6054,7 @@ class SettingsWindow(QDialog):
         self._mark_performance_mode_custom()
 
     def _apply_appearance_settings_to_config(self) -> tuple:
-        """将外观与显示页写入内存，返回 (timezone_changed, render_changed)。"""
+        """将外观/显示页写入内存，返回 (timezone_changed, render_changed)。"""
         display_required = (
             'timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic',
             'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text',
@@ -5041,6 +6103,14 @@ class SettingsWindow(QDialog):
         g.target_fps = self.display_vars['target_fps'].value()
         g.timezone = new_timezone
         g.always_on_top = self.display_vars['always_on_top'].isChecked() if 'always_on_top' in self.display_vars else False
+        if 'borderless' in self.display_vars:
+            g.borderless = self.display_vars['borderless'].isChecked()
+        if 'background_image_path' in self.display_vars:
+            g.background_image_path = (self.display_vars['background_image_path'].text() or "").strip()
+        if 'background_blur_radius' in self.display_vars:
+            g.background_blur_radius = int(self.display_vars['background_blur_radius'].value())
+        if 'background_overlay_opacity' in self.display_vars:
+            g.background_overlay_opacity = self.display_vars['background_overlay_opacity'].value() / 100.0
         if 'minimize_to_tray' in self.display_vars:
             g.minimize_to_tray = self.display_vars['minimize_to_tray'].isChecked()
         if 'toast_notifications_enabled' in self.display_vars:
@@ -5058,6 +6128,13 @@ class SettingsWindow(QDialog):
             mc.geo_filter_longitude = float(self.display_vars['geo_filter_longitude'].value())
         if 'geo_filter_radius_km' in self.display_vars:
             mc.geo_filter_radius_km = float(self.display_vars['geo_filter_radius_km'].value())
+        if 'weather_region_filter_enabled' in self.display_vars:
+            mc.weather_region_filter_enabled = self.display_vars['weather_region_filter_enabled'].isChecked()
+        if 'weather_region_filter' in self.display_vars:
+            mc.weather_region_filter = (self.display_vars['weather_region_filter'].text() or "").strip()
+        if 'weather_level_filter' in self.display_vars:
+            _wl = self.display_vars['weather_level_filter'].currentData()
+            mc.weather_level_filter = (_wl or "none").strip().lower()
         g.auto_update_check_on_startup = self.display_vars['auto_update_check_on_startup'].isChecked()
         g.watermark_text = (self.display_vars['watermark_text'].text() or "").strip()
         wm_ff_widget = self.display_vars.get('watermark_font_family')
@@ -5216,6 +6293,8 @@ class SettingsWindow(QDialog):
             self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
         if hasattr(self, "fanstudio_api_key_entry"):
             self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        if hasattr(self, "eqsc_login_token_entry"):
+            self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "whews_token_entry"):
             self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
         if hasattr(self, "_current_whews_host_from_ui"):
@@ -5248,6 +6327,25 @@ class SettingsWindow(QDialog):
                 wolfx_on = True
                 self.wolfx_all_connect_cb.setChecked(True)
             self.config.enabled_sources[WOLFX_ALL_EEW_URL] = wolfx_on
+        # EQSC：总开关 + 解析勾选 → 各 HTTP 子源；强制关闭不稳定的 WebSocket
+        for attr, cfg_name in (
+            ("eqsc_parse_jma_eew_cb", "eqsc_parse_jma_eew"),
+            ("eqsc_parse_jma_report_cb", "eqsc_parse_jma_report"),
+            ("eqsc_parse_jma_tsunami_cb", "eqsc_parse_jma_tsunami"),
+            ("eqsc_parse_cenc_cb", "eqsc_parse_cenc"),
+            ("eqsc_parse_cenc_ir_cb", "eqsc_parse_cenc_ir"),
+            ("eqsc_parse_cwa_cb", "eqsc_parse_cwa"),
+            ("eqsc_parse_hko_cb", "eqsc_parse_hko"),
+            ("eqsc_parse_usgs_cb", "eqsc_parse_usgs"),
+            ("eqsc_parse_emsc_cb", "eqsc_parse_emsc"),
+            ("eqsc_parse_typhoon_cb", "eqsc_parse_typhoon"),
+            ("eqsc_parse_volcano_cb", "eqsc_parse_volcano"),
+        ):
+            cb = getattr(self, attr, None)
+            if cb is not None:
+                setattr(self.config.message_config, cfg_name, cb.isChecked())
+        if hasattr(self.config, "_sync_eqsc_http_from_parse_flags"):
+            self.config._sync_eqsc_http_from_parse_flags()
         if hasattr(self.config, "_ensure_whews_source_defaults"):
             self.config._ensure_whews_source_defaults()
         removed_ws = self.config._enforce_public_ws_sources()  # 移除非公开版允许的 WS 地址
@@ -5334,7 +6432,7 @@ class SettingsWindow(QDialog):
             
             if color_type == 'report':
                 self.current_report_color = color_upper
-                self.report_color_preview.setStyleSheet(
+                _set_widget_style(self.report_color_preview, 
                     f"background-color: {color_upper}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5342,7 +6440,7 @@ class SettingsWindow(QDialog):
                 self.report_color_label.setText(color_upper)
             elif color_type == 'warning':
                 self.current_warning_color = color_upper
-                self.warning_color_preview.setStyleSheet(
+                _set_widget_style(self.warning_color_preview, 
                     f"background-color: {color_upper}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5350,7 +6448,7 @@ class SettingsWindow(QDialog):
                 self.warning_color_label.setText(color_upper)
             elif color_type == 'custom_text':
                 self.current_custom_text_color = color_upper
-                self.custom_text_color_preview.setStyleSheet(
+                _set_widget_style(self.custom_text_color_preview, 
                     f"background-color: {color_upper}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5373,7 +6471,7 @@ class SettingsWindow(QDialog):
             if color_type == 'report':
                 default_color = '#00FFFF'  # 默认青色
                 self.current_report_color = default_color
-                self.report_color_preview.setStyleSheet(
+                _set_widget_style(self.report_color_preview, 
                     f"background-color: {default_color}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5382,7 +6480,7 @@ class SettingsWindow(QDialog):
             elif color_type == 'warning':
                 default_color = '#FF0000'  # 默认红色
                 self.current_warning_color = default_color
-                self.warning_color_preview.setStyleSheet(
+                _set_widget_style(self.warning_color_preview, 
                     f"background-color: {default_color}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5391,7 +6489,7 @@ class SettingsWindow(QDialog):
             elif color_type == 'custom_text':
                 default_color = '#01FF00'  # 默认绿色
                 self.current_custom_text_color = default_color
-                self.custom_text_color_preview.setStyleSheet(
+                _set_widget_style(self.custom_text_color_preview, 
                     f"background-color: {default_color}; "
                     "border: 1px solid #000; "
                     "border-radius: 3px;"
@@ -5412,6 +6510,155 @@ class SettingsWindow(QDialog):
             idx = widget.findData(PERFORMANCE_MODE_CUSTOM)
             if idx >= 0:
                 widget.setCurrentIndex(idx)
+
+    @staticmethod
+    def _backgrounds_dir():
+        from pathlib import Path
+        return Path.home() / "AppData" / "Roaming" / "subtitl" / "backgrounds"
+
+    def _resolve_custom_background_source(self) -> str:
+        """返回保留的原图路径（供再次裁切）；无原图时回退到当前展示图。"""
+        from utils.builtin_backgrounds import resolve_background_image_file
+        bg_dir = self._backgrounds_dir()
+        if bg_dir.is_dir():
+            for p in sorted(bg_dir.glob("custom_bg_source.*")):
+                if p.is_file():
+                    return str(p)
+        cur = ""
+        if "background_image_path" in getattr(self, "display_vars", {}):
+            cur = (self.display_vars["background_image_path"].text() or "").strip()
+        if not cur:
+            cur = str(getattr(self.config.gui_config, "background_image_path", "") or "").strip()
+        return resolve_background_image_file(cur)
+
+    def _subtitle_window_size_for_crop(self):
+        """
+        裁切目标尺寸：绑定当前字幕窗口。
+        优先设置页宽高（可能尚未应用），其次主窗口实时尺寸，最后配置值。
+        """
+        aw = ah = 0
+        # 1) 设置页上的窗口宽高
+        try:
+            dv = getattr(self, "display_vars", {}) or {}
+            for wkey in ("width", "window_width"):
+                if wkey in dv:
+                    aw = int(dv[wkey].value())
+                    break
+            for hkey in ("height", "window_height"):
+                if hkey in dv:
+                    ah = int(dv[hkey].value())
+                    break
+        except Exception:
+            aw = ah = 0
+        # 2) 主窗口实时尺寸（用户拖拽改过后最准）
+        if aw < 50 or ah < 20:
+            try:
+                parent = self.parent()
+                if parent is not None:
+                    pw, ph = int(parent.width()), int(parent.height())
+                    if pw >= 50 and ph >= 20:
+                        aw, ah = pw, ph
+            except Exception:
+                pass
+        # 3) 配置兜底
+        if aw < 50 or ah < 20:
+            try:
+                aw = int(getattr(self.config.gui_config, "window_width", 1000) or 1000)
+                ah = int(getattr(self.config.gui_config, "window_height", 100) or 100)
+            except (TypeError, ValueError):
+                aw, ah = 1000, 100
+        aw = max(50, min(20000, int(aw)))
+        ah = max(20, min(5000, int(ah)))
+        return aw, ah
+
+    def _crop_background_image(self, src_path: str):
+        """弹出裁切对话框，按当前字幕窗口尺寸裁切并缩放到该像素大小；取消返回 None。"""
+        from PyQt5.QtCore import Qt
+
+        aw, ah = self._subtitle_window_size_for_crop()
+        img = ImageCropDialog.crop_file(self, src_path, aspect_w=aw, aspect_h=ah)
+        if img is None or img.isNull():
+            return None
+        # 输出像素与窗口一致，避免后续铺满时二次取景偏移
+        if img.width() != aw or img.height() != ah:
+            img = img.scaled(aw, ah, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        if img is None or img.isNull():
+            return None
+        return img.copy()
+
+    def _store_background_image(
+        self,
+        src_path: str = "",
+        qimage=None,
+        keep_source: bool = False,
+    ) -> str:
+        """
+        将用户选择/裁切后的背景图写入 AppData/subtitl/backgrounds/。
+        - qimage：裁切后的展示图，存为 custom_bg.png
+        - src_path：上传原图，另存为 custom_bg_source.* 供再次裁切
+        - keep_source=True：仅更新展示图，不改动原图缓存
+        """
+        try:
+            import shutil
+            from pathlib import Path
+            from PyQt5.QtGui import QImage
+
+            bg_dir = self._backgrounds_dir()
+            bg_dir.mkdir(parents=True, exist_ok=True)
+
+            if src_path and not keep_source:
+                src = Path(src_path)
+                if src.is_file():
+                    ext = src.suffix.lower() or ".png"
+                    if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                        ext = ".png"
+                    for old in bg_dir.glob("custom_bg_source.*"):
+                        try:
+                            old.unlink()
+                        except OSError:
+                            pass
+                    shutil.copy2(str(src), str(bg_dir / f"custom_bg_source{ext}"))
+
+            if qimage is not None and isinstance(qimage, QImage) and not qimage.isNull():
+                dest_name = "custom_bg.png"
+                dest = bg_dir / dest_name
+                for old in bg_dir.glob("custom_bg.*"):
+                    # 勿误删 custom_bg_source.*
+                    if old.stem != "custom_bg" or old.name == dest_name:
+                        continue
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+                if not qimage.save(str(dest), "PNG"):
+                    show_critical(self, "错误", "保存裁切后的背景图失败")
+                    return ""
+                logger.info(f"已保存自定义背景(裁切): {dest}")
+                return dest_name
+
+            src = Path(src_path or "")
+            if not src.is_file():
+                show_critical(self, "错误", "所选文件不存在")
+                return ""
+            ext = src.suffix.lower() or ".png"
+            if ext not in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+                ext = ".png"
+            dest_name = f"custom_bg{ext}"
+            dest = bg_dir / dest_name
+            for old in bg_dir.glob("custom_bg.*"):
+                if old.stem != "custom_bg" or old.name == dest_name:
+                    continue
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+            shutil.copy2(str(src), str(dest))
+            logger.info(f"已保存自定义背景: {dest}")
+            return dest_name
+        except Exception as e:
+            logger.error(f"保存背景图失败: {e}")
+            show_critical(self, "错误", f"保存背景图失败: {e}")
+            return ""
 
     def _apply_performance_preset(self) -> None:
         """应用所选低配/标准/高配性能模式。"""
@@ -5453,7 +6700,7 @@ class SettingsWindow(QDialog):
         try:
             required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position')
             if not all(k in self.display_vars for k in required):
-                logger.warning("显示设置未就绪，请先打开「外观与显示」页")
+                logger.warning("显示设置未就绪，请先打开「外观」或「显示」页")
                 return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
@@ -5503,6 +6750,20 @@ class SettingsWindow(QDialog):
                 self.config.gui_config.watermark_angle = "45" if pos == "diagonal" else "horizontal"
             if 'always_on_top' in self.display_vars:
                 self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked()
+            if 'borderless' in self.display_vars:
+                self.config.gui_config.borderless = self.display_vars['borderless'].isChecked()
+            if 'background_image_path' in self.display_vars:
+                self.config.gui_config.background_image_path = (
+                    self.display_vars['background_image_path'].text() or ""
+                ).strip()
+            if 'background_blur_radius' in self.display_vars:
+                self.config.gui_config.background_blur_radius = int(
+                    self.display_vars['background_blur_radius'].value()
+                )
+            if 'background_overlay_opacity' in self.display_vars:
+                self.config.gui_config.background_overlay_opacity = (
+                    self.display_vars['background_overlay_opacity'].value() / 100.0
+                )
 
             # 保存到文件
             self._save_config_with_data_source_toggles()
@@ -5522,7 +6783,7 @@ class SettingsWindow(QDialog):
         try:
             render_required = ('cpu_radio', 'opengl_radio')
             if not all(k in self.render_vars for k in render_required):
-                logger.warning("渲染设置未就绪，请先打开「外观与显示」页")
+                logger.warning("渲染设置未就绪，请先打开「外观」或「显示」页")
                 return
             if self.render_vars['opengl_radio'].isChecked():
                 new_backend = "opengl"
@@ -5587,12 +6848,12 @@ class SettingsWindow(QDialog):
             minutes_spin.setEnabled(False)
     
     def _save_appearance_settings(self):
-        """保存「外观与显示」页全部设置（显示、渲染、颜色、自定义文本），保存后热重载生效。"""
+        """保存「外观」+「显示」页全部设置，保存后热重载生效。"""
         try:
             display_required = ('timezone', 'speed', 'font_size', 'font_family', 'font_bold', 'font_italic', 'width', 'height', 'opacity', 'vsync_enabled', 'target_fps', 'watermark_text', 'watermark_font_family', 'watermark_font_auto', 'watermark_font_size', 'watermark_position', 'auto_update_check_on_startup', 'warning_min_display_seconds', 'custom_text_return_seconds')
             render_required = ('cpu_radio', 'opengl_radio')
             if not all(k in self.display_vars for k in display_required) or not all(k in self.render_vars for k in render_required):
-                logger.warning("外观与显示设置未就绪，请先打开「外观与显示」页")
+                logger.warning("外观/显示设置未就绪，请先打开「外观」或「显示」页")
                 return
             old_timezone = getattr(self.config.gui_config, 'timezone', 'Asia/Shanghai')
             new_timezone = self.display_vars['timezone'].currentData()
@@ -5629,6 +6890,20 @@ class SettingsWindow(QDialog):
             self.config.gui_config.target_fps = self.display_vars['target_fps'].value()
             self.config.gui_config.timezone = new_timezone
             self.config.gui_config.always_on_top = self.display_vars['always_on_top'].isChecked() if 'always_on_top' in self.display_vars else False
+            if 'borderless' in self.display_vars:
+                self.config.gui_config.borderless = self.display_vars['borderless'].isChecked()
+            if 'background_image_path' in self.display_vars:
+                self.config.gui_config.background_image_path = (
+                    self.display_vars['background_image_path'].text() or ""
+                ).strip()
+            if 'background_blur_radius' in self.display_vars:
+                self.config.gui_config.background_blur_radius = int(
+                    self.display_vars['background_blur_radius'].value()
+                )
+            if 'background_overlay_opacity' in self.display_vars:
+                self.config.gui_config.background_overlay_opacity = (
+                    self.display_vars['background_overlay_opacity'].value() / 100.0
+                )
             if 'minimize_to_tray' in self.display_vars:
                 self.config.gui_config.minimize_to_tray = self.display_vars['minimize_to_tray'].isChecked()
             if 'toast_notifications_enabled' in self.display_vars:
@@ -5654,6 +6929,17 @@ class SettingsWindow(QDialog):
                 self.config.message_config.geo_filter_radius_km = float(
                     self.display_vars['geo_filter_radius_km'].value()
                 )
+            if 'weather_region_filter_enabled' in self.display_vars:
+                self.config.message_config.weather_region_filter_enabled = (
+                    self.display_vars['weather_region_filter_enabled'].isChecked()
+                )
+            if 'weather_region_filter' in self.display_vars:
+                self.config.message_config.weather_region_filter = (
+                    self.display_vars['weather_region_filter'].text() or ""
+                ).strip()
+            if 'weather_level_filter' in self.display_vars:
+                _wl = self.display_vars['weather_level_filter'].currentData()
+                self.config.message_config.weather_level_filter = (_wl or "none").strip().lower()
             self.config.gui_config.auto_update_check_on_startup = self.display_vars['auto_update_check_on_startup'].isChecked()
             self.config.gui_config.watermark_text = (self.display_vars['watermark_text'].text() or "").strip()
             wm_ff_widget = self.display_vars.get('watermark_font_family')
@@ -5701,10 +6987,10 @@ class SettingsWindow(QDialog):
             self.config._notify_config_changed()
             self._clear_settings_dirty()
             
-            show_info(self, "成功", "外观与显示设置已保存！\n设置已立即生效，无需重启程序。")
-            logger.debug("外观与显示设置已保存")
+            show_info(self, "成功", "设置已保存！\n设置已立即生效，无需重启程序。")
+            logger.debug("外观/显示设置已保存")
         except Exception as e:
-            logger.error(f"保存外观与显示设置失败: {e}")
+            logger.error(f"保存外观/显示设置失败: {e}")
             show_critical(self, "错误", f"保存设置失败: {e}")
     
     def update_weather_image(self, weather_data: Dict[str, Any]):

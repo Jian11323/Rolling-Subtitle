@@ -11,8 +11,9 @@ from __future__ import annotations
 import json
 import sys
 import threading
+from array import array
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from utils.logger import get_logger
 
@@ -53,15 +54,23 @@ class ChinaPlaceLookup:
     def __init__(self, index_path: Path):
         self.index_path = index_path
         self._regions: List[Dict[str, Any]] = []
-        self._grid_table: List[int] = []
+        # 扁平栅格用 array('i')，比 Python list[int] 省大量指针开销
+        self._grid_table: Sequence[int] = array("i")
         self._grid_meta: Dict[str, float] = {}
         self._grid_rows = 0
         self._grid_cols = 0
         self._loaded = False
+        self._load_lock = threading.Lock()
 
     def _load(self) -> None:
         if self._loaded:
             return
+        with self._load_lock:
+            if self._loaded:
+                return
+            self._load_unlocked()
+
+    def _load_unlocked(self) -> None:
         if not self.index_path.exists():
             logger.warning(f"中国行政区索引不存在: {self.index_path}")
             self._loaded = True
@@ -77,8 +86,13 @@ class ChinaPlaceLookup:
 
         self._regions = list(data.get("regions") or [])
         grid = data.get("grid") or {}
-        if isinstance(grid, dict) and grid.get("table"):
-            self._grid_table = list(grid.get("table") or [])
+        raw_table = grid.get("table") if isinstance(grid, dict) else None
+        if isinstance(grid, dict) and isinstance(raw_table, list) and raw_table:
+            try:
+                self._grid_table = array("i", (int(x) for x in raw_table))
+            except (TypeError, ValueError, OverflowError):
+                # 回退：偶发非整型时仍用 list，保证可查
+                self._grid_table = [int(x) for x in raw_table]
             self._grid_meta = {
                 "lat_min": float(grid.get("lat_min", 15.5)),
                 "lon_min": float(grid.get("lon_min", 73.0)),
@@ -87,6 +101,9 @@ class ChinaPlaceLookup:
             }
             self._grid_rows = int(grid.get("rows") or 0)
             self._grid_cols = int(grid.get("cols") or 0)
+            # 尽快丢掉 json 大对象引用，便于回收
+            raw_table = None
+            data = None
 
         self._loaded = True
         mode = "grid" if self._grid_table else "none"
@@ -138,6 +155,17 @@ def get_china_place_lookup(index_path: Optional[str] = None) -> ChinaPlaceLookup
         if _loader is None:
             _loader = ChinaPlaceLookup(_resolve_index_path(index_path))
         return _loader
+
+
+def preload_china_place_lookup_async() -> None:
+    """后台预加载行政区索引，避免首条消息同步读大 JSON 卡顿。"""
+    def _run() -> None:
+        try:
+            get_china_place_lookup().is_available()
+        except Exception as e:
+            logger.debug(f"预加载中国行政区索引失败（可忽略）: {e}")
+
+    threading.Thread(target=_run, daemon=True, name="ChinaPlacePreload").start()
 
 
 def lookup_china_place_name(

@@ -193,6 +193,13 @@ def main():
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, load_translator_async)
 
+        # 后台预加载中国行政区索引，避免首条国内速报同步读盘卡顿
+        try:
+            from utils.china_place_lookup import preload_china_place_lookup_async
+            QTimer.singleShot(200, preload_china_place_lookup_async)
+        except Exception as e:
+            logger.debug(f"调度行政区索引预加载失败（可忽略）: {e}")
+
         # 打包版：启动时检查更新（用户确认后退出进程，由独立 bat 静默安装/解压并启动新版本）
         try:
             from utils.app_update_check import run_startup_auto_update

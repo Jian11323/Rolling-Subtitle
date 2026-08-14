@@ -22,22 +22,6 @@ from utils.place_name_utils import (
 )
 from utils.translation_service import TranslationService
 
-_place_name_fixer = None
-
-
-def _get_place_name_fixer():
-    """懒加载地名修正器单例；初始化失败时返回 None。"""
-    global _place_name_fixer
-    if _place_name_fixer is None:
-        try:
-            from utils.place_name_fixer import PlaceNameFixer
-            _place_name_fixer = PlaceNameFixer()
-        except Exception as e:
-            logger.debug(f"初始化地名修正器失败: {e}")
-            _place_name_fixer = None
-    return _place_name_fixer
-
-
 def warning_shock_validity_max_seconds(source_type: str, msg_cfg: Any) -> float:
     """与入口校验一致：按 source_type 取发震时间有效期窗口（秒）。"""
     st = (source_type or "").strip()
@@ -118,7 +102,9 @@ class MessageProcessor:
         """按经纬度修正地名（fe_fix 区域库）。"""
         if lat is None or lon is None:  # 无坐标无法做 bbox 修正
             return place_name
-        fixer = _get_place_name_fixer()
+        from utils.place_name_fixer import get_place_name_fixer
+
+        fixer = get_place_name_fixer()
         if not fixer or not fixer.is_supported(source_type):
             return place_name
         try:
@@ -265,12 +251,21 @@ class MessageProcessor:
             elif message_type == 'report':
                 if parsed_data.get('source_type') == 'fanstudio_typhoon':
                     return self._format_fanstudio_typhoon_message(parsed_data)
+                if parsed_data.get('source_type') == 'eqsc_typhoon':
+                    place = parsed_data.get('place_name') or '台风情报'
+                    return f"【EQSC 台风】{place}"
+                if parsed_data.get('source_type') == 'eqsc_volcano':
+                    place = parsed_data.get('place_name') or '火山情报'
+                    return f"【EQSC JMA 火山】{place}"
                 if parsed_data.get('source_type') == 'fssn-cmt':
                     return self._format_fssn_cmt_message(parsed_data)
-                if parsed_data.get('source_type') == 'cenc-ir':
+                if parsed_data.get('source_type') in ('cenc-ir', 'eqsc_cenc_ir'):
                     return self._format_cenc_ir_message(parsed_data)
                 return self._format_report_message(parsed_data)
             elif message_type == 'weather':
+                if parsed_data.get('source_type') == 'eqsc_typhoon':
+                    place = parsed_data.get('place_name') or '台风情报'
+                    return f"【EQSC 台风】{place}"
                 return self._format_weather_message(parsed_data)
             elif message_type == 'volcano':
                 return self._format_volcano_message(parsed_data)
@@ -508,13 +503,16 @@ class MessageProcessor:
             details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
             batch_raw = details.get("batch", "")
             batch = str(batch_raw).strip() if batch_raw is not None else ""
+            level = (data.get("tsunami_warning_level") or "").strip()
             title = (data.get("tsunami_warning_title") or "").strip()
-            if batch and title:
-                return f"【自然资源部海啸预警中心 第{batch}报 {title}】"
+            # 优先级别（信息/蓝/黄/橙/红/解除），与 WHEWS 标头一致
+            suffix = level or title
+            if batch and suffix:
+                return f"【自然资源部海啸预警中心 第{batch}报 {suffix}】"
             if batch:
                 return f"【自然资源部海啸预警中心 第{batch}报】"
-            if title:
-                return f"【自然资源部海啸预警中心 {title}】"
+            if suffix:
+                return f"【自然资源部海啸预警中心 {suffix}】"
             return "【自然资源部海啸预警中心】"
         if st == "cenc":
             raw_it = raw.get("infoTypeName") or info_type
@@ -633,6 +631,12 @@ class MessageProcessor:
                     message_parts.append(f"【Wolfx 緊急地震速報 {warn_area_type}】")
                 else:
                     message_parts.append("【Wolfx 緊急地震速報】")
+            elif source_type == 'eqsc_jma_eew':
+                warn_area_type = (data.get('warn_area_type') or '').strip()
+                if warn_area_type:
+                    message_parts.append(f"【EQSC 緊急地震速報 {warn_area_type}】")
+                else:
+                    message_parts.append("【EQSC 緊急地震速報】")
             elif source_type == 'wolfx_sc_eew':
                 message_parts.append("【Wolfx四川省地震局】")
             elif source_type == 'wolfx_fj_eew':
@@ -691,7 +695,7 @@ class MessageProcessor:
             if updates and updates > 0:
                 # JMA / Wolfx-JMA / Wolfx-福建：final 为真时显示「最终报」（与 Wolfx jma_eew、fj_eew 字段 isFinal 一致）
                 is_final = data.get('final', False)
-                if is_final and source_type in ('jma', 'wolfx_jma_eew', 'wolfx_fj_eew'):
+                if is_final and source_type in ('jma', 'wolfx_jma_eew', 'wolfx_fj_eew', 'eqsc_jma_eew'):
                     message_parts.append("最终报")
                 else:
                     message_parts.append(f"第{updates}报")
@@ -996,6 +1000,26 @@ class MessageProcessor:
                 message_parts.append("【Wolfx中国地震台网中心地震信息】")
         elif source_type == "wolfx_jma_eqlist":
             message_parts.append("【Wolfx JMA 地震情報】")
+        elif source_type == "eqsc_cenc":
+            det = str(info_type or "").strip()
+            if "正式" in det:
+                message_parts.append("【EQSC 中国地震台网中心正式测定】")
+            elif "自动" in det:
+                message_parts.append("【EQSC 中国地震台网中心自动测定】")
+            else:
+                message_parts.append("【EQSC 中国地震台网中心地震信息】")
+        elif source_type == "eqsc_jma_report":
+            message_parts.append("【EQSC JMA 地震情报】")
+        elif source_type == "eqsc_jma_tsunami":
+            message_parts.append("【EQSC JMA 海啸情报】")
+        elif source_type == "eqsc_cwa":
+            message_parts.append("【EQSC 台湾中央气象署地震信息】")
+        elif source_type == "eqsc_hko":
+            message_parts.append("【EQSC 香港天文台地震信息】")
+        elif source_type == "eqsc_usgs":
+            message_parts.append("【EQSC 美国地质调查局地震信息】")
+        elif source_type == "eqsc_emsc":
+            message_parts.append("【EQSC 欧洲地中海地震中心地震信息】")
         elif organization:
             if organization == "FSSN":
                 message_parts.append("【FSSN 地震信息】")
@@ -1020,8 +1044,17 @@ class MessageProcessor:
                     message_parts.append(f"【中国地震台网中心{det}】")
                 else:
                     message_parts.append("【中国地震台网中心地震信息】")
-            # 如果机构名称已经包含"地震信息"或"地震情报"，直接使用，不再添加
-            elif "地震信息" in organization or "地震情报" in organization or "海啸" in organization:
+            # 海啸类 / 已含「地震信息|地震情报|海啸」：直接用机构名，勿再拼「地震信息」
+            elif (
+                data.get("is_tsunami")
+                or source_type in (
+                    "ntwc", "ptwc", "incois", "jma_tsunami", "tsunami",
+                    "海啸信息", "p2pquake_tsunami", "eqsc_jma_tsunami",
+                )
+                or "地震信息" in organization
+                or "地震情报" in organization
+                or "海啸" in organization
+            ):
                 message_parts.append(f"【{organization}】")
             else:
                 message_parts.append(f"【{organization}地震信息】")
@@ -1031,7 +1064,7 @@ class MessageProcessor:
         # 时间
         message_parts.append(shock_time)
         
-        # 海啸预报：若有 htmlUrl 解析的备注全文则优先展示，否则展示 place_name
+        # 海啸：NMEFC 备注全文优先；海外/JMA 用地点+震级+标题/摘要
         if data.get('is_tsunami'):
             remarks = (data.get('tsunami_remarks') or '').strip()
             if remarks:
@@ -1093,8 +1126,55 @@ class MessageProcessor:
                         break
                 if remarks:
                     message_parts.append(f"，{remarks}")
-            if not remarks and place_name:
-                message_parts.append(f"，{place_name}")
+            if not remarks:
+                st = str(source_type or "").strip().lower()
+                # JMA / P2P：place_name 已是「级别+浪高+区域」
+                if st in ("jma_tsunami", "p2pquake_tsunami"):
+                    if place_name:
+                        message_parts.append(f"，{place_name}")
+                # NMEFC：震中 + 震级/深度 + 浪高/预报区（勿把整段预报当地名套「发生地震」）
+                elif st in ("tsunami", "海啸信息"):
+                    epi = (
+                        str(data.get("tsunami_warning_subtitle") or "").strip()
+                        or str(data.get("tsunami_place") or "").strip()
+                    )
+                    detail = (place_name or "").strip()
+                    if epi and magnitude > 0:
+                        message_parts.append(f"，{epi}发生{magnitude:.1f}级地震")
+                        if depth and depth > 0:
+                            message_parts.append(
+                                f"，震源深度{int(round(depth, 0))}公里"
+                            )
+                        rest = detail
+                        if rest.startswith(epi):
+                            rest = rest[len(epi) :].lstrip("。 ").strip()
+                        if rest:
+                            message_parts.append(f"。{rest}")
+                    elif detail:
+                        message_parts.append(f"，{detail}")
+                        if magnitude > 0:
+                            message_parts.append(f"发生{magnitude:.1f}级地震")
+                            if depth and depth > 0:
+                                message_parts.append(
+                                    f"，震源深度{int(round(depth, 0))}公里"
+                                )
+                    elif magnitude > 0:
+                        message_parts.append(f"，发生{magnitude:.1f}级地震")
+                elif magnitude <= 0 and place_name:
+                    message_parts.append(f"，{place_name}")
+                else:
+                    # NTWC / PTWC / INCOIS：地点 + 震级/深度 + 标题/摘要
+                    if place_name and magnitude > 0:
+                        message_parts.append(f"，{place_name}发生{magnitude:.1f}级地震")
+                        if depth and depth > 0:
+                            message_parts.append(
+                                f"，震源深度{int(round(depth, 0))}公里"
+                            )
+                    elif place_name:
+                        message_parts.append(f"，{place_name}")
+                    extra = self._tsunami_overseas_extra_text(data)
+                    if extra and extra not in (place_name or ""):
+                        message_parts.append(f"。{extra}")
             return "".join(message_parts)
 
         # PTWC（太平洋海啸预警中心）海啸/信息：按字段顺序展示（与 CAP 类字段一致）
@@ -1343,21 +1423,67 @@ class MessageProcessor:
             # 默认颜色：绿色
             return '#01FF00'
 
+    def _tsunami_overseas_extra_text(self, data: Dict[str, Any]) -> str:
+        """海外海啸字幕附加文：优先标题，其次短摘要（截断 CAP 长文）。"""
+        headline = self._translate_text_if_needed(
+            str(data.get("tsunami_headline") or data.get("headline") or "").strip()
+        )
+        if headline:
+            return headline
+        for key in ("tsunami_description", "description", "tsunami_instruction"):
+            raw = str(data.get(key) or "").strip()
+            if not raw:
+                continue
+            # 取首句，避免 CAP description 过长撑满滚动条
+            first = re.split(r"(?<=[.!?。！？])\s+", raw, maxsplit=1)[0].strip()
+            if len(first) > 160:
+                first = first[:157].rstrip() + "..."
+            return self._translate_text_if_needed(first)
+        return ""
+
     def _get_tsunami_level_color(self, parsed_data: Dict[str, Any]) -> Optional[str]:
-        """自然资源部海啸：按 warningInfo.level 返回颜色；信息/未知返回 None（沿用速报色）。"""
-        raw_level = (parsed_data.get('tsunami_warning_level') or '').strip()
-        if not raw_level:
+        """海啸级别着色：NMEFC 色级 / 海外英文级 / JMA 警报种类；信息级返回 None。"""
+        raw_en = (parsed_data.get("tsunami_level_raw") or "").strip()
+        raw_level = (
+            parsed_data.get("tsunami_warning_level")
+            or parsed_data.get("tsunami_level")
+            or raw_en
+            or ""
+        ).strip()
+        if not raw_level and not raw_en:
             return None
-        if "红" in raw_level:
+        key_en = re.sub(r"[\s_\-]+", "", raw_en).lower()
+        # 海外原级优先：Warning/Alert 作红档
+        if key_en in ("warning", "alert", "majorwarning", "threat"):
             return "#FF0000"
-        if "橙" in raw_level:
-            return "#FF8C00"
-        if "黄" in raw_level:
+        if key_en in ("watch",):
             return "#FFFF00"
-        if "蓝" in raw_level:
+        if key_en in ("advisory",):
             return "#00BFFF"
-        if "信息" in raw_level:
+        if key_en in (
+            "information",
+            "info",
+            "cancellation",
+            "cancel",
+            "cancelled",
+            "canceled",
+        ):
             return None
+        # 中文/日文展示级
+        if any(x in raw_level for x in ("解除", "信息", "予報", "预报")):
+            return None
+        if "红" in raw_level or "大津波" in raw_level or "大海啸" in raw_level:
+            return "#FF0000"
+        if "橙" in raw_level or (
+            ("警報" in raw_level or "警报" in raw_level)
+            and "大" not in raw_level
+            and "注意" not in raw_level
+        ):
+            return "#FF8C00"
+        if "黄" in raw_level or "注意" in raw_level:
+            return "#FFFF00"
+        if "蓝" in raw_level or "咨询" in raw_level:
+            return "#00BFFF"
         return None
     
     def _get_weather_warning_color(self, parsed_data: Dict[str, Any]) -> str:

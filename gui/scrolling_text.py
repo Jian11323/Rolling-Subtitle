@@ -6,7 +6,7 @@
 """
 
 from PyQt5.QtWidgets import QOpenGLWidget, QWidget, QApplication
-from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer, QThread
+from PyQt5.QtCore import QTimer, Qt, QRectF, pyqtSignal, QElapsedTimer, QThread, QObject
 from PyQt5.QtGui import QPainter, QFont, QColor, QPixmap, QImage, QFontMetrics, QSurfaceFormat, QOpenGLContext, QFontDatabase
 from collections import OrderedDict
 from typing import Optional, Dict, Tuple, Any, List
@@ -20,6 +20,17 @@ import ssl
 from utils.logger import get_logger
 
 logger = get_logger()
+
+
+class _AsyncRasterBridge(QObject):
+    """
+    工作线程 → 主线程投递栅格结果（QueuedConnection）。
+    避免在工作线程创建 QPixmap，也比跨线程 QTimer.singleShot 更稳。
+    """
+    commit_image = pyqtSignal(object, str, object)  # QImage, cache_key, task_id|None
+    show_cached = pyqtSignal(str, int)  # cache_key, task_id
+    commit_bg = pyqtSignal(int, object, object)  # generation, key, QImage|None
+    load_failed = pyqtSignal()  # 清除 loading 状态
 
 
 # 中文名 -> 英文系统名，用于 exactMatch 时系统仅注册英文名（如 KaiTi）的情况
@@ -116,6 +127,23 @@ class _ScrollingTextMixin:
         self._loading_lock = threading.Lock()
         self._is_scrolling = False
         self._scrolling_lock = threading.Lock()
+        # 自定义背景缓存：(resolved_path, w, h, blur_radius) -> QPixmap；构建在后台线程完成
+        self._bg_pixmap_cache: Optional[QPixmap] = None
+        self._bg_pixmap_cache_key: Optional[Tuple] = None
+        self._bg_load_generation = 0
+        self._bg_pending_key: Optional[Tuple] = None
+        self._bg_loading_key: Optional[Tuple] = None
+        self._bg_debounce_timer = QTimer(self)
+        self._bg_debounce_timer.setSingleShot(True)
+        self._bg_debounce_timer.setInterval(60)
+        self._bg_debounce_timer.timeout.connect(self._start_pending_background_load)
+
+        # 跨线程栅格投递（图片 / 背景）
+        self._raster_bridge = _AsyncRasterBridge(self)
+        self._raster_bridge.commit_image.connect(self._commit_loaded_qimage)
+        self._raster_bridge.show_cached.connect(self._update_image_display_from_cache)
+        self._raster_bridge.commit_bg.connect(self._commit_background_qimage)
+        self._raster_bridge.load_failed.connect(lambda: self.set_loading(False))
 
         # 有感/强有感红屏背景闪烁状态（整栏背景交替）
         self._alert_flash_enabled = False
@@ -143,6 +171,22 @@ class _ScrollingTextMixin:
         logger.info(f"定时器间隔设置为: {timer_interval}ms (PreciseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
         self._timer_interval = timer_interval
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
+        # 启动后尽快预取背景，避免首帧才开始防抖等待
+        QTimer.singleShot(0, self._prefetch_background_if_needed)
+
+    def _prefetch_background_if_needed(self) -> None:
+        """主线程：若配置了背景图则尽早排队异步构建。"""
+        try:
+            path = self._resolve_background_image_file()
+            if not path:
+                return
+            w = self.width() if self.width() > 1 else int(getattr(self.config.gui_config, "window_width", 800) or 800)
+            h = self.height() if self.height() > 1 else int(getattr(self.config.gui_config, "window_height", 100) or 100)
+            blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
+            self._bg_pending_key = (path, w, h, blur)
+            self._start_pending_background_load()
+        except Exception as e:
+            logger.debug(f"预取背景图失败（可忽略）: {e}")
 
     def _contains_cjk(self, text: str) -> bool:
         """判断文本是否包含中日韩统一表意文字（CJK）字符。"""
@@ -242,6 +286,209 @@ class _ScrollingTextMixin:
         except Exception:
             return 120
 
+    def _resolve_background_image_file(self) -> str:
+        """解析配置中的背景图路径（内置 / AppData / 绝对路径）。"""
+        from utils.builtin_backgrounds import resolve_background_image_file
+        raw = str(getattr(self.config.gui_config, "background_image_path", "") or "").strip()
+        return resolve_background_image_file(raw)
+
+    def _invalidate_background_cache(self, clear_pixmap: bool = True) -> None:
+        """作废进行中的背景加载；可选清空已缓存 pixmap。"""
+        self._bg_load_generation += 1
+        self._bg_pending_key = None
+        self._bg_loading_key = None
+        try:
+            if self._bg_debounce_timer.isActive():
+                self._bg_debounce_timer.stop()
+        except RuntimeError:
+            pass
+        if clear_pixmap:
+            self._bg_pixmap_cache = None
+            self._bg_pixmap_cache_key = None
+
+    @staticmethod
+    def _build_background_qimage(w: int, h: int, path: str, blur_radius: int) -> Optional[QImage]:
+        """加载、裁剪缩放并可选模糊背景图（可在工作线程调用，仅返回 QImage）。"""
+        if w <= 0 or h <= 0 or not path:
+            return None
+        try:
+            from utils.safe_image import load_qimage_capped
+
+            src = load_qimage_capped(path)
+            if src is None or src.isNull():
+                return None
+            # Cover 裁剪：保持比例铺满
+            scaled = src.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            if scaled.width() > w or scaled.height() > h:
+                x = max(0, (scaled.width() - w) // 2)
+                y = max(0, (scaled.height() - h) // 2)
+                scaled = scaled.copy(x, y, w, h)
+            if blur_radius > 0:
+                try:
+                    from PIL import Image, ImageFilter
+                    img = scaled.convertToFormat(QImage.Format_RGBA8888)
+                    ptr = img.bits()
+                    nbytes = img.byteCount() if hasattr(img, "byteCount") else img.sizeInBytes()
+                    ptr.setsize(nbytes)
+                    pil = Image.frombytes(
+                        "RGBA", (img.width(), img.height()), bytes(ptr)
+                    )
+                    pil = pil.filter(ImageFilter.GaussianBlur(radius=max(1, blur_radius)))
+                    data = pil.tobytes("raw", "RGBA")
+                    out = QImage(data, pil.width, pil.height, QImage.Format_RGBA8888)
+                    return out.copy()
+                except Exception as e_blur:
+                    logger.debug(f"背景模糊失败，使用原图: {e_blur}")
+            return scaled.copy()
+        except Exception as e:
+            logger.warning(f"加载背景图失败: {e}")
+            return None
+
+    def _schedule_background_load(self, key: Tuple) -> None:
+        """防抖后异步构建背景（避免拖拽改尺寸时连续同步模糊卡顿）。"""
+        if self._bg_loading_key == key:
+            return
+        if self._bg_pending_key == key and self._bg_debounce_timer.isActive():
+            return
+        self._bg_pending_key = key
+        try:
+            self._bg_debounce_timer.start()
+        except RuntimeError:
+            self._start_pending_background_load()
+
+    def _start_pending_background_load(self) -> None:
+        """主线程：启动后台线程构建当前待加载背景 key。"""
+        key = self._bg_pending_key
+        if not key:
+            return
+        if self._bg_pixmap_cache is not None and self._bg_pixmap_cache_key == key:
+            self._bg_pending_key = None
+            return
+        if self._bg_loading_key == key:
+            return
+        path, w, h, blur = key
+        if w <= 0 or h <= 0 or not path:
+            self._bg_pending_key = None
+            return
+        gen = self._bg_load_generation
+        self._bg_loading_key = key
+        self._bg_pending_key = None
+        logger.debug(f"异步加载背景图: {path}, {w}x{h}, blur={blur}")
+        threading.Thread(
+            target=self._load_background_async,
+            args=(gen, path, int(w), int(h), int(blur)),
+            daemon=True,
+            name="BackgroundLoader",
+        ).start()
+
+    def _load_background_async(self, generation: int, path: str, w: int, h: int, blur: int) -> None:
+        """工作线程：解码/缩放/模糊背景，经信号回主线程提交。"""
+        key = (path, w, h, blur)
+        try:
+            image = self._build_background_qimage(w, h, path, blur)
+            img_copy = image.copy() if image is not None and not image.isNull() else None
+            self._raster_bridge.commit_bg.emit(generation, key, img_copy)
+        except Exception as e:
+            logger.warning(f"异步加载背景图失败: {e}")
+            self._raster_bridge.commit_bg.emit(generation, key, None)
+
+    def _commit_background_qimage(
+        self,
+        generation: int,
+        key: Tuple,
+        image: Optional[QImage],
+    ) -> None:
+        """主线程：接收后台背景 QImage，写入 QPixmap 缓存并刷新。"""
+        if generation != self._bg_load_generation:
+            if self._bg_loading_key == key:
+                self._bg_loading_key = None
+            return
+        if self._bg_loading_key == key:
+            self._bg_loading_key = None
+
+        path = self._resolve_background_image_file()
+        w, h = self.width(), self.height()
+        blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
+        current_key: Optional[Tuple] = (path, w, h, blur) if path and w > 0 and h > 0 else None
+        if current_key != key:
+            # 尺寸/配置已变：丢弃本结果，按最新 key 再排一次
+            if current_key:
+                self._schedule_background_load(current_key)
+            return
+        if image is None or image.isNull():
+            return
+        try:
+            pix = QPixmap.fromImage(image)
+            if pix.isNull():
+                return
+            self._bg_pixmap_cache = pix
+            self._bg_pixmap_cache_key = key
+            self.update()
+            logger.debug(f"背景图异步就绪: {key[0]}, {key[1]}x{key[2]}")
+        except Exception as e:
+            logger.warning(f"提交背景图到主线程失败: {e}")
+
+    def _get_cached_background_pixmap(self) -> Optional[QPixmap]:
+        """
+        取缓存背景；未命中时异步构建，不在绘制路径同步加载/模糊。
+        同路径旧缓存可先拉伸绘制，避免等待期间闪回纯色。
+        """
+        path = self._resolve_background_image_file()
+        if not path:
+            if self._bg_pixmap_cache is not None or self._bg_pixmap_cache_key is not None:
+                self._invalidate_background_cache(clear_pixmap=True)
+            return None
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return self._bg_pixmap_cache
+        blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
+        key = (path, w, h, blur)
+        if self._bg_pixmap_cache is not None and self._bg_pixmap_cache_key == key:
+            return self._bg_pixmap_cache
+        self._schedule_background_load(key)
+        # 同路径的旧图可临时拉伸使用
+        if (
+            self._bg_pixmap_cache is not None
+            and self._bg_pixmap_cache_key is not None
+            and self._bg_pixmap_cache_key[0] == path
+            and not self._bg_pixmap_cache.isNull()
+        ):
+            return self._bg_pixmap_cache
+        return None
+
+    def _paint_window_background(self, painter: QPainter, base_bg: QColor) -> None:
+        """绘制纯色或自定义背景（含毛玻璃遮罩与预警闪烁叠色）。"""
+        rect = self.rect()
+        bg_pix = self._get_cached_background_pixmap()
+        if bg_pix is not None and not bg_pix.isNull():
+            if bg_pix.width() == rect.width() and bg_pix.height() == rect.height():
+                painter.drawPixmap(0, 0, bg_pix)
+            else:
+                # 异步新尺寸未就绪时，拉伸旧缓存，避免闪纯色
+                painter.drawPixmap(rect, bg_pix)
+            # 半透明遮罩（液态玻璃可读性）
+            try:
+                ov = float(getattr(self.config.gui_config, "background_overlay_opacity", 0.35) or 0.0)
+            except (TypeError, ValueError):
+                ov = 0.35
+            ov = max(0.0, min(0.9, ov))
+            if ov > 0.001:
+                overlay = QColor(0, 0, 0)
+                overlay.setAlphaF(ov)
+                painter.fillRect(rect, overlay)
+            # 预警闪烁：叠半透明色，不盖死背景图
+            if getattr(self, "_alert_flash_enabled", False) and getattr(self, "_alert_flash_on", False):
+                flash = QColor(self._alert_flash_color)
+                if flash.isValid():
+                    flash.setAlpha(110)
+                    painter.fillRect(rect, flash)
+        else:
+            if getattr(self, "_alert_flash_enabled", False):
+                bg_color = self._alert_flash_color if self._alert_flash_on else base_bg
+            else:
+                bg_color = base_bg
+            painter.fillRect(rect, bg_color)
+
     def _paint_content(self, painter: QPainter):
         """统一的绘制逻辑（供 paintGL / paintEvent 调用）。使用浮点坐标与原生 drawText，避免取整卡顿与位图插值模糊/闪烁。"""
         try:
@@ -250,7 +497,7 @@ class _ScrollingTextMixin:
             lead_w = self._get_lead_badge_width()
 
             if lead_w > 0:
-                painter.fillRect(self.rect(), base_bg)
+                self._paint_window_background(painter, base_bg)
                 bright = QColor(self._lead_badge_flash_color)  # 左侧红条亮色
                 if not bright.isValid():
                     bright = QColor("#FF0000")
@@ -271,12 +518,8 @@ class _ScrollingTextMixin:
                 )
                 self._draw_background_watermark(painter, base_bg)
             else:
-                if getattr(self, "_alert_flash_enabled", False):
-                    bg_color = self._alert_flash_color if self._alert_flash_on else base_bg
-                else:
-                    bg_color = base_bg
-                painter.fillRect(self.rect(), bg_color)
-                self._draw_background_watermark(painter, bg_color)
+                self._paint_window_background(painter, base_bg)
+                self._draw_background_watermark(painter, base_bg)
 
             if not self.current_text:
                 return  # 没有文本时只绘制背景与水印
@@ -802,6 +1045,17 @@ class _ScrollingTextMixin:
                 pass
             new_bg_color = self.config.gui_config.bg_color
             self.setStyleSheet(f"background-color: {new_bg_color};")
+            # 背景变更：作废进行中加载；有新路径时保留旧图作过渡，避免闪纯色
+            new_bg_path = self._resolve_background_image_file()
+            if not new_bg_path:
+                self._invalidate_background_cache(clear_pixmap=True)
+            else:
+                old_key = self._bg_pixmap_cache_key
+                self._invalidate_background_cache(clear_pixmap=False)
+                if old_key is not None and old_key[0] != new_bg_path:
+                    self._bg_pixmap_cache = None
+                    self._bg_pixmap_cache_key = None
+            self.update()
             if self.current_text and self.current_message_type:
                 old_color = self.current_color.name().upper()
                 if self.current_message_type == 'weather':
@@ -840,36 +1094,117 @@ class _ScrollingTextMixin:
 
     def _fetch_image_bytes_from_url(self, url: str, timeout: int = 12, max_retries: int = 3, retry_delay: float = 2.0) -> Optional[bytes]:
         """
-        带重试的远程图片拉取函数：用于 NMC 等气象预警图片的预加载与展示加载。
-        使用与现有逻辑一致的 User-Agent 与 SSL 配置，仅在网络/服务抖动时进行有限次重试。
+        带重试的远程图片拉取：优先校验证书；仅在 SSL 失败时回退到不校验（兼容部分气象图源）。
         """
         if not url or not isinstance(url, str):
             return None
+        from utils.safe_image import MAX_IMAGE_BYTES
+
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
+        verify_ctx = ssl.create_default_context()
+        insecure_ctx = ssl.create_default_context()
+        insecure_ctx.check_hostname = False
+        insecure_ctx.verify_mode = ssl.CERT_NONE
 
         last_exc: Optional[BaseException] = None
         for attempt in range(1, max_retries + 1):
-            try:
-                with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
-                    return resp.read()
-            except Exception as e:  # 包含超时、连接错误、HTTPError 等
-                last_exc = e
-                logger.warning(
-                    f"从 URL 加载图片失败(第{attempt}次): {url[:60]}..., {type(e).__name__}: {e}"
-                )
-                if attempt < max_retries:
-                    try:
-                        time.sleep(retry_delay)
-                    except Exception:
-                        pass
+            # 先严格校验，再对 SSL 错误回退 insecure（同一次尝试内）
+            for use_insecure in (False, True):
+                ctx = insecure_ctx if use_insecure else verify_ctx
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                        # 限制读取体积，避免超大图占满内存
+                        chunks: List[bytes] = []
+                        total = 0
+                        while True:
+                            chunk = resp.read(1024 * 256)
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > MAX_IMAGE_BYTES:
+                                logger.warning(
+                                    f"远程图片超过大小上限已中止: {url[:60]}... ({total} bytes)"
+                                )
+                                return None
+                            chunks.append(chunk)
+                        if use_insecure:
+                            logger.debug(f"远程图片 SSL 回退为不校验: {url[:60]}...")
+                        return b"".join(chunks)
+                except ssl.SSLError as e:
+                    last_exc = e
+                    if not use_insecure:
+                        continue  # 同一次 attempt 再试 insecure
+                    break
+                except Exception as e:  # 超时、连接错误、HTTPError 等
+                    last_exc = e
+                    break
+            logger.warning(
+                f"从 URL 加载图片失败(第{attempt}次): {url[:60]}..., {type(last_exc).__name__}: {last_exc}"
+            )
+            if attempt < max_retries:
+                try:
+                    time.sleep(retry_delay)
+                except Exception:
+                    pass
         if last_exc is not None:
             logger.warning(
                 f"从 URL 加载图片失败(已重试 {max_retries} 次): {url[:60]}..., {type(last_exc).__name__}: {last_exc}"
             )
         return None
+
+    @staticmethod
+    def _scale_qimage_to_height(image: QImage, target_height: int) -> QImage:
+        """按目标高度等比缩放 QImage（可在工作线程调用）。"""
+        if image.isNull() or target_height <= 0 or image.height() <= target_height:
+            return image
+        ratio = target_height / image.height()
+        new_width = max(1, int(image.width() * ratio))
+        return image.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+    def _put_pixmap_in_image_cache(self, cache_key: str, pixmap: QPixmap) -> None:
+        """主线程写入图片缓存并按条数淘汰最旧项。"""
+        with self._image_cache_lock:
+            self._image_cache[cache_key] = pixmap
+            while len(self._image_cache) > 200:
+                oldest_key = next(iter(self._image_cache))
+                del self._image_cache[oldest_key]
+
+    def _commit_loaded_qimage(
+        self,
+        image: QImage,
+        cache_key: str,
+        task_id: Optional[int] = None,
+    ) -> None:
+        """主线程：QImage → QPixmap，写入缓存；若带 task_id 则刷新显示。"""
+        try:
+            if image is None or image.isNull():
+                if task_id is not None:
+                    self.set_loading(False)
+                return
+            pixmap = QPixmap.fromImage(image)
+            if pixmap.isNull():
+                if task_id is not None:
+                    self.set_loading(False)
+                return
+            self._put_pixmap_in_image_cache(cache_key, pixmap)
+            if task_id is not None:
+                self._update_image_display(pixmap, task_id)
+            else:
+                logger.info(f"气象预警图片预加载完成: {cache_key[:80]}")
+        except Exception as e:
+            logger.warning(f"提交加载图片到主线程失败: {e}")
+            if task_id is not None:
+                self.set_loading(False)
+
+    def _update_image_display_from_cache(self, cache_key: str, task_id: int) -> None:
+        """主线程：按 cache_key 取 QPixmap 并显示（避免工作线程触碰 QPixmap）。"""
+        pixmap = None
+        with self._image_cache_lock:
+            pixmap = self._image_cache.get(cache_key)
+        if pixmap is None:
+            self.set_loading(False)
+            return
+        self._update_image_display(pixmap, task_id)
 
     def preload_image_url(self, url: str) -> None:
         """
@@ -905,33 +1240,28 @@ class _ScrollingTextMixin:
             QTimer.singleShot(0, start)
 
     def _do_preload_url(self, url: str, window_height: int) -> None:
-        """后台线程：请求 URL、缩放、写入 _image_cache，不刷新界面。"""
+        """后台线程：请求 URL，用 QImage 解码/缩放，回主线程写入 QPixmap 缓存。"""
         try:
+            from utils.safe_image import load_qimage_from_bytes_capped
+
             data = self._fetch_image_bytes_from_url(url, timeout=12, max_retries=3, retry_delay=2.0)
             if not data:
                 logger.warning(f"气象预警图片预加载失败(已重试 3 次): {url}")
                 return
-            pixmap = QPixmap()
-            if not pixmap.loadFromData(data):
+            image = load_qimage_from_bytes_capped(data)
+            if image is None or image.isNull():
                 logger.warning(f"预加载图片数据解析失败: {url}")
                 return
             target_height = int(window_height * 0.8)
-            if pixmap.height() > target_height:
-                ratio = target_height / pixmap.height()
-                new_width = int(pixmap.width() * ratio)
-                pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            image = self._scale_qimage_to_height(image, target_height)
             cache_key = f"{url}_{window_height}"
-            with self._image_cache_lock:
-                self._image_cache[cache_key] = pixmap
-                if len(self._image_cache) > 200:
-                    oldest_key = next(iter(self._image_cache))
-                    del self._image_cache[oldest_key]
-            logger.info(f"气象预警图片预加载完成: {url}")
+            img_copy = image.copy()
+            self._raster_bridge.commit_image.emit(img_copy, cache_key, None)
         except Exception as e:
             logger.warning(f"气象预警图片预加载失败: {url}, {e}")
 
-    def _load_image_async(self, image_path: str, task_id: int):
-        """异步加载图片（支持本地路径或 http(s) URL）"""
+    def _load_image_async(self, image_path: str, task_id: int, window_height: Optional[int] = None):
+        """异步加载图片（支持本地路径或 http(s) URL）。工作线程仅用 QImage。"""
         try:
             logger.info(f"开始异步加载图片: {image_path}, task_id: {task_id}")
 
@@ -942,20 +1272,22 @@ class _ScrollingTextMixin:
                 img_path = Path(image_path)
                 if not img_path.exists():
                     logger.error(f"图片文件不存在: {image_path}")
-                    self.set_loading(False)
+                    self._raster_bridge.load_failed.emit()
                     return
                 img_path_resolved = str(img_path.resolve())
 
-            # 与预加载一致：高度不足时用 config，确保能命中预加载写入的 key
-            current_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
+            # window_height 由主线程传入，避免工作线程读取 QWidget.height()
+            try:
+                current_height = int(window_height or 0)
+            except (TypeError, ValueError):
+                current_height = 0
+            if current_height <= 10:
+                current_height = int(self.config.gui_config.window_height or 100)
             cache_key = f"{img_path_resolved}_{current_height}"
 
-            # 检查缓存
-            found_pixmap = None
             found_key = None
             with self._image_cache_lock:
                 if cache_key in self._image_cache:
-                    found_pixmap = self._image_cache[cache_key]
                     found_key = cache_key
                 else:
                     for offset in range(-20, 21, 5):
@@ -963,59 +1295,49 @@ class _ScrollingTextMixin:
                         if test_height > 0:
                             test_key = f"{img_path_resolved}_{test_height}"
                             if test_key in self._image_cache:
-                                found_pixmap = self._image_cache[test_key]
                                 found_key = test_key
                                 logger.debug(f"找到附近高度的缓存: {test_key} (当前高度: {current_height})")
                                 break
 
-            if found_pixmap:
+            if found_key:
                 logger.info(f"从缓存中获取图片: {found_key}, task_id: {task_id}, current_task_id: {self._current_load_task_id}")
-                from PyQt5.QtCore import QTimer
-                QTimer.singleShot(0, lambda: self._update_image_display(found_pixmap, task_id))
+                self._raster_bridge.show_cached.emit(found_key, task_id)
                 return
 
-            # 加载图片：URL 用 urllib + loadFromData，本地用 QPixmap(path)
             if is_url:
+                from utils.safe_image import load_qimage_from_bytes_capped
+
                 data = self._fetch_image_bytes_from_url(image_path, timeout=12, max_retries=3, retry_delay=2.0)
                 if not data:
                     logger.error(f"从 URL 加载图片失败(已重试 3 次): {image_path}")
-                    self.set_loading(False)
+                    self._raster_bridge.load_failed.emit()
                     return
-                pixmap = QPixmap()
-                if not pixmap.loadFromData(data):
+                image = load_qimage_from_bytes_capped(data)
+                if image is None or image.isNull():
                     logger.error(f"图片数据加载失败: {image_path}")
-                    self.set_loading(False)
+                    self._raster_bridge.load_failed.emit()
                     return
             else:
-                pixmap = QPixmap(image_path)
-                if pixmap.isNull():
+                from utils.safe_image import load_qimage_capped
+
+                image = load_qimage_capped(image_path)
+                if image is None or image.isNull():
                     logger.error(f"图片加载失败: {image_path}")
-                    self.set_loading(False)
+                    self._raster_bridge.load_failed.emit()
                     return
 
-            logger.debug(f"图片加载成功: {pixmap.width()}x{pixmap.height()}")
+            logger.debug(f"图片加载成功: {image.width()}x{image.height()}")
+            target_height = int(current_height * 0.8)
+            image = self._scale_qimage_to_height(image, target_height)
+            logger.debug(f"图片已缩放: {image.width()}x{image.height()}")
 
-            target_height = int(self.height() * 0.8)
-            if pixmap.height() > target_height:
-                ratio = target_height / pixmap.height()
-                new_width = int(pixmap.width() * ratio)
-                pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                logger.debug(f"图片已缩放: {pixmap.width()}x{pixmap.height()}")
-
-            cache_key = f"{img_path_resolved}_{self.height()}"
-            with self._image_cache_lock:
-                self._image_cache[cache_key] = pixmap
-                logger.debug(f"图片已缓存: {cache_key}")
-                if len(self._image_cache) > 200:
-                    oldest_key = next(iter(self._image_cache))
-                    del self._image_cache[oldest_key]
-
-            from PyQt5.QtCore import QTimer
-            QTimer.singleShot(0, lambda: self._update_image_display(pixmap, task_id))
+            cache_key = f"{img_path_resolved}_{current_height}"
+            img_copy = image.copy()
+            self._raster_bridge.commit_image.emit(img_copy, cache_key, task_id)
 
         except Exception as e:
             logger.error(f"异步加载图片失败: {e}")
-            self.set_loading(False)
+            self._raster_bridge.load_failed.emit()
     
     def _update_image_display(self, pixmap: QPixmap, task_id: int):
         """更新图片显示（在主线程中执行）"""
@@ -1197,44 +1519,12 @@ class _ScrollingTextMixin:
             except Exception as e:
                 logger.warning(f"检查图片缓存时出错: {e}")
             
-            # 本地图片直接在主线程加载（稳定性优先，避免子线程 QTimer 回主线程失效导致“只打印开始加载不显示”）
-            if not self._is_image_url(image_path):
-                try:
-                    pixmap = QPixmap(image_path)
-                    if pixmap.isNull():
-                        logger.error(f"本地图片加载失败: {image_path}")
-                        self.set_loading(False)
-                        self._clear_lead_badge_if_not_alert_hint_content()
-                        return True
-                    target_height = int((self.height() if self.height() > 10 else self.config.gui_config.window_height) * 0.8)
-                    if pixmap.height() > target_height:
-                        ratio = target_height / pixmap.height()
-                        new_width = int(pixmap.width() * ratio)
-                        pixmap = pixmap.scaled(new_width, target_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    cache_key_local = f"{str(Path(image_path).resolve())}_{self.height() if self.height() > 10 else self.config.gui_config.window_height}"
-                    with self._image_cache_lock:
-                        self._image_cache[cache_key_local] = pixmap
-                        if len(self._image_cache) > 200:
-                            oldest_key = next(iter(self._image_cache))
-                            del self._image_cache[oldest_key]
-                    self.current_image = pixmap
-                    self._cached_image_width = pixmap.width() + 10
-                    self.set_loading(False)
-                    self._clear_lead_badge_if_not_alert_hint_content()
-                    self.update()
-                    logger.info(f"✓ 本地图片已显示，宽度: {pixmap.width()}px, 高度: {pixmap.height()}px")
-                    return True
-                except Exception as e:
-                    logger.error(f"主线程加载本地图片失败: {e}")
-                    self.set_loading(False)
-                    self._clear_lead_badge_if_not_alert_hint_content()
-                    return True
-
-            # 远程图片 URL 走异步加载
+            # 本地与远程统一异步加载（工作线程 QImage，主线程经信号转 QPixmap）
+            load_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
             logger.info(f"启动异步图片加载线程: {image_path}, task_id: {current_task_id}")
             thread = threading.Thread(
                 target=self._load_image_async,
-                args=(image_path, current_task_id),
+                args=(image_path, current_task_id, load_height),
                 daemon=True,
                 name="ImageLoader"
             )

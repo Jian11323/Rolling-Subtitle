@@ -39,6 +39,9 @@ from config import (
     MMD_HTTP_URL,
     NRCAN_HTTP_URL,
     CENC_HTTP_URL,
+    EQSC_HTTP_MASTER,
+    EQSC_HTTP_SOURCE_KEYS,
+    EQSC_HTTP_URL_TO_SCOPE,
 )
 from adapters import (
     FanStudioHttpAdapter,
@@ -63,6 +66,7 @@ from adapters import (
     MmdAdapter,
     NrcanAdapter,
     CencHttpAdapter,
+    EqscAdapter,
 )
 from utils.logger import get_logger
 
@@ -81,6 +85,9 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     # P2PQuake HTTP：仅由 WebSocketManager 启动时补拉一次，绝不进入持续轮询
     if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in low:
         return False
+    # EQSC 总开关逻辑键不轮询
+    if url == EQSC_HTTP_MASTER or url.rstrip("/") == "https://equake.top":
+        return False
     # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
@@ -88,6 +95,16 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     # 三选一数据源提供者：不属于当前提供者的 HTTP 源不轮询
     if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(lookup_url):
         return False
+    # EQSC 子源：需总开关开启且该 URL 启用；未配置登录密钥则跳过
+    if url in EQSC_HTTP_SOURCE_KEYS or "equake.top" in low:
+        if not bool(config.enabled_sources.get(EQSC_HTTP_MASTER, False)):
+            return False
+        if not bool(config.enabled_sources.get(lookup_url, False)):
+            return False
+        token = (getattr(config.ws_config, "eqsc_login_token", "") or "").strip()
+        if not token:
+            return False
+        return True
     if not config.enabled_sources.get(lookup_url, False):
         return False  # 未启用的数据源直接跳过
     return True
@@ -295,6 +312,9 @@ class HTTPPollingConnection:
                 _silent_none_sources = (
                     'p2pquake', 'p2pquake_tsunami',
                     'fanstudio_typhoon', 'early_est',
+                    'eqsc_jma_eew', 'eqsc_jma_report', 'eqsc_jma_tsunami',
+                    'eqsc_cenc', 'eqsc_cenc_ir', 'eqsc_cwa', 'eqsc_hko',
+                    'eqsc_usgs', 'eqsc_emsc', 'eqsc_typhoon', 'eqsc_volcano',
                 )
                 if empty_data or self.source_name in _silent_none_sources:
                     logger.debug(
@@ -402,6 +422,24 @@ class HTTPPollingManager:
             return NrcanAdapter('nrcan', url)
         if url == CENC_HTTP_URL:
             return CencHttpAdapter('cenc', url)
+        # EQSC HTTP（总开关逻辑键不建连）
+        if url == EQSC_HTTP_MASTER:
+            return None
+        if url in EQSC_HTTP_URL_TO_SCOPE or (
+            isinstance(url, str) and "equake.top" in url.lower()
+            and (".json" in url.lower())
+        ):
+            scope = EQSC_HTTP_URL_TO_SCOPE.get(url)
+            if not scope:
+                path = (url or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+                for u, s in EQSC_HTTP_URL_TO_SCOPE.items():
+                    if u.split("?", 1)[0].endswith(path):
+                        scope = s
+                        break
+            if scope:
+                source_name = self.config.get_source_name(url)
+                return EqscAdapter(source_name, url, http_scope=scope)
+            return None
         # 已下线的 Wolfx HTTP 不提供适配器，跳过
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
@@ -413,7 +451,22 @@ class HTTPPollingManager:
         if not http_urls:
             logger.info("没有启用的HTTP数据源")
             return
-        
+
+        # EQSC 多路轮询前预热 AccessToken，避免冷启动 stampede
+        if any("equake.top" in (u or "").lower() for u in http_urls):
+            login = (getattr(self.config.ws_config, "eqsc_login_token", "") or "").strip()
+            if login:
+                try:
+                    from utils.eqsc_credentials import warm_eqsc_access_token
+
+                    ok, msg = warm_eqsc_access_token(login)
+                    if ok:
+                        logger.info("EQSC AccessToken 预热成功")
+                    else:
+                        logger.warning(f"EQSC AccessToken 预热失败: {msg}")
+                except Exception as e:
+                    logger.warning(f"EQSC AccessToken 预热异常: {e}")
+
         logger.info(f"开始启动 {len(http_urls)} 个HTTP数据源（错开首包间隔 {HTTP_POLL_STARTUP_STAGGER_SEC}s）...")
         self._start_urls(http_urls, stagger=True)
 
@@ -483,6 +536,18 @@ class HTTPPollingManager:
             except Exception as e:
                 logger.error(f"热停止HTTP轮询 {url} 时出错: {e}")
         self._running = True
+        # 热重载时若新增 EQSC 源，同样预热 Token
+        if any("equake.top" in (u or "").lower() for u in desired):
+            login = (getattr(self.config.ws_config, "eqsc_login_token", "") or "").strip()
+            if login:
+                try:
+                    from utils.eqsc_credentials import warm_eqsc_access_token
+
+                    ok, msg = warm_eqsc_access_token(login)
+                    if not ok:
+                        logger.warning(f"EQSC AccessToken 预热失败: {msg}")
+                except Exception as e:
+                    logger.warning(f"EQSC AccessToken 预热异常: {e}")
         self._start_urls(desired, stagger=False)
         self.update_poll_intervals(dict(self.config.http_poll_intervals))
     

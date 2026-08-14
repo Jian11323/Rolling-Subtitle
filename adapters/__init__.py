@@ -34,6 +34,7 @@ from .mmd_adapter import MmdAdapter
 from .nrcan_adapter import NrcanAdapter
 from .cenc_http_adapter import CencHttpAdapter
 from .nowquake_cencint_adapter import NowquakeCencintAdapter
+from .eqsc_adapter import EqscAdapter
 
 __all__ = [
     'BaseAdapter',
@@ -65,4 +66,5 @@ __all__ = [
     'NrcanAdapter',
     'CencHttpAdapter',
     'NowquakeCencintAdapter',
+    'EqscAdapter',
 ]

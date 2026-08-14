@@ -13,48 +13,48 @@ from typing import Optional
 from PyQt5.QtWidgets import QMessageBox, QWidget
 from PyQt5.QtGui import QColor, QPalette
 
-# 浅色滚动条样式表，供 QScrollArea / QTableWidget 等复用
+# 石色滚动条样式表，供 QScrollArea / QTableWidget 等复用
 LIGHT_SCROLLBAR_QSS = """
 QScrollBar:vertical {
-    background: #F5F5F5;
-    width: 12px;
+    background: #F3F1ED;
+    width: 10px;
     margin: 0;
 }
 QScrollBar::handle:vertical {
-    background: #C0C0C0;
-    min-height: 24px;
-    border-radius: 4px;
+    background: #C8C4BC;
+    min-height: 28px;
+    border-radius: 5px;
 }
 QScrollBar::handle:vertical:hover {
-    background: #A0A0A0;
+    background: #A8A49C;
 }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
     height: 0;
 }
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: #F5F5F5;
+    background: #F3F1ED;
 }
 QScrollBar:horizontal {
-    background: #F5F5F5;
-    height: 12px;
+    background: #F3F1ED;
+    height: 10px;
     margin: 0;
 }
 QScrollBar::handle:horizontal {
-    background: #C0C0C0;
-    min-width: 24px;
-    border-radius: 4px;
+    background: #C8C4BC;
+    min-width: 28px;
+    border-radius: 5px;
 }
 QScrollBar::handle:horizontal:hover {
-    background: #A0A0A0;
+    background: #A8A49C;
 }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
     width: 0;
 }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    background: #F5F5F5;
+    background: #F3F1ED;
 }
 QAbstractScrollArea::corner {
-    background: #F5F5F5;
+    background: #F3F1ED;
 }
 """
 
@@ -62,7 +62,7 @@ QAbstractScrollArea::corner {
 def apply_light_palette(
     widget: QWidget,
     bg: str = "#FFFFFF",
-    text: str = "#222222",
+    text: str = "#1F2937",
 ) -> None:
     """为对话框/子窗口设置浅色 QPalette，避免 Win 深色主题下继承黑底。"""
     bg_color = QColor(bg)
@@ -82,9 +82,13 @@ def light_dialog_stylesheet(bg: str = "#FFFFFF") -> str:
     """返回适用于 QDialog 及其常见子控件的浅色背景 stylesheet。"""
     return (
         f"QDialog {{ background-color: {bg}; }}"
-        f"QDialog QLabel {{ background-color: {bg}; }}"
-        f"QDialog QFrame {{ background-color: {bg}; }}"
+        f"QDialog QLabel {{ background-color: transparent; }}"
+        f"QDialog QCheckBox {{ background-color: transparent; }}"
+        f"QDialog QRadioButton {{ background-color: transparent; }}"
+        f"QDialog QFrame {{ background-color: transparent; }}"
         f"QScrollArea {{ background-color: {bg}; border: none; }}"
+        # 仅设置滚动内容根节点，避免裸规则渗到卡片内文字控件
+        f"QScrollArea > QWidget > QWidget#settingsScrollBody {{ background-color: {bg}; }}"
     )
 
 
@@ -99,13 +103,13 @@ def _prepare_message_box(
     msg.setIcon(icon)
     msg.setWindowTitle(title)
     msg.setText(text)
-    apply_light_palette(msg, "#FFFFFF", "#222222")
+    apply_light_palette(msg, "#FFFFFF", "#1F2937")
     msg.setStyleSheet(
         "QMessageBox { background-color: #FFFFFF; }"
-        "QMessageBox QLabel { background-color: #FFFFFF; color: #222222; }"
-        "QMessageBox QPushButton { background-color: #F0F0F0; color: #222222; "
-        "border: 1px solid #CCCCCC; border-radius: 4px; padding: 4px 16px; min-width: 70px; }"
-        "QMessageBox QPushButton:hover { background-color: #E0E0E0; }"
+        "QMessageBox QLabel { background-color: #FFFFFF; color: #1F2937; }"
+        "QMessageBox QPushButton { background-color: #F3F1ED; color: #1F2937; "
+        "border: 1px solid #E5E2DC; border-radius: 8px; padding: 6px 16px; min-width: 70px; }"
+        "QMessageBox QPushButton:hover { background-color: #EAE7E1; }"
     )
     return msg
 
@@ -142,12 +146,12 @@ def show_question(
 def styled_message_box(parent: Optional[QWidget] = None) -> QMessageBox:
     """创建已应用浅色主题的 QMessageBox，供自定义按钮场景使用。"""
     msg = QMessageBox(parent)
-    apply_light_palette(msg, "#FFFFFF", "#222222")
+    apply_light_palette(msg, "#FFFFFF", "#1F2937")
     msg.setStyleSheet(
         "QMessageBox { background-color: #FFFFFF; }"
-        "QMessageBox QLabel { background-color: #FFFFFF; color: #222222; }"
-        "QMessageBox QPushButton { background-color: #F0F0F0; color: #222222; "
-        "border: 1px solid #CCCCCC; border-radius: 4px; padding: 4px 16px; min-width: 70px; }"
-        "QMessageBox QPushButton:hover { background-color: #E0E0E0; }"
+        "QMessageBox QLabel { background-color: #FFFFFF; color: #1F2937; }"
+        "QMessageBox QPushButton { background-color: #F3F1ED; color: #1F2937; "
+        "border: 1px solid #E5E2DC; border-radius: 8px; padding: 6px 16px; min-width: 70px; }"
+        "QMessageBox QPushButton:hover { background-color: #EAE7E1; }"
     )
     return msg

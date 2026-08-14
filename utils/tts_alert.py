@@ -29,8 +29,22 @@ _tts_last_by_event: Dict[str, Dict[str, Any]] = {}
 # 已朗读速报快照（用于速报去重）
 _tts_spoken_reports: list[Dict[str, Any]] = []
 _SPOKEN_REPORTS_MAX = 300
+_TTS_LAST_BY_EVENT_MAX = 500
 _REPORT_TTS_MAX_AGE_SECONDS = 600  # 发震超过 10 分钟的速报不朗读，避免重连/轮询历史刷屏
 _WARNING_TTS_MAX_AGE_SECONDS = 300  # 发震超过 5 分钟的预警不朗读
+
+
+def _prune_tts_last_by_event() -> None:
+    """按记录时间淘汰最旧项，将 _tts_last_by_event 压回上限。"""
+    overflow = len(_tts_last_by_event) - _TTS_LAST_BY_EVENT_MAX
+    if overflow <= 0:
+        return
+    items = sorted(
+        _tts_last_by_event.items(),
+        key=lambda kv: float((kv[1] or {}).get("time") or 0.0),
+    )
+    for key, _ in items[:overflow]:
+        _tts_last_by_event.pop(key, None)
 
 # TTS 重复策略常量
 _TTS_REPEAT_SMART = "smart"
@@ -48,6 +62,7 @@ _SOURCE_NAME_MAP = {
     "wolfx_sc_eew": "四川省地震局",
     "wolfx_fj_eew": "福建省地震局",
     "wolfx_cenc_eew": "中国地震台网",
+    "eqsc_jma_eew": "日本气象厅",
 }
 
 
@@ -248,7 +263,7 @@ def _warning_updates_part(data: Dict[str, Any]) -> str:
     if not updates or updates <= 0:
         return ""
     is_final = bool(data.get("final", False))
-    if is_final and source_type in ("jma", "wolfx_jma_eew", "wolfx_fj_eew"):
+    if is_final and source_type in ("jma", "wolfx_jma_eew", "wolfx_fj_eew", "eqsc_jma_eew"):
         return "最终报"
     return f"第{updates}报"
 
@@ -606,6 +621,7 @@ def _register_tts_seen(
     key = _event_key(pd)
     with _tts_state_lock:
         _tts_last_by_event[key] = _tts_state_record(pd, mag, tier_key, time.time())
+        _prune_tts_last_by_event()
 
 
 def _should_speak_report(parsed_data: Dict[str, Any]) -> bool:
@@ -644,6 +660,7 @@ def _should_speak_event(
 
         if prev is None:
             _tts_last_by_event[key] = record
+            _prune_tts_last_by_event()
             return True
 
         if policy == _TTS_REPEAT_FIRST_ONLY:
@@ -653,6 +670,7 @@ def _should_speak_event(
             if now - float(prev.get("time") or 0) < max(10, cooldown):
                 return False
             _tts_last_by_event[key] = record
+            _prune_tts_last_by_event()
             return True
 
         elapsed = now - float(prev.get("time") or 0)
@@ -663,9 +681,11 @@ def _should_speak_event(
 
         if tier_changed or mag_changed:
             _tts_last_by_event[key] = record
+            _prune_tts_last_by_event()
             return True
         if elapsed >= cooldown:
             _tts_last_by_event[key] = record
+            _prune_tts_last_by_event()
             return True
         return False
 

@@ -32,6 +32,7 @@ from config import (
     WOLFX_JMA_EQLIST_URL,
     EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
+    EQSC_WS_URL,
 )
 from adapters import (
     FanStudioAdapter,  # Fan Studio WebSocket 适配器
@@ -44,6 +45,7 @@ from adapters import (
     EmscWsAdapter,  # EMSC standing_order 适配器
     NowquakeCencintAdapter,  # Nowquake CENC 烈度速报适配器
 )
+from adapters.eqsc_adapter import EqscAdapter, EQSC_DIRECT_SOURCE_TYPES
 from utils.logger import get_logger
 from utils.message_processor import warning_shock_validity_remaining_seconds
 from utils.fanstudio_credentials import (
@@ -63,6 +65,7 @@ HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "emsc": 120,
     "nowquake": 90,  # 服务端约 60s 发一次 heartbeat
     "p2pquake": 120,
+    "eqsc": 45,  # 服务端心跳，客户端需原样回传
 }
 
 
@@ -196,6 +199,8 @@ class WebSocketManager:
         self._fanstudio_awaiting_auth: Dict[str, bool] = {}
         # Fan Studio /all 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
         self._fanstudio_auth_status: Dict[str, Tuple[str, str]] = {}
+        # EQSC 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
+        self._eqsc_auth_status: Dict[str, Tuple[str, str]] = {}
         config = Config()
         self.max_reconnect_attempts = config.ws_config.max_reconnect_attempts  # 最大重连次数
         self.reconnect_interval = config.ws_config.reconnect_interval  # 基础重连间隔
@@ -219,6 +224,8 @@ class WebSocketManager:
             return "nowquake"
         if normalized == P2PQUAKE_WSS_URL or "p2pquake" in normalized:
             return "p2pquake"
+        if "equake.top" in normalized:
+            return "eqsc"
         return "other"
 
     def _ensure_health_entry(self, url: str, source_name: str = "") -> Dict[str, Any]:
@@ -272,7 +279,7 @@ class WebSocketManager:
         entry["heartbeat_state"] = "ok"
 
     async def _check_heartbeat_timeout(self, websocket: Any, url: str, source_name: str):
-        """心跳超时检测与自动 ping（Fan/Wolfx）"""
+        """心跳超时检测与自动 ping（Fan/Wolfx/WeJet；EQSC 仅监控，靠服务端心跳回显）"""
         entry = self._ensure_health_entry(url, source_name)
         timeout_seconds = int(entry.get("timeout_seconds", 0) or 0)
         if timeout_seconds <= 0:
@@ -288,6 +295,7 @@ class WebSocketManager:
         entry["heartbeat_state"] = "timeout"
         entry["timeout_count"] = int(entry.get("timeout_count", 0) or 0) + 1
         source_kind = entry.get("source_kind", "other")
+        # EQSC 需回显服务端 heartbeat，不发客户端 ping
         if source_kind not in ("fanstudio", "wolfx", "whews"):
             return
         # 防止超时后每个循环都发送 ping：最短间隔取阈值一半，至少 10 秒
@@ -340,6 +348,10 @@ class WebSocketManager:
             adapter = NowquakeCencintAdapter('cenc-ir', url)
             adapter._manager_source_type = 'cenc-ir'
             return adapter
+        # EQSC：官方称 WS 不稳定，公开版仅走 HTTP，拒绝建连
+        if (url or "").strip().lower().rstrip("/") == EQSC_WS_URL.strip().lower().rstrip("/"):
+            logger.warning(f"已拒绝连接 EQSC WebSocket（请改用 HTTP 轮询）: {url}")
+            return None
         # 无界科技（WHEWS 主站 / 备用）
         if is_whews_url(url or ""):
             path = (url or "").rstrip("/").split("?")[0].split("/")[-1] or "all"
@@ -390,6 +402,8 @@ class WebSocketManager:
             source_type = parsed_data.get('source_type', '')
             # Wolfx 与 P2PQuake 子源：直接返回 source_type 参与轮播优先级排序。
             if source_type in WOLFX_DIRECT_SOURCE_TYPES:
+                return source_type
+            if source_type in EQSC_DIRECT_SOURCE_TYPES:
                 return source_type
             if source_type in ("ptwc", "emsc", "cenc-ir"):
                 return source_type
@@ -561,7 +575,32 @@ class WebSocketManager:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = await asyncio.to_thread(adapter.parse, data)
                 if parsed_data:
-                    # Wolfx / P2PQuake / EMSC / Nowquake：用 parsed_data 的 source_type 作为 actual_source
+                    # EQSC 烈度列表：详情失败则丢弃薄事件，不入队
+                    if (
+                        parsed_data.get("eqsc_need_intensity_detail")
+                        and parsed_data.get("event_id")
+                        and isinstance(adapter, EqscAdapter)
+                    ):
+                        login_key = (
+                            getattr(Config().ws_config, "eqsc_login_token", "") or ""
+                        ).strip()
+                        detail = None
+                        if login_key:
+                            detail = await asyncio.to_thread(
+                                adapter.fetch_intensity_detail,
+                                str(parsed_data.get("event_id")),
+                                login_key,
+                            )
+                        if detail:
+                            parsed_data = detail
+                        else:
+                            logger.debug(
+                                f"[{source_name}] EQSC CENC IR 详情失败，丢弃列表摘要"
+                            )
+                            parsed_data = None
+                    if not parsed_data:
+                        return
+                    # Wolfx / P2PQuake / EMSC / Nowquake / EQSC：用 parsed_data 的 source_type 作为 actual_source
                     pt = parsed_data.get('source_type', '')
                     direct_sources = WOLFX_DIRECT_SOURCE_TYPES + (
                         'p2pquake',
@@ -569,7 +608,7 @@ class WebSocketManager:
                         'emsc',
                         'cenc-ir',
                     )
-                    if pt and (pt in direct_sources):
+                    if pt and (pt in direct_sources or pt in EQSC_DIRECT_SOURCE_TYPES):
                         actual_source = pt
                     elif parsed_data.get("whews") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -771,6 +810,15 @@ class WebSocketManager:
                         await asyncio.sleep(30)
                         continue
                     # 鉴权不走 URL 参数：建连后立即发送纯文本 token（须在 5 秒内）
+                if self._is_eqsc_url(url):
+                    # 公开版拒绝 EQSC WS；此处不应到达（get_adapter 已 return None）
+                    logger.warning(
+                        f"[{source_name}] EQSC WebSocket 已禁用，跳过连接（请使用 HTTP）"
+                    )
+                    self._eqsc_auth_status[url] = ("none", "EQSC 仅支持 HTTP 轮询")
+                    self.connection_states[url] = "unconnected"
+                    await asyncio.sleep(3600)
+                    continue
                 
                 async with websockets.connect(
                     connect_url,
@@ -960,6 +1008,8 @@ class WebSocketManager:
         self._fanstudio_awaiting_auth.pop(url, None)
         if self._is_fanstudio_all_url(url):
             self._fanstudio_auth_status[url] = ("none", "连接已断开")
+        if self._is_eqsc_url(url):
+            self._eqsc_auth_status[url] = ("none", "连接已断开")
         self.connection_states[url] = "disconnected"
         entry = self._ensure_health_entry(url, source_name)
         entry["heartbeat_state"] = "disconnected"
@@ -1156,6 +1206,20 @@ class WebSocketManager:
             return True
         return normalized.endswith("/all") and "fanstudio" in normalized
 
+    @staticmethod
+    def _is_eqsc_url(url: str) -> bool:
+        """判断是否为 EQSC WebSocket 地址。"""
+        normalized = (url or "").strip().lower().rstrip("/")
+        return normalized == EQSC_WS_URL.strip().lower().rstrip("/")
+
+    def get_eqsc_auth_status(self) -> Tuple[str, str]:
+        """
+        返回 EQSC 鉴权状态。
+
+        公开版仅支持 HTTP，WS 路径已禁用；设置页可据此显示「仅 HTTP」。
+        """
+        return ("none", "EQSC 仅支持 HTTP 轮询")
+
     async def _maybe_send_whews_auth(self, websocket: Any, url: str, source_name: str) -> None:
         """
         WeJet 建连后立即发送纯文本令牌（首帧）。
@@ -1210,7 +1274,8 @@ class WebSocketManager:
         2) whews
         3) p2pquake(wss)
         4) wolfx(all_eew)
-        5) 其他
+        5) eqsc
+        6) 其他
         """
         normalized_url = (url or "").strip().lower().rstrip("/")
         if normalized_url in FANSTUDIO_ALL_URLS:
@@ -1223,6 +1288,8 @@ class WebSocketManager:
             return "p2pquake"
         if normalized_url in WOLFX_URLS:
             return "wolfx"
+        if normalized_url == EQSC_WS_URL.strip().lower().rstrip("/"):
+            return "eqsc"
         if normalized_url == EMSC_WSS_URL:
             return "other"
         if normalized_url == NOWQUAKE_CENCINT_WSS_URL:
@@ -1287,13 +1354,14 @@ class WebSocketManager:
             "whews": [],
             "p2pquake": [],
             "wolfx": [],
+            "eqsc": [],
             "other": [],
         }
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> other
-        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "other")
+        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> eqsc -> other
+        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "eqsc", "other")
         tasks = []
         urls_for_tasks = []
         stagger = float(getattr(config.ws_config, "startup_stagger_seconds", 1.5) or 0.0)
@@ -1419,7 +1487,8 @@ class WebSocketManager:
             "whews": 1,
             "p2pquake": 2,
             "wolfx": 3,
-            "other": 4,
+            "eqsc": 4,
+            "other": 5,
         }
 
         def _start_key(u: str) -> tuple:
@@ -1566,7 +1635,7 @@ class WebSocketManager:
             if self._is_fanstudio_all_url(url):
                 return status
         return ("none", "")
-    
+
     def update_enabled_sources(self, enabled_sources: Dict[str, bool]):
         """
         更新启用的数据源（仅更新标志；完整热启停请用 reload_connections）

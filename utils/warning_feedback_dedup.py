@@ -21,6 +21,20 @@ _PHYSICAL_DEDUP_SEC = 120.0  # 跨源物理去重时间窗口（秒）
 # 多源同时首报（event_id/文案不同）的短时合并窗口
 _BURST_WINDOW_SEC = 3.0
 _MAG_TOLERANCE = 0.5  # 突发合并时震级容差
+_MAX_LAST_BY_EVENT = 500  # event_key 状态表上限，防止长期挂机无限增长
+
+
+def _prune_last_by_event() -> None:
+    """按记录时间淘汰最旧项，将 _last_by_event 压回上限。"""
+    overflow = len(_last_by_event) - _MAX_LAST_BY_EVENT
+    if overflow <= 0:
+        return
+    items = sorted(
+        _last_by_event.items(),
+        key=lambda kv: float((kv[1] or {}).get("time") or 0.0),
+    )
+    for key, _ in items[:overflow]:
+        _last_by_event.pop(key, None)
 
 POLICY_SMART = "smart"
 POLICY_FIRST_RECEIVED = "first_received"
@@ -229,9 +243,11 @@ def _apply_physical_dedup(
         return True
     if _find_physical_duplicate(parsed_data) is not None:
         _last_by_event[key] = record
+        _prune_last_by_event()
         return False
     if _find_burst_duplicate(mag, now):
         _last_by_event[key] = record
+        _prune_last_by_event()
         return False
     return True
 
@@ -336,12 +352,14 @@ def should_play_warning_feedback(
             if not _apply_physical_dedup(parsed_data, record, key, prev, mag, now):
                 return False
             _last_by_event[key] = record
+            _prune_last_by_event()
             _record_physical_play(parsed_data, tier, now)
             return True
 
         if policy_key == POLICY_FIRST_RECEIVED and prev is not None:
             if not _is_duplicate_warning_snapshot(parsed_data, prev, tier, mag):
                 _last_by_event[key] = record
+                _prune_last_by_event()
 
         return False
 
@@ -373,4 +391,5 @@ def register_warning_feedback_seen(
     key = event_key(parsed_data)
     with _state_lock:
         _last_by_event[key] = _state_record(parsed_data, mag, tier, time.time())
+        _prune_last_by_event()
         _record_physical_play(parsed_data, tier, time.time())

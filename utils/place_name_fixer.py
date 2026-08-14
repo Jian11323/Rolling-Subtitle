@@ -11,6 +11,7 @@
 """
 
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +23,26 @@ logger = get_logger()
 
 _REGION_DIR_NAMES = ("Region Fe Fix",)
 _FE_FIX_JSON = "fe_fix_region_data.json"
+
+# 进程内单例：避免每条消息重复读盘加载 fe_fix_region_data.json
+_place_name_fixer: Optional["PlaceNameFixer"] = None
+_place_name_fixer_lock = threading.Lock()
+
+
+def get_place_name_fixer() -> Optional["PlaceNameFixer"]:
+    """懒加载地名修正器单例；初始化失败时返回 None。"""
+    global _place_name_fixer
+    if _place_name_fixer is not None:
+        return _place_name_fixer
+    with _place_name_fixer_lock:
+        if _place_name_fixer is not None:
+            return _place_name_fixer
+        try:
+            _place_name_fixer = PlaceNameFixer()
+        except Exception as e:
+            logger.debug(f"初始化地名修正器失败: {e}")
+            _place_name_fixer = None
+        return _place_name_fixer
 
 
 class PlaceNameFixer:

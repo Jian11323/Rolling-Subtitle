@@ -8,7 +8,8 @@
 
 import json
 import sys
-from typing import Optional, Dict, List, Any
+from array import array
+from typing import Optional, Dict, List, Any, Sequence
 from pathlib import Path
 from utils.logger import get_logger
 from utils.china_place_lookup import lookup_china_place_name
@@ -33,7 +34,9 @@ class RegionNameFixer:
         """
         self.source_type = source_type.lower()
         self.regions: List[Dict] = []
-        self._grid_table: Optional[List[List[int]]] = None
+        self._grid_table: Optional[Sequence[int]] = None
+        self._grid_rows = 0
+        self._grid_cols = 0
         self._grid_names: List[str] = []
         self._loaded = False
         
@@ -131,10 +134,24 @@ class RegionNameFixer:
         names = grid.get("names")
         if not isinstance(table, list) or not table or not isinstance(names, list) or not names:
             return
-        self._grid_table = table
+        if not isinstance(table[0], list) or not table[0]:
+            return
+        rows = len(table)
+        cols = len(table[0])
+        try:
+            flat = array("i")
+            for row in table:
+                flat.extend(int(x) for x in row)
+            if len(flat) != rows * cols:
+                return
+            self._grid_table = flat
+        except (TypeError, ValueError, OverflowError):
+            return
+        self._grid_rows = rows
+        self._grid_cols = cols
         self._grid_names = names
         logger.info(
-            f"已加载 F-E 栅格查表: {len(table)}×{len(table[0])}, 地名 {len(names)} 条"
+            f"已加载 F-E 栅格查表: {rows}×{cols}, 地名 {len(names)} 条"
         )
 
     @staticmethod
@@ -170,13 +187,13 @@ class RegionNameFixer:
         grid.table 存的是 1-based FE 区域号（与 feNumbers 一致）；
         grid.names 为 0-based，names[0] 对应 FE 区域 1。
         """
-        if not self._grid_table or not self._grid_names:
+        if not self._grid_table or not self._grid_names or self._grid_rows <= 0 or self._grid_cols <= 0:
             return None
         row = int(latitude + 90)
         col = int(longitude + 180)
-        row = max(0, min(len(self._grid_table) - 1, row))
-        col = max(0, min(len(self._grid_table[0]) - 1, col))
-        region_id = self._grid_table[row][col]
+        row = max(0, min(self._grid_rows - 1, row))
+        col = max(0, min(self._grid_cols - 1, col))
+        region_id = self._grid_table[row * self._grid_cols + col]
         # 1-based FE 号 -> names 下标
         idx = region_id - 1
         if idx < 0 or idx >= len(self._grid_names):

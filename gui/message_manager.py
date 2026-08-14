@@ -24,6 +24,10 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'fanstudio_typhoon': 2,
     'tsunami': 3,
     '海啸信息': 3,
+    'ntwc': 3,
+    'ptwc': 3,
+    'incois': 3,
+    'jma_tsunami': 3,
     
     # 速报数据源 - 按指定顺序设置优先级
     'cenc': 4,
@@ -54,7 +58,10 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'tmd': 28,
     'mmd': 29,
     'nrcan': 30,
-    'ptwc': 31,
+    'phivolcs': 30,
+    'sgc': 30,
+    'ga': 30,
+    'cenais': 30,
     'fssn': 32,
     'fssn-cmt': 33,
     # 地震预警数据源 - 保持高优先级（优先级0，最高）
@@ -71,9 +78,21 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'wolfx_cenc_eew': 0,
     'wolfx_cq_eew': 0,
     'wolfx_cwa_eew': 0,
+    # EQSC 预警
+    'eqsc_jma_eew': 0,
     # Wolfx 列表速报
     'wolfx_cenc': 4,
     'wolfx_jma_eqlist': 11,
+    'eqsc_cenc': 4,
+    'eqsc_cenc_ir': 4,
+    'eqsc_jma_report': 15,
+    'eqsc_jma_tsunami': 3,
+    'eqsc_cwa': 14,
+    'eqsc_hko': 18,
+    'eqsc_usgs': 19,
+    'eqsc_emsc': 20,
+    'eqsc_typhoon': 2,
+    'eqsc_volcano': 17,
     'early_est': 0,
     # 默认优先级（未知数据源）
     'default': 99,
@@ -84,16 +103,19 @@ SOURCE_FIXED_ORDER: List[str] = [
     # 地震预警（priority=0）
     'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
     'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
+    'eqsc_jma_eew',
     'early_est',
     # 速报
-    'weatheralarm', 'fanstudio_typhoon', 'tsunami', '海啸信息',
-    'cenc', 'cenc-ir', 'wolfx_cenc',
+    'weatheralarm', 'fanstudio_typhoon', 'eqsc_typhoon',
+    'tsunami', '海啸信息', 'ntwc', 'ptwc', 'incois', 'jma_tsunami', 'eqsc_jma_tsunami',
+    'cenc', 'cenc-ir', 'wolfx_cenc', 'eqsc_cenc', 'eqsc_cenc_ir',
     'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan',
     'fujian', 'sichuan', 'shaanxi', 'hubei',
-    'cwa',
-    'p2pquake', 'wolfx_jma_eqlist', 'p2pquake_tsunami', 'jma_volcano',
-    'hko', 'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma',
-    'bmkg', 'geonet', 'ingv', 'tmd', 'mmd', 'nrcan', 'ptwc', 'fssn', 'fssn-cmt',
+    'cwa', 'eqsc_cwa',
+    'p2pquake', 'wolfx_jma_eqlist', 'eqsc_jma_report', 'p2pquake_tsunami', 'jma_volcano', 'eqsc_volcano',
+    'hko', 'eqsc_hko', 'usgs', 'eqsc_usgs', 'emsc', 'eqsc_emsc',
+    'bcsf', 'gfz', 'usp', 'kma',
+    'bmkg', 'geonet', 'ingv', 'tmd', 'mmd', 'nrcan', 'phivolcs', 'sgc', 'ga', 'cenais', 'fssn', 'fssn-cmt',
 ]
 SOURCE_FIXED_ORDER_INDEX: Dict[str, int] = {
     source: idx for idx, source in enumerate(SOURCE_FIXED_ORDER)
