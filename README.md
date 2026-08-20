@@ -28,11 +28,11 @@
 
 ## 数据来源
 
-* 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
+* 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net)
 * 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
-* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、WeJet、Wolfx、Nowquake（烈度速报）
-* 气象预警：[中央气象台](https://www.nmc.cn/)、Fan Studio、WeJet
-* 其他机构速报：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经聚合源或官方直连）
+* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)、[Wolfx](https://wolfx.jp/)、[Nowquake](https://int.nowquake.cn/)
+* 气象预警：[中央气象台](https://www.nmc.cn/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
+* 其他机构速报：[WeJet](https://auth.beecld.com/)：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC
 
 ## 系统要求与性能模式
 
