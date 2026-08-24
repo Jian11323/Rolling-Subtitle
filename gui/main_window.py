@@ -27,24 +27,6 @@ from config import (
     APP_VERSION,
     CHANGELOG_TEXT,
     APP_DECLARATION_TEXT,
-    BMKG_HTTP_URL,
-    GEONET_HTTP_URL,
-    INGV_HTTP_URL,
-    EARLYEST_HTTP_URL,
-    JMA_ATOM_LONG_URL,
-    PTWC_CAP_URL,
-    USGS_HTTP_URL,
-    HKO_HTTP_URL,
-    GFZ_HTTP_URL,
-    USP_HTTP_URL,
-    CWA_REPORT_HTTP_URL,
-    EMSC_HTTP_URL,
-    TMD_HTTP_URL,
-    BCSF_HTTP_URL,
-    KMA_HTTP_URL,
-    MMD_HTTP_URL,
-    NRCAN_HTTP_URL,
-    CENC_HTTP_URL,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
     fanstudio_http_canonical_key,
@@ -52,17 +34,15 @@ from config import (
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
-    EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
-    DATA_PROVIDER_OFFICIAL,
+    wolfx_master_enabled,
+    jian_internal_enabled,
+    any_jian_source_enabled,
 )
-from adapters.fanstudio_adapter import FanStudioAdapter
-from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
-from adapters.eqsc_adapter import EQSC_PARSE_FLAG, EQSC_DIRECT_SOURCE_TYPES
 from data_sources import WebSocketManager, HTTPPollingManager
 from utils.message_processor import MessageProcessor
 from utils.logger import get_logger
@@ -118,6 +98,7 @@ _MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
     "fanstudio",
     "whews",
     "eqsc",
+    "jian",
     "type",
     "event_id",
     "is_tsunami",
@@ -268,8 +249,8 @@ class MainWindow(QMainWindow):
             logger.info("后台任务已启动")
             # 预弹一次右键菜单（离屏并立即隐藏），消化首次 popup 的初始化，避免用户第一次右键时卡顿
             QTimer.singleShot(300, self._warm_up_context_menu)
-            # 预热设置页（导入/字体 + 预创建隐藏窗口），约 1.5s 后完成则首次打开可秒开
-            QTimer.singleShot(1500, self._warm_up_settings_assets)
+            # 仅预热字体列表，不预创建 SettingsWindow（整窗常占数十～上百 MB）
+            QTimer.singleShot(2500, self._warm_up_settings_assets)
             # 更新说明弹窗（每个版本仅展示一次）
             QTimer.singleShot(800, self._show_changelog_if_needed)
             self._setup_system_tray()
@@ -602,31 +583,16 @@ class MainWindow(QMainWindow):
         self._warm_up_settings_assets()
 
     def _warm_up_settings_assets(self):
-        """后台预热设置页：先导入/字体，再分段预创建隐藏窗口，避免一次卡太久。"""
+        """空闲时仅预热字体/文本引擎，不预创建隐藏设置窗（省内存）。"""
         try:
-            from .settings_window import SettingsWindow, prefetch_settings_assets
+            from .settings_window import prefetch_settings_assets
             prefetch_settings_assets()
-            if self.settings_window is not None:
-                return
-            # 先建外观页，让出事件循环后再补其余 Tab
-            self.settings_window = SettingsWindow(self, defer_secondary_tabs=True)
-            self.settings_window.hide()
-            QTimer.singleShot(0, self._warm_up_settings_complete)
         except Exception as e:
-            logger.debug(f"设置页预热失败（可忽略）: {e}")
+            logger.debug(f"设置页字体预热失败（可忽略）: {e}")
 
     def _warm_up_settings_complete(self):
-        """补齐预创建设置窗的其余标签页并保持隐藏。"""
-        try:
-            w = self.settings_window
-            if w is None:
-                return
-            if not getattr(w, "_secondary_tabs_ready", True):
-                w.complete_secondary_tabs()
-            w.hide()
-        except Exception as e:
-            logger.debug(f"设置页预热补齐失败（可忽略）: {e}")
-
+        """兼容旧调用：设置窗改为按需创建，此处为空操作。"""
+        return
     def _warm_up_context_menu(self):
         """预弹右键菜单一次（离屏并立即隐藏），使首次 popup 的初始化在后台完成，避免用户第一次右键时卡顿"""
         try:
@@ -830,7 +796,7 @@ class MainWindow(QMainWindow):
             else:
                 logger.info("HTTP 数据源已按配置热重载")
 
-            # 连接范围变化后清理缓冲：主提供者三选一切换时整表清空，再由新源拉取
+            # 连接范围变化后清理缓冲：主提供者二选一切换时整表清空，再由新源拉取
             prev_provider = getattr(self, "_active_data_provider", None)
             new_provider = self.config.get_active_data_provider()
             provider_switched = (
@@ -1171,7 +1137,7 @@ class MainWindow(QMainWindow):
             logger.error(f"显示更新说明失败: {e}")
     
     def _open_settings(self):
-        """打开设置窗口（首次创建后复用实例；若已预创建则几乎秒开）。"""
+        """打开设置窗口（关闭后销毁以释放内存；再次打开按需重建）。"""
         try:
             from PyQt5.QtWidgets import QApplication
             from .settings_window import SettingsWindow, prefetch_settings_assets
@@ -1183,6 +1149,8 @@ class MainWindow(QMainWindow):
             if first_create:
                 # 先建外观页并立刻显示，再补齐其余 Tab，缩短「点了没反应」的空白期
                 self.settings_window = SettingsWindow(self, defer_secondary_tabs=True)
+                self.settings_window.setAttribute(Qt.WA_DeleteOnClose, True)
+                self.settings_window.destroyed.connect(self._on_settings_window_destroyed)
                 self.settings_window.show()
                 self.settings_window.raise_()
                 self.settings_window.activateWindow()
@@ -1199,6 +1167,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"打开设置窗口失败: {e}")
 
+    def _on_settings_window_destroyed(self, *args):
+        """设置窗关闭销毁后清空引用，便于回收大块 Qt 控件树。"""
+        self.settings_window = None
     def _warning_display_segments(
         self, message: MessageItem
     ) -> Optional[List[Tuple[str, str]]]:
@@ -1959,6 +1930,7 @@ class MainWindow(QMainWindow):
             if not es.get(EQSC_HTTP_MASTER, False):
                 logger.debug("已忽略消息：EQSC 总开关已关闭")
                 return False
+            from adapters.eqsc_adapter import EQSC_PARSE_FLAG
             flag = EQSC_PARSE_FLAG.get(st)
             if flag and not getattr(mc, flag, True):
                 logger.debug(f"已忽略消息：EQSC 子源「{st}」解析已关闭（{flag}=False）")
@@ -1971,6 +1943,7 @@ class MainWindow(QMainWindow):
                 return False
 
         if parsed_data.get("fanstudio") and st:
+            from adapters.fanstudio_adapter import FanStudioAdapter
             flag = FanStudioAdapter.FANSTUDIO_SOURCE_FLAG_FIELD.get(st)
             if flag and not getattr(mc, flag, True):
                 logger.debug(f"已忽略消息：Fan Studio 子源「{st}」解析已关闭（{flag}=False）")
@@ -1982,6 +1955,7 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：WeJet 连接均已关闭")
                 return False
             if st:
+                from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
                 flag = WHEWS_SOURCE_FLAG_FIELD.get(st)
                 if flag and not getattr(mc, flag, True):
                     logger.debug(f"已忽略消息：WeJet 子源「{st}」解析已关闭（{flag}=False）")
@@ -1989,6 +1963,14 @@ class MainWindow(QMainWindow):
             # JMA 情报仅走 P2PQuake；预警（source_type=jma）随主服务
             if st in ("jma_eq",):
                 logger.debug("已忽略消息：WeJet JMA 情报已禁用，请使用 P2PQuake")
+                return False
+
+        if parsed_data.get("jian"):
+            if not any_jian_source_enabled(self.config):
+                logger.debug("已忽略消息：Jian Project 国际源均未启用")
+                return False
+            if st and not jian_internal_enabled(self.config, st):
+                logger.debug(f"已忽略消息：Jian Project 子源「{st}」未启用或解析已关闭")
                 return False
 
         wolfx_all_url = WOLFX_ALL_EEW_URL
@@ -1999,9 +1981,10 @@ class MainWindow(QMainWindow):
             or st == "wolfx_cwa_eew"
             or source_name in ("wolfx_cwa_eew", "wolfx_cenc", "wolfx_cenc_eqlist", "wolfx_jma_eqlist")
         )
-        if is_wolfx_msg and provider != DATA_PROVIDER_OFFICIAL:
-            logger.debug("已忽略消息：当前非官方+Wolfx 提供者")
-            return False
+        if is_wolfx_msg:
+            if not wolfx_master_enabled(es) and not es.get(WOLFX_CWA_EEW_URL, False):
+                logger.debug("已忽略消息：Wolfx 全局辅助源已关闭")
+                return False
         if st == "wolfx_cwa_eew" or source_name == "wolfx_cwa_eew":
             if not es.get(wolfx_cwa_url, False):
                 logger.debug("已忽略消息：Wolfx 台湾中央气象署专线已关闭")
@@ -2015,14 +1998,8 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：Wolfx JMA 地震情報已关闭")
                 return False
         elif st.startswith("wolfx_") or sn.startswith("wolfx_"):
-            if not es.get(wolfx_all_url, True):
+            if not wolfx_master_enabled(es):
                 logger.debug("已忽略消息：Wolfx 聚合预警（all_eew）已关闭")
-                return False
-
-        if st == "emsc" and not parsed_data.get("fanstudio") and not parsed_data.get("whews"):
-            emsc_on = bool(es.get(EMSC_WSS_URL, False) or es.get(EMSC_HTTP_URL, False))
-            if provider != DATA_PROVIDER_OFFICIAL or not emsc_on:
-                logger.debug("已忽略消息：官方 EMSC（WSS/HTTP）已关闭或当前非官方提供者")
                 return False
 
         p2p_wss_url = "wss://api.p2pquake.net/v2/ws"
@@ -2049,41 +2026,6 @@ class MainWindow(QMainWindow):
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
                 logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
                 return False
-
-        http_source_map = {
-            "bmkg": BMKG_HTTP_URL,
-            "geonet": GEONET_HTTP_URL,
-            "ingv": INGV_HTTP_URL,
-            "early_est": EARLYEST_HTTP_URL,
-            "jma_volcano": JMA_ATOM_LONG_URL,
-            "ptwc": PTWC_CAP_URL,
-            "usgs": USGS_HTTP_URL,
-            "hko": HKO_HTTP_URL,
-            "gfz": GFZ_HTTP_URL,
-            "usp": USP_HTTP_URL,
-            "cwa": CWA_REPORT_HTTP_URL,
-            "tmd": TMD_HTTP_URL,
-            "bcsf": BCSF_HTTP_URL,
-            "kma": KMA_HTTP_URL,
-            "mmd": MMD_HTTP_URL,
-            "nrcan": NRCAN_HTTP_URL,
-            "cenc": CENC_HTTP_URL,
-        }
-        # 官方直连 HTTP：未开开关则丢弃；Fan Studio / 无界 / EQSC 同名 source_type 带标记，不走此表
-        if (
-            not parsed_data.get("fanstudio")
-            and not parsed_data.get("whews")
-            and not parsed_data.get("eqsc")
-            and not st.startswith("eqsc_")
-        ):
-            mapped_url = http_source_map.get(st) or http_source_map.get(sn)
-            if mapped_url:
-                if provider != DATA_PROVIDER_OFFICIAL:
-                    logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」不属于当前提供者")
-                    return False
-                if not es.get(mapped_url, False):
-                    logger.debug(f"已忽略消息：HTTP 数据源「{st or sn}」已在设置中关闭")
-                    return False
 
         fanstudio_http_map = {
             "fanstudio_typhoon": FANSTUDIO_TYPHOON_HTTP,
@@ -2300,7 +2242,7 @@ class MainWindow(QMainWindow):
             )
             pd_store = None
             if isinstance(parsed_data, dict):
-                # 始终保留提供者溯源字段，供三选一热切换时清理缓冲、拦截窜数据
+                # 始终保留提供者溯源字段，供主源二选一热切换时清理缓冲、拦截窜数据
                 pd_store = {
                     k: parsed_data[k]
                     for k in _MSG_PROVENANCE_KEYS
@@ -2379,9 +2321,21 @@ class MainWindow(QMainWindow):
                 logger.warning(f"异步生成速报配图失败 ({msg_item.source}): {e}")
             if image_path:
                 def apply_update():
-                    """回主线程：将生成的配图路径写入当前消息项。"""
+                    """回主线程：将生成的配图路径写入当前消息项，并丢掉大体积原始字段。"""
                     msg_item.image_after_text = True
                     self._update_message_image_path(msg_item, image_path)
+                    # 台站列表 / raw_data 仅用于出图，出图后从缓冲中剔除以省内存
+                    pd_keep = msg_item.parsed_data
+                    if isinstance(pd_keep, dict):
+                        for heavy_key in (
+                            "stations",
+                            "station_list",
+                            "StationList",
+                            "raw_data",
+                            "raw",
+                            "intensity_map",
+                        ):
+                            pd_keep.pop(heavy_key, None)
                     logger.info(f"✓ 速报配图已异步生成: {image_path}")
                 QTimer.singleShot(0, apply_update)
 

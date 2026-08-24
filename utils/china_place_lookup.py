@@ -158,7 +158,7 @@ def get_china_place_lookup(index_path: Optional[str] = None) -> ChinaPlaceLookup
 
 
 def preload_china_place_lookup_async() -> None:
-    """后台预加载行政区索引，避免首条消息同步读大 JSON 卡顿。"""
+    """后台预加载行政区索引（可选；默认不在启动调用，以节省常驻内存）。"""
     def _run() -> None:
         try:
             get_china_place_lookup().is_available()
@@ -166,6 +166,13 @@ def preload_china_place_lookup_async() -> None:
             logger.debug(f"预加载中国行政区索引失败（可忽略）: {e}")
 
     threading.Thread(target=_run, daemon=True, name="ChinaPlacePreload").start()
+
+
+def unload_china_place_lookup() -> None:
+    """释放已加载的中国行政区索引。"""
+    global _loader
+    with _loader_lock:
+        _loader = None
 
 
 def lookup_china_place_name(

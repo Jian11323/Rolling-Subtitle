@@ -10,7 +10,9 @@ from typing import Any, Dict, Tuple
 
 from config import (
     DEFAULT_HTTP_POLL_INTERVALS,
-    NEW_HTTP_SOURCE_KEYS,
+    JIAN_SUB_SOURCE_KEYS,
+    JIAN_MASTER_KEY,
+    WOLFX_MASTER_KEY,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     FANSTUDIO_ALL_URL,
@@ -19,7 +21,6 @@ from config import (
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
-    EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
 )
 
@@ -55,15 +56,18 @@ def _base_enabled_sources() -> Dict[str, bool]:
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:  # HTTP 键仅兼容旧配置，永不作为持续轮询源
         sources[url] = False
     sources[TYPHOON_HTTP] = True
-    sources[WOLFX_ALL_EEW_URL] = True
+    sources[WOLFX_ALL_EEW_URL] = False
     sources[WOLFX_CWA_EEW_URL] = False
     sources[WOLFX_CENC_EQLIST_URL] = False
     sources[WOLFX_JMA_EQLIST_URL] = False
-    sources[EMSC_WSS_URL] = False
     sources[NOWQUAKE_CENCINT_WSS_URL] = False
     sources[P2PQUAKE_WSS_URL] = False
-    for url in NEW_HTTP_SOURCE_KEYS:  # 默认关闭国际 HTTP 源
+    for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = False
+    for key in JIAN_SUB_SOURCE_KEYS:
+        sources[key] = False
+    sources[JIAN_MASTER_KEY] = False
+    sources[WOLFX_MASTER_KEY] = False
     return sources
 
 
@@ -73,12 +77,15 @@ def _low_enabled_sources() -> Dict[str, bool]:
     sources[TYPHOON_HTTP] = False
     sources[WOLFX_CWA_EEW_URL] = False
     sources[P2PQUAKE_WSS_URL] = False
-    sources[EMSC_WSS_URL] = False
     sources[NOWQUAKE_CENCINT_WSS_URL] = False
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = False
-    for url in NEW_HTTP_SOURCE_KEYS:
+    for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = False
+    for key in JIAN_SUB_SOURCE_KEYS:
+        sources[key] = False
+    sources[JIAN_MASTER_KEY] = False
+    sources[WOLFX_MASTER_KEY] = False
     return sources
 
 
@@ -88,13 +95,17 @@ def _high_enabled_sources() -> Dict[str, bool]:
     sources[WOLFX_CWA_EEW_URL] = True  # 高配启用台湾 CWA 独立 WebSocket
     sources[WOLFX_CENC_EQLIST_URL] = True
     sources[WOLFX_JMA_EQLIST_URL] = True
-    sources[EMSC_WSS_URL] = True
     sources[NOWQUAKE_CENCINT_WSS_URL] = True
     sources[P2PQUAKE_WSS_URL] = True
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:
         sources[url] = False  # 仍不持续轮询；启动补拉由 WSS 管理器完成
-    for url in NEW_HTTP_SOURCE_KEYS:
-        sources[url] = True
+    for url in P2PQUAKE_HTTP_SOURCE_KEYS:
+        sources[url] = False
+    for key in JIAN_SUB_SOURCE_KEYS:
+        sources[key] = True
+    sources[JIAN_MASTER_KEY] = True
+    sources[WOLFX_MASTER_KEY] = True
+    sources[WOLFX_ALL_EEW_URL] = True
     return sources
 
 
@@ -109,8 +120,8 @@ def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
 def _message_fields_low() -> Dict[str, Any]:
     """低配模式消息相关配置覆盖项。"""
     return {
-        "message_queue_maxsize": 100,
-        "message_buffer_max_size": 50,
+        "message_queue_maxsize": 40,
+        "message_buffer_max_size": 20,
         "enable_china_intensity": False,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": False,
@@ -175,6 +186,18 @@ def _message_fields_low() -> Dict[str, Any]:
         "whews_parse_ga": False,
         "whews_parse_cenais": False,
         "whews_parse_weatheralarm": False,
+        "whews_parse_gsras": False,
+        "whews_parse_bgs": False,
+        "whews_parse_ipma": False,
+        "whews_parse_ssn": False,
+        "whews_parse_afad": False,
+        "whews_parse_sed": False,
+        "whews_parse_noa": False,
+        "whews_parse_scsn": False,
+        "whews_parse_iag": False,
+        "whews_parse_igp": False,
+        "whews_parse_nepal": False,
+        "whews_parse_typhoon": False,
         "ali_all_parse_nied": True,
         "ali_all_parse_early_est": True,
         "ali_all_parse_jma_volcano": False,
@@ -188,8 +211,8 @@ def _message_fields_low() -> Dict[str, Any]:
 def _message_fields_high() -> Dict[str, Any]:
     """高配模式消息相关配置覆盖项。"""
     return {
-        "message_queue_maxsize": 300,
-        "message_buffer_max_size": 100,
+        "message_queue_maxsize": 80,
+        "message_buffer_max_size": 40,
         "enable_china_intensity": True,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": True,
@@ -254,6 +277,18 @@ def _message_fields_high() -> Dict[str, Any]:
         "whews_parse_ga": True,
         "whews_parse_cenais": True,
         "whews_parse_weatheralarm": True,
+        "whews_parse_gsras": True,
+        "whews_parse_bgs": True,
+        "whews_parse_ipma": True,
+        "whews_parse_ssn": True,
+        "whews_parse_afad": True,
+        "whews_parse_sed": True,
+        "whews_parse_noa": True,
+        "whews_parse_scsn": True,
+        "whews_parse_iag": True,
+        "whews_parse_igp": True,
+        "whews_parse_nepal": True,
+        "whews_parse_typhoon": False,
         "ali_all_parse_nied": True,
         "ali_all_parse_early_est": True,
         "ali_all_parse_jma_volcano": True,
@@ -274,6 +309,8 @@ def _gui_fields_low() -> Dict[str, Any]:
         "toast_notifications_enabled": False,
         "minimize_to_tray": False,
         "auto_update_check_on_startup": False,
+        "image_cache_max": 8,
+        "text_texture_cache_max": 6,
     }
 
 
@@ -282,11 +319,13 @@ def _gui_fields_high() -> Dict[str, Any]:
     return {
         "render_backend": "opengl",
         "use_gpu_rendering": True,
-        "target_fps": 60,
+        "target_fps": 30,
         "vsync_enabled": True,
         "toast_notifications_enabled": True,
         "minimize_to_tray": True,
         "auto_update_check_on_startup": True,
+        "image_cache_max": 16,
+        "text_texture_cache_max": 10,
     }
 
 
@@ -350,13 +389,16 @@ def get_preset_payload(mode: str) -> Dict[str, Any]:
             "gui": {
                 "render_backend": "cpu",
                 "use_gpu_rendering": False,
-                "target_fps": 60,
+                "target_fps": 30,
                 "vsync_enabled": True,
                 "toast_notifications_enabled": False,
                 "minimize_to_tray": False,
                 "auto_update_check_on_startup": True,
             },
-            "message": {},
+            "message": {
+                "message_queue_maxsize": 100,
+                "message_buffer_max_size": 40,
+            },
             "alert": {},
             "translation": {},
             "enabled_sources": _base_enabled_sources(),
@@ -438,6 +480,18 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "whews_parse_ga", True),
         getattr(mc, "whews_parse_cenais", True),
         getattr(mc, "whews_parse_weatheralarm", True),
+        getattr(mc, "whews_parse_gsras", True),
+        getattr(mc, "whews_parse_bgs", True),
+        getattr(mc, "whews_parse_ipma", True),
+        getattr(mc, "whews_parse_ssn", True),
+        getattr(mc, "whews_parse_afad", True),
+        getattr(mc, "whews_parse_sed", True),
+        getattr(mc, "whews_parse_noa", True),
+        getattr(mc, "whews_parse_scsn", True),
+        getattr(mc, "whews_parse_iag", True),
+        getattr(mc, "whews_parse_igp", True),
+        getattr(mc, "whews_parse_nepal", True),
+        getattr(mc, "whews_parse_typhoon", True),
         getattr(mc, "ali_all_parse_nied", True),
         getattr(mc, "ali_all_parse_early_est", True),
         getattr(mc, "ali_all_parse_jma_volcano", True),
@@ -593,7 +647,8 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
         config.enabled_sources[url] = enabled
 
     config._sync_p2pquake_http_with_wss()
-    config._ensure_new_http_source_defaults()
+    config._ensure_jian_source_defaults()
+    config._ensure_wolfx_source_defaults()
 
     poll_overrides = payload.get("http_poll_intervals") or {}
     for url, interval in poll_overrides.items():

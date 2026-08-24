@@ -7,7 +7,7 @@ WebSocket：wss://equake.top:50023/
 HTTP：https://equake.top/<scope>.json（需 AccessToken）
 文档：https://equake.top/apidocs
 
-作为全局辅助数据源（非主提供者），可与 Fan Studio / WeJet / 官方+Wolfx 并存。
+作为全局辅助数据源（非主提供者），可与 Fan Studio / WeJet 及 Jian Project 等并存。
 """
 
 from __future__ import annotations

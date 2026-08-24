@@ -5,6 +5,8 @@ WebSocket连接管理器
 负责管理所有WebSocket数据源的连接、消息接收和发送
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
@@ -26,26 +28,15 @@ from config import (
     WHEWS_WS_URLS,
     is_whews_url,
     is_whews_dedicated_endpoint,
+    is_jian_project_url,
+    JIAN_PROJECT_ALL_URL,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
-    EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_WS_URL,
 )
-from adapters import (
-    FanStudioAdapter,  # Fan Studio WebSocket 适配器
-    P2PQuakeWebSocketAdapter,  # P2PQuake WSS 适配器
-    CustomAdapter,  # 自定义 WebSocket 适配器
-    P2PQuakeAdapter,  # P2PQuake 551 地震情报适配器
-    P2PQuakeTsunamiAdapter,  # P2PQuake 552 海啸预报适配器
-    WolfxAdapter,  # Wolfx 聚合预警适配器
-    WhewsAdapter,  # 无界科技适配器
-    EmscWsAdapter,  # EMSC standing_order 适配器
-    NowquakeCencintAdapter,  # Nowquake CENC 烈度速报适配器
-)
-from adapters.eqsc_adapter import EqscAdapter, EQSC_DIRECT_SOURCE_TYPES
 from utils.logger import get_logger
 from utils.message_processor import warning_shock_validity_remaining_seconds
 from utils.fanstudio_credentials import (
@@ -61,8 +52,8 @@ P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "fanstudio": 45,
     "whews": 90,
+    "jian": 90,
     "wolfx": 90,
-    "emsc": 120,
     "nowquake": 90,  # 服务端约 60s 发一次 heartbeat
     "p2pquake": 120,
     "eqsc": 45,  # 服务端心跳，客户端需原样回传
@@ -216,10 +207,10 @@ class WebSocketManager:
             return "fanstudio"
         if is_whews_url(normalized):
             return "whews"
+        if is_jian_project_url(normalized):
+            return "jian"
         if normalized in WOLFX_URLS:
             return "wolfx"
-        if normalized == EMSC_WSS_URL:
-            return "emsc"
         if normalized == NOWQUAKE_CENCINT_WSS_URL:
             return "nowquake"
         if normalized == P2PQUAKE_WSS_URL or "p2pquake" in normalized:
@@ -327,6 +318,7 @@ class WebSocketManager:
         """
         # Wolfx：除 CWA 专线外一律走 all_eew（列表速报亦经聚合端）
         if 'ws-api.wolfx.jp' in url:
+            from adapters.wolfx_adapter import WolfxAdapter
             normalized = url.rstrip('/').lower()
             if normalized.endswith('/all_eew'):
                 adapter = WolfxAdapter('wolfx_all_eew', url)
@@ -338,13 +330,9 @@ class WebSocketManager:
                 return adapter
             # 旧专线 URL 不再建连；若仍出现在配置中则跳过
             return None
-        # EMSC standing_order
-        if (url or "").strip().lower().rstrip("/") == EMSC_WSS_URL:
-            adapter = EmscWsAdapter('emsc', url)
-            adapter._manager_source_type = 'emsc'
-            return adapter
         # Nowquake CENC 烈度速报
         if (url or "").strip().lower().rstrip("/") == NOWQUAKE_CENCINT_WSS_URL:
+            from adapters.nowquake_cencint_adapter import NowquakeCencintAdapter
             adapter = NowquakeCencintAdapter('cenc-ir', url)
             adapter._manager_source_type = 'cenc-ir'
             return adapter
@@ -354,12 +342,20 @@ class WebSocketManager:
             return None
         # 无界科技（WHEWS 主站 / 备用）
         if is_whews_url(url or ""):
+            from adapters.whews_adapter import WhewsAdapter
             path = (url or "").rstrip("/").split("?")[0].split("/")[-1] or "all"
             adapter = WhewsAdapter(f"whews_{path}", url)
             adapter._manager_source_type = "whews_all" if path == "all" else f"whews_{path}"
             return adapter
+        # Jian Project 国际源聚合
+        if is_jian_project_url(url or ""):
+            from adapters.jian_project_adapter import JianProjectAdapter
+            adapter = JianProjectAdapter("jian", url)
+            adapter._manager_source_type = "jian_all"
+            return adapter
         # 检查是否为Fan Studio数据源（公开版仅允许 /all）
         if 'fanstudio.tech' in url:
+            from adapters.fanstudio_adapter import FanStudioAdapter
             parts = url.split('/')
             source_type = parts[-1] if parts[-1] else parts[-2]
             if (source_type or '').lower() != 'all':
@@ -370,6 +366,7 @@ class WebSocketManager:
             return adapter
         # P2PQuake WebSocket（仅解析 551、552）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
+            from adapters.p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
             adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
             adapter._manager_source_type = 'p2pquake_ws'
             return adapter
@@ -377,6 +374,7 @@ class WebSocketManager:
         config = Config()
         if config.custom_data_source_url and url == config.custom_data_source_url:
             if url.startswith('ws://') or url.startswith('wss://'):
+                from adapters.custom_adapter import CustomAdapter
                 adapter = CustomAdapter('custom', url)
                 adapter._manager_source_type = 'custom'
                 return adapter
@@ -403,12 +401,15 @@ class WebSocketManager:
             # Wolfx 与 P2PQuake 子源：直接返回 source_type 参与轮播优先级排序。
             if source_type in WOLFX_DIRECT_SOURCE_TYPES:
                 return source_type
+            from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
             if source_type in EQSC_DIRECT_SOURCE_TYPES:
                 return source_type
             if source_type in ("ptwc", "emsc", "cenc-ir"):
                 return source_type
             if source_type:
                 if parsed_data.get('whews'):
+                    return source_type
+                if parsed_data.get('jian') and source_type:
                     return source_type
                 return config.get_source_name(fanstudio_ws_url(source_type))
             
@@ -571,6 +572,35 @@ class WebSocketManager:
                         parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                         _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
+            elif data_source_type == "jian_all":
+                msg_type = ""
+                if isinstance(data, dict):
+                    msg_type = str(data.get("type", "")).strip().lower()
+                if isinstance(data, dict) and msg_type == "all":
+                    logger.info(f"[{source_name}] 收到 Jian Project 聚合快照")
+                    all_parsed_data = await asyncio.to_thread(
+                        adapter.parse_all_sources, data
+                    )
+                elif isinstance(data, list):
+                    logger.info(f"[{source_name}] 收到 Jian Project 批量帧，共 {len(data)} 条")
+                    all_parsed_data = await asyncio.to_thread(
+                        adapter.parse_all_sources, data
+                    )
+                elif isinstance(data, dict) and msg_type.endswith("_response"):
+                    all_parsed_data = await asyncio.to_thread(
+                        adapter.parse_all_sources, data
+                    )
+                else:
+                    one = await asyncio.to_thread(adapter.parse, data)
+                    all_parsed_data = [one] if one else []
+                for parsed_data in all_parsed_data:
+                    if parsed_data:
+                        actual_source = self._get_source_name_from_data(
+                            parsed_data, source_name
+                        )
+                        _dispatch_parsed_message(
+                            self, parsed_data, actual_source, source_name
+                        )
             else:
                 # 普通解析（包括 update 类型、NIED、P2PQuake）
                 parsed_data = await asyncio.to_thread(adapter.parse, data)
@@ -579,25 +609,26 @@ class WebSocketManager:
                     if (
                         parsed_data.get("eqsc_need_intensity_detail")
                         and parsed_data.get("event_id")
-                        and isinstance(adapter, EqscAdapter)
                     ):
-                        login_key = (
-                            getattr(Config().ws_config, "eqsc_login_token", "") or ""
-                        ).strip()
-                        detail = None
-                        if login_key:
-                            detail = await asyncio.to_thread(
-                                adapter.fetch_intensity_detail,
-                                str(parsed_data.get("event_id")),
-                                login_key,
-                            )
-                        if detail:
-                            parsed_data = detail
-                        else:
-                            logger.debug(
-                                f"[{source_name}] EQSC CENC IR 详情失败，丢弃列表摘要"
-                            )
-                            parsed_data = None
+                        from adapters.eqsc_adapter import EqscAdapter
+                        if isinstance(adapter, EqscAdapter):
+                            login_key = (
+                                getattr(Config().ws_config, "eqsc_login_token", "") or ""
+                            ).strip()
+                            detail = None
+                            if login_key:
+                                detail = await asyncio.to_thread(
+                                    adapter.fetch_intensity_detail,
+                                    str(parsed_data.get("event_id")),
+                                    login_key,
+                                )
+                            if detail:
+                                parsed_data = detail
+                            else:
+                                logger.debug(
+                                    f"[{source_name}] EQSC CENC IR 详情失败，丢弃列表摘要"
+                                )
+                                parsed_data = None
                     if not parsed_data:
                         return
                     # Wolfx / P2PQuake / EMSC / Nowquake / EQSC：用 parsed_data 的 source_type 作为 actual_source
@@ -608,9 +639,12 @@ class WebSocketManager:
                         'emsc',
                         'cenc-ir',
                     )
+                    from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
                     if pt and (pt in direct_sources or pt in EQSC_DIRECT_SOURCE_TYPES):
                         actual_source = pt
                     elif parsed_data.get("whews") and pt:
+                        actual_source = self._get_source_name_from_data(parsed_data, source_name)
+                    elif parsed_data.get("jian") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -861,8 +895,10 @@ class WebSocketManager:
                         )
 
                     # Nowquake：建连后 HTTP 拉取最新一条烈度速报（仅一次，后续靠 WS 推送）
-                    if norm_url == NOWQUAKE_CENCINT_WSS_URL and isinstance(adapter, NowquakeCencintAdapter):
-                        await self._nowquake_bootstrap_latest(adapter, source_name)
+                    if norm_url == NOWQUAKE_CENCINT_WSS_URL:
+                        from adapters.nowquake_cencint_adapter import NowquakeCencintAdapter
+                        if isinstance(adapter, NowquakeCencintAdapter):
+                            await self._nowquake_bootstrap_latest(adapter, source_name)
                     
                     # 创建发送队列（如果不存在）
                     if url not in self._send_queues:
@@ -1140,6 +1176,8 @@ class WebSocketManager:
                     logger.info("[p2pquake] 启动前 HTTP 无返回记录")
                     return
 
+                from adapters.p2pquake_adapter import P2PQuakeAdapter
+                from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
                 eq_adapter = P2PQuakeAdapter("p2pquake", P2PQUAKE_HISTORY_URL)
                 tsu_adapter = P2PQuakeTsunamiAdapter("p2pquake_tsunami", P2PQUAKE_HISTORY_URL)
                 eq_count = 0
@@ -1290,13 +1328,11 @@ class WebSocketManager:
             return "wolfx"
         if normalized_url == EQSC_WS_URL.strip().lower().rstrip("/"):
             return "eqsc"
-        if normalized_url == EMSC_WSS_URL:
-            return "other"
         if normalized_url == NOWQUAKE_CENCINT_WSS_URL:
             return "other"
         return "other"
     
-    async def _nowquake_bootstrap_latest(self, adapter: NowquakeCencintAdapter, source_name: str):
+    async def _nowquake_bootstrap_latest(self, adapter: Any, source_name: str):
         """Nowquake 建连后拉取最新烈度速报并下发（抑制 TTS）。"""
         try:
             parsed = await asyncio.to_thread(adapter.fetch_latest_event)

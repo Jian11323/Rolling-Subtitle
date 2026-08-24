@@ -141,14 +141,24 @@ def main():
         except Exception as e:
             logger.warning(f"单实例检测异常（已忽略）: {e}")
 
-        # 设置应用程序图标（用于任务栏和窗口标题栏）
-        # 使用try-except包装，避免文件系统操作阻塞
+        # 设置应用程序图标（任务栏/标题栏）；ico 体积大时只取常用尺寸，避免整文件解码进内存
         try:
-            from PyQt5.QtGui import QIcon
+            from PyQt5.QtCore import Qt as _Qt
+            from PyQt5.QtGui import QIcon, QPixmap
             icon_path = os.path.join(os.path.dirname(__file__), 'logo', 'icon.ico')
             try:
                 if os.path.exists(icon_path):
-                    app.setWindowIcon(QIcon(icon_path))
+                    icon = QIcon()
+                    full = QPixmap(icon_path)
+                    if not full.isNull():
+                        for edge in (16, 32, 48, 256):
+                            icon.addPixmap(
+                                full.scaled(edge, edge, _Qt.KeepAspectRatio, _Qt.SmoothTransformation)
+                            )
+                        del full
+                    else:
+                        icon = QIcon(icon_path)
+                    app.setWindowIcon(icon)
                     logger.info(f"已设置应用程序图标: {icon_path}")
                 else:
                     logger.debug(f"图标文件不存在: {icon_path}")
@@ -193,12 +203,7 @@ def main():
         from PyQt5.QtCore import QTimer
         QTimer.singleShot(100, load_translator_async)
 
-        # 后台预加载中国行政区索引，避免首条国内速报同步读盘卡顿
-        try:
-            from utils.china_place_lookup import preload_china_place_lookup_async
-            QTimer.singleShot(200, preload_china_place_lookup_async)
-        except Exception as e:
-            logger.debug(f"调度行政区索引预加载失败（可忽略）: {e}")
+        # 中国行政区索引约 3.7MB JSON，展开后常占数十 MB：改为首次查表时懒加载，不在启动预载
 
         # 打包版：启动时检查更新（用户确认后退出进程，由独立 bat 静默安装/解压并启动新版本）
         try:
