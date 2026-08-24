@@ -4,7 +4,7 @@
   "channel": "stable",
   "installer": {
     "url": "https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe",
-    "sha256": "d4d2e3e37f92f241b03b8afe62d9d449585208614ca3558ff18c8cbba705d99f",
+    "sha256": "5dcfd2e84e781feff3e3e2961aafbd1fadbbc239ff28628efe9319bcd3c29d3b",
     "user_interface": "progress"
   },
   "release_notes_url": ""
