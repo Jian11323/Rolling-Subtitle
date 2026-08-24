@@ -8,6 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
+from utils.memory_policy import (
+    GUI_CACHE_LIMITS,
+    PERFORMANCE_MODE_HIGH as _MP_HIGH,
+    PERFORMANCE_MODE_LOW as _MP_LOW,
+    PERFORMANCE_MODE_STANDARD as _MP_STD,
+    QUEUE_BUFFER_LIMITS,
+)
 from config import (
     DEFAULT_HTTP_POLL_INTERVALS,
     JIAN_SUB_SOURCE_KEYS,
@@ -38,9 +45,9 @@ PERFORMANCE_MODES: Tuple[str, ...] = (
 )
 
 PERFORMANCE_MODE_LABELS: Dict[str, str] = {
-    PERFORMANCE_MODE_LOW: "低配模式",
-    PERFORMANCE_MODE_STANDARD: "标准模式",
-    PERFORMANCE_MODE_HIGH: "高配模式",
+    PERFORMANCE_MODE_LOW: "低配模式（目标 ≤50MB）",
+    PERFORMANCE_MODE_STANDARD: "标准模式（目标 ≤80MB）",
+    PERFORMANCE_MODE_HIGH: "高配模式（OpenGL 全开，目标 ≤120MB）",
     PERFORMANCE_MODE_CUSTOM: "自定义（未跟随预设）",
 }
 
@@ -120,8 +127,7 @@ def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
 def _message_fields_low() -> Dict[str, Any]:
     """低配模式消息相关配置覆盖项。"""
     return {
-        "message_queue_maxsize": 40,
-        "message_buffer_max_size": 20,
+        **QUEUE_BUFFER_LIMITS[_MP_LOW],
         "enable_china_intensity": False,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": False,
@@ -205,14 +211,18 @@ def _message_fields_low() -> Dict[str, Any]:
         "ali_all_parse_cq_eew": True,
         "p2pquake_parse_551": True,
         "p2pquake_parse_552": False,
+        "jian_parse_cea": True,
+        "jian_parse_cwa_eew": True,
+        "jian_parse_jma_eew": True,
+        "jian_parse_sa": True,
+        "jian_parse_early_est": True,
     }
 
 
 def _message_fields_high() -> Dict[str, Any]:
     """高配模式消息相关配置覆盖项。"""
     return {
-        "message_queue_maxsize": 80,
-        "message_buffer_max_size": 40,
+        **QUEUE_BUFFER_LIMITS[_MP_HIGH],
         "enable_china_intensity": True,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": True,
@@ -296,12 +306,18 @@ def _message_fields_high() -> Dict[str, Any]:
         "ali_all_parse_cq_eew": True,
         "p2pquake_parse_551": True,
         "p2pquake_parse_552": True,
+        "jian_parse_cea": True,
+        "jian_parse_cwa_eew": True,
+        "jian_parse_jma_eew": True,
+        "jian_parse_sa": True,
+        "jian_parse_early_est": True,
     }
 
 
 def _gui_fields_low() -> Dict[str, Any]:
     """低配模式 GUI 相关配置覆盖项。"""
     return {
+        **GUI_CACHE_LIMITS[_MP_LOW],
         "render_backend": "cpu",
         "use_gpu_rendering": False,
         "target_fps": 30,
@@ -309,23 +325,20 @@ def _gui_fields_low() -> Dict[str, Any]:
         "toast_notifications_enabled": False,
         "minimize_to_tray": False,
         "auto_update_check_on_startup": False,
-        "image_cache_max": 8,
-        "text_texture_cache_max": 6,
     }
 
 
 def _gui_fields_high() -> Dict[str, Any]:
-    """高配模式 GUI 相关配置覆盖项。"""
+    """高配模式：OpenGL + 60fps，纹理缓存收紧以尽量压到 ≤120MB。"""
     return {
+        **GUI_CACHE_LIMITS[_MP_HIGH],
         "render_backend": "opengl",
         "use_gpu_rendering": True,
-        "target_fps": 30,
+        "target_fps": 60,
         "vsync_enabled": True,
         "toast_notifications_enabled": True,
         "minimize_to_tray": True,
         "auto_update_check_on_startup": True,
-        "image_cache_max": 16,
-        "text_texture_cache_max": 10,
     }
 
 
@@ -387,18 +400,16 @@ def get_preset_payload(mode: str) -> Dict[str, Any]:
     if mode == PERFORMANCE_MODE_STANDARD:
         return {
             "gui": {
+                **GUI_CACHE_LIMITS[_MP_STD],
                 "render_backend": "cpu",
                 "use_gpu_rendering": False,
-                "target_fps": 30,
+                "target_fps": 60,
                 "vsync_enabled": True,
                 "toast_notifications_enabled": False,
                 "minimize_to_tray": False,
                 "auto_update_check_on_startup": True,
             },
-            "message": {
-                "message_queue_maxsize": 100,
-                "message_buffer_max_size": 40,
-            },
+            "message": dict(QUEUE_BUFFER_LIMITS[_MP_STD]),
             "alert": {},
             "translation": {},
             "enabled_sources": _base_enabled_sources(),
@@ -492,6 +503,11 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "whews_parse_igp", True),
         getattr(mc, "whews_parse_nepal", True),
         getattr(mc, "whews_parse_typhoon", True),
+        getattr(mc, "jian_parse_cea", True),
+        getattr(mc, "jian_parse_cwa_eew", True),
+        getattr(mc, "jian_parse_jma_eew", True),
+        getattr(mc, "jian_parse_sa", True),
+        getattr(mc, "jian_parse_early_est", True),
         getattr(mc, "ali_all_parse_nied", True),
         getattr(mc, "ali_all_parse_early_est", True),
         getattr(mc, "ali_all_parse_jma_volcano", True),
@@ -656,6 +672,7 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
     config._ensure_http_poll_interval_defaults()
 
     config.gui_config.performance_mode = mode
+    config._clamp_resource_limits_for_performance_mode()
     config.gui_config.validate()
     config.message_config.validate()
     config.alert_config.validate()

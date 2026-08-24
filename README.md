@@ -1,76 +1,146 @@
 # 地震预警及情报实况栏
 
+
+
 > [!NOTE]
-> **当前版本：2.8.1**。主数据源支持 **Fan Studio / WeJet 二选一**；国际速报经 **Jian Project** WebSocket（api.sismotide.top）推送。全局辅助源含 **Wolfx**、**EQSC**（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等。WeJet 主站 api.beecld.com，备站 api.2v8.cn（含 CEA）。外观支持自定义背景与无边框模式。
+
+> **当前版本：2.8.2**。主数据源支持 **Fan Studio / WeJet / Jian Project 三选一**；**Fan Studio、WeJet、Jian Project、Wolfx、EQSC** 可勾选为辅助源并行。WeJet 主站 api.beecld.com，备站 api.2v8.cn（含 CEA）。外观支持自定义背景与无边框模式。
+
+
 
 > [!WARNING]
+
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
 
+
+
 > [!NOTE]
+
 > **安全提示**：本软件会连接外部数据源以获取地震、海啸、火山、气象等实时信息，请从可信渠道下载使用。若被杀毒软件或安全软件拦截（如误报联网行为），可将本程序添加至信任名单；如有疑虑或问题，请联系我们（QQ群：947523679 / 邮箱：jian0786@foxmail.com）。
+
+
 
 ## 简介
 
+
+
 地震预警及情报实况栏（Rolling Subtitle）是一款 Windows 桌面端滚动字幕工具：通过 WebSocket / HTTP 聚合多个数据源，在屏幕上实时展示地震预警、速报、海啸、火山及气象等信息，并可选音效 / TTS / 系统通知反馈。程序基于 **PyQt5**。
+
+
 
 使用说明见 Wiki：[GitHub](https://github.com/Jian11323/Rolling-Subtitle/wiki) · [Gitee](https://gitee.com/jian0786/Rolling-Subtitle/wikis)
 
+
+
 ## 功能
 
+
+
 * 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
-* **主数据源二选一**：Fan Studio / WeJet（切换时清空缓冲并重新拉取）
-* 全局辅助源：Jian Project（国际速报）、Wolfx、EQSC（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一主提供者并用
-* 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
+
+* **主数据源三选一**：Fan Studio / WeJet / Jian Project（切换时清空缓冲并重新拉取）
+
+* **辅助数据源**：Fan Studio、WeJet、Jian Project、Wolfx、EQSC（equake.top）等可并行启用
+
+* 全局辅助源：台风、CENC 烈度速报（Nowquake）、P2PQuake 等
+
+* 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
+
 * 可自定义界面样式与颜色；支持音效、TTS、NHK/JMA 独立音效与系统通知
+
 * **性能模式**：低配 / 标准 / 高配一键预设（调整渲染、数据源与告警负载），保存后热重载
+
 * 完整的日志记录；打包版支持自动检查更新
+
 * **预估烈度与告警序列**：达到触发条件时左侧「地震预警」闪烁，提示期展示安全提示后切回纯预警条文
+
+
 
 ## 数据来源
 
+
+
 * 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
-* 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
-* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、WeJet、Wolfx、Nowquake（烈度速报）
+
+* 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)、[Jian Project](https://api.sismotide.top/)
+
+* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、WeJet、Jian Project、Wolfx、Nowquake（烈度速报）
+
 * 气象预警：[中央气象台](https://www.nmc.cn/)、Fan Studio、WeJet
-* 其他机构速报：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
+
+* 其他机构速报：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
+
+
 
 ## 系统要求与性能模式
 
+
+
 ### 最低配置（低配模式）
+
+
 
 适用于老旧或低性能电脑（如双核 CPU、4 GB 内存、无独立显卡）：
 
+
+
 | 项目 | 建议 |
+
 |------|------|
+
 | 操作系统 | Windows 10 及以上 |
+
 | 内存 | 4 GB 及以上 |
+
 | 网络 | 稳定宽带（仅需连接 Fan Studio 或 WeJet 等核心聚合源） |
+
 | 软件设置 | 设置 → 外观与显示 → 性能与渲染 → 选择 **低配模式** 并点击 **应用性能模式** |
 
-低配模式会：使用 CPU 软件渲染、30 fps、关闭闪烁/音效/Toast、减少同时连接的数据源与 HTTP 轮询频率。**地震预警显示能力保留**，主要降低 CPU、内存与网络负载。
+
+
+低配模式会：使用 CPU 软件渲染、30 fps、关闭 Toast、仅连接主源、跳过启动快照灌入、缩小消息缓冲。**目标常驻内存约 ≤50MB**（任务管理器 Working Set 量级）。
 
 ### 推荐配置（标准 / 高配）
 
-| 模式 | 适用场景 |
-|------|----------|
-| **标准模式** | 大多数电脑；与程序默认配置接近（CPU 渲染 60 fps、常用数据源） |
-| **高配模式** | 性能较好的电脑；启用 OpenGL 渲染、更全的数据源、告警闪烁与系统通知 |
+| 模式 | 适用场景 | 内存目标 |
+|------|----------|----------|
+| **标准模式** | 大多数电脑；CPU 60fps，单主源 + 台风等常用辅助 | 约 ≤80MB |
+| **高配模式** | OpenGL 60fps；全开辅助源（Fan Studio / WeJet / Jian / Wolfx / EQSC 等并行） | 约 ≤120MB |
 
-应用性能模式后立即热重载生效。手动修改单项设置后，性能模式下拉框会显示「自定义（未跟随预设）」。
+应用性能模式后立即热重载生效。手动修改单项设置后，性能模式下拉框会显示「自定义（未跟随预设）」；自定义档队列/缓冲上限不超过高配档。
+
+
 
 ## 许可证
 
+
+
 本项目采用 [GNU GPLv3](LICENSE) 开源协议
+
+
 
 ## 开源声明与免责声明
 
+
+
 为尽可能避免本项目被用于违法或恶意目的，维护者在此郑重声明如下法律立场（下列条款构成对使用者的明确约定）：
 
+
+
 - **用途限制**：本项目仅供研究、教学、应急演练、灾害防范与减灾等合法、正当用途。任何将本项目用于违法、侵权、危害他人安全或其他恶意用途的行为均被明确禁止。
+
 - **无担保声明**：本软件按“原样”（AS IS）提供，不对其适用性、可靠性、可用性、性能、正确性或满足特定用途作任何明示或暗示的保证，包括但不限于对适销性、特定用途适用性或不侵权的保证。
+
 - **责任限制**：在适用法律允许的最大范围内，维护者对因使用、修改、分发或无法使用本软件而导致的任何直接、间接、附带、特殊、惩罚性或后果性损害不承担责任，即便维护者已被告知可能发生此类损害。本条款不得视为对法律强制性责任的放弃（例如在某些法域中对人身伤害或故意违法行为的责任承担）。
+
 - **赔偿义务**：使用者应对因其使用、修改、配置或再分发本软件而导致的任何第三方索赔、损失、责任、损害或费用（包括合理的律师费）承担全部赔偿责任，并应在法律允许的范围内，使维护者免受此类索赔、损失或费用的损害。
+
 - **遵守许可与保留声明**：任何修改、再发布或商业使用均须遵守本项目所载的 [LICENSE](LICENSE) 条款，并在分发时保留本声明、原始版权信息及许可文件。如需超出本许可的额外授权，请与维护者取得书面协议。
+
 - **非法律意见**：本声明反映维护者对风险与责任的商业立场，不构成法律意见。如需具有法律约束力的文本或具体法律咨询，请寻求专业律师服务。
 
+
+
 如需就免责或使用许可进行协商或签署特殊许可协议，请使用安全提示内提供的联系方式与开发者联系。
+
+

@@ -121,6 +121,29 @@ def _dispatch_parsed_message(
     logger.info(f"[{actual_source}] {msg_type}消息")
     manager.message_callback(actual_source, parsed_data)
 
+
+def _apply_bulk_dispatch_limit(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """按性能模式限制 initial_all / alllist 等批量入队数量。"""
+    if not items:
+        return []
+    try:
+        from utils.memory_policy import limit_bulk_parsed_messages
+
+        cfg = Config()
+        mode = getattr(cfg.gui_config, "performance_mode", "standard")
+        limited = limit_bulk_parsed_messages(items, mode)
+        if len(limited) < len(items):
+            logger.info(
+                "批量快照已按性能模式限流: %d -> %d (mode=%s)",
+                len(items),
+                len(limited),
+                mode,
+            )
+        return limited
+    except Exception as e:
+        logger.debug(f"批量限流失败，使用原始列表: {e}")
+        return items
+
 # all_eew 聚合端：建连后查询各子源（不含 CWA；CWA 有独立 wss …/cwa_eew 端点）
 # 列表速报 query_cenceqlist / query_jmaeqlist 亦发往 all_eew（见 _wolfx_all_eew_query_commands）
 WOLFX_ALL_EEW_QUERY_COMMANDS = (
@@ -555,7 +578,9 @@ class WebSocketManager:
             # 处理initial_all类型
             if isinstance(data, dict) and data.get('type') == 'initial_all' and data_source_type == 'all':
                 logger.info(f"[{source_name}] 收到initial_all类型消息，开始处理所有数据源")
-                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
+                all_parsed_data = _apply_bulk_dispatch_limit(
+                    await asyncio.to_thread(adapter.parse_all_sources, data)
+                )
                 logger.info(f"[{source_name}] initial_all解析完成，共{len(all_parsed_data)}条有效数据")
                 
                 for parsed_data in all_parsed_data:
@@ -566,7 +591,9 @@ class WebSocketManager:
             # 无界科技 /ws/all 首连为 JSON 数组
             elif isinstance(data, list) and str(data_source_type).startswith("whews"):
                 logger.info(f"[{source_name}] 收到 WeJet 首连数组，共 {len(data)} 帧")
-                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
+                all_parsed_data = _apply_bulk_dispatch_limit(
+                    await asyncio.to_thread(adapter.parse_all_sources, data)
+                )
                 for parsed_data in all_parsed_data:
                     if parsed_data:
                         parsed_data["_suppress_tts"] = True
@@ -578,17 +605,17 @@ class WebSocketManager:
                     msg_type = str(data.get("type", "")).strip().lower()
                 if isinstance(data, dict) and msg_type == "all":
                     logger.info(f"[{source_name}] 收到 Jian Project 聚合快照")
-                    all_parsed_data = await asyncio.to_thread(
-                        adapter.parse_all_sources, data
+                    all_parsed_data = _apply_bulk_dispatch_limit(
+                        await asyncio.to_thread(adapter.parse_all_sources, data)
                     )
                 elif isinstance(data, list):
                     logger.info(f"[{source_name}] 收到 Jian Project 批量帧，共 {len(data)} 条")
-                    all_parsed_data = await asyncio.to_thread(
-                        adapter.parse_all_sources, data
+                    all_parsed_data = _apply_bulk_dispatch_limit(
+                        await asyncio.to_thread(adapter.parse_all_sources, data)
                     )
                 elif isinstance(data, dict) and msg_type.endswith("_response"):
-                    all_parsed_data = await asyncio.to_thread(
-                        adapter.parse_all_sources, data
+                    all_parsed_data = _apply_bulk_dispatch_limit(
+                        await asyncio.to_thread(adapter.parse_all_sources, data)
                     )
                 else:
                     one = await asyncio.to_thread(adapter.parse, data)
@@ -899,6 +926,26 @@ class WebSocketManager:
                         from adapters.nowquake_cencint_adapter import NowquakeCencintAdapter
                         if isinstance(adapter, NowquakeCencintAdapter):
                             await self._nowquake_bootstrap_latest(adapter, source_name)
+
+                    # Jian Project /all：高配模式才拉取历史列表，减轻内存尖峰
+                    if is_jian_project_url(url or ""):
+                        try:
+                            from utils.memory_policy import should_fetch_jian_alllist
+
+                            perf = getattr(
+                                Config().gui_config, "performance_mode", "standard"
+                            )
+                            if should_fetch_jian_alllist(perf):
+                                await websocket.send("alllist")
+                                logger.info(
+                                    f"[{source_name}] 已发送 Jian Project alllist 拉取历史列表"
+                                )
+                            else:
+                                logger.debug(
+                                    f"[{source_name}] 当前性能模式({perf})跳过 Jian alllist"
+                                )
+                        except Exception as e:
+                            logger.warning(f"[{source_name}] Jian Project alllist 发送失败: {e}")
                     
                     # 创建发送队列（如果不存在）
                     if url not in self._send_queues:

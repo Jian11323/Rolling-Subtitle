@@ -45,10 +45,12 @@ WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
 WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主站域名
 DATA_PROVIDER_FANSTUDIO = "fanstudio"
 DATA_PROVIDER_WHEWS = "whews"
+DATA_PROVIDER_JIAN = "jian"
 DATA_PROVIDER_OFFICIAL = "official"
 DATA_PROVIDERS = (
     DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
+    DATA_PROVIDER_JIAN,
 )
 
 
@@ -201,30 +203,41 @@ EQSC_PARSE_FLAG_TO_URL: Dict[str, str] = {
     "eqsc_parse_volcano": EQSC_VOLCANO_HTTP,
 }
 
-# Jian Project（全局辅助源，WebSocket 聚合 api.sismotide.top/all）
+# Jian Project（主数据源之一 / 全局辅助源，WebSocket 聚合 api.sismotide.top/all）
 JIAN_PROJECT_DOMAIN = "api.sismotide.top"
 JIAN_PROJECT_ALL_URL = f"wss://{JIAN_PROJECT_DOMAIN}/all"
 JIAN_LOGICAL_PREFIX = "jian://"
 JIAN_MASTER_KEY = f"{JIAN_LOGICAL_PREFIX}master"
 
-# (短名, 展示用标签) — 逻辑开关键为 jian://短名
-JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = [
+# 预警类（短名, 展示用标签）
+JIAN_WARNING_SOURCE_SPECS: List[Tuple[str, str]] = [
+    ("cea", "中国地震预警网"),
+    ("cwa-eew", "台湾中央气象署地震预警"),
+    ("jma-eew", "日本气象厅紧急地震速报"),
+    ("sa", "美国 ShakeAlert 地震预警"),
+    ("early-est", "Early-est 地震预警"),
+]
+# 速报类
+JIAN_REPORT_SOURCE_SPECS: List[Tuple[str, str]] = [
+    ("cenc", "CENC 中国地震台网"),
+    ("cwa", "CWA 台湾中央气象署速报"),
+    ("hko", "HKO 香港天文台"),
+    ("tmd", "TMD 泰国地震局"),
+    ("mmd", "MMD 马来西亚气象局"),
     ("bmkg", "BMKG 印尼地震速报"),
     ("geonet", "GeoNet 新西兰地震速报"),
-    ("ingv", "INGV 意大利地震速报"),
-    ("early-est", "Early-est 地震预警"),
     ("usgs", "USGS 美国地质调查局"),
-    ("hko", "HKO 香港天文台"),
-    ("gfz", "GFZ 德国地学研究中心"),
-    ("usp", "USP 巴西圣保罗大学"),
-    ("cwa", "CWA 台湾中央气象署速报"),
     ("emsc", "EMSC 欧洲地中海地震中心"),
-    ("tmd", "TMD 泰国地震局"),
+    ("gfz", "GFZ 德国地学研究中心"),
     ("bcsf", "BCSF 法国中央地震研究所"),
-    ("mmd", "MMD 马来西亚气象局"),
+    ("ingv", "INGV 意大利地震速报"),
+    ("usp", "USP 巴西圣保罗大学"),
     ("nrcan", "NRCan 加拿大自然资源部"),
-    ("cenc", "CENC 中国地震台网"),
 ]
+# (短名, 展示用标签) — 逻辑开关键为 jian://短名
+JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = (
+    JIAN_WARNING_SOURCE_SPECS + JIAN_REPORT_SOURCE_SPECS
+)
 
 
 def jian_logical_key(short: str) -> str:
@@ -237,6 +250,8 @@ def jian_short_to_internal(short: str) -> str:
     s = str(short or "").strip().lower()
     if s == "early-est":
         return "early_est"
+    if s == "jma-eew":
+        return "jma"
     return s.replace("_", "-")
 
 
@@ -251,11 +266,11 @@ JIAN_SUB_SOURCE_KEYS: List[str] = list(JIAN_LOGICAL_TO_INTERNAL.keys())
 
 JIAN_WARNING_INTERNALS = frozenset({"cea", "cwa-eew", "jma", "sa", "early_est"})
 JIAN_WARNING_PARSE_FLAGS: Dict[str, str] = {
-    "cea": "fanstudio_parse_cea",
-    "cwa-eew": "fanstudio_parse_cwa_eew",
-    "jma": "fanstudio_parse_jma",
-    "sa": "fanstudio_parse_sa",
-    "early_est": "ali_all_parse_early_est",
+    "cea": "jian_parse_cea",
+    "cwa-eew": "jian_parse_cwa_eew",
+    "jma": "jian_parse_jma_eew",
+    "sa": "jian_parse_sa",
+    "early_est": "jian_parse_early_est",
 }
 
 P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
@@ -270,9 +285,14 @@ FANSTUDIO_TYPHOON_HTTP = FANSTUDIO_HTTP_SOURCE_KEYS[0]
 
 
 def is_jian_project_url(url: str) -> bool:
-    """是否为 Jian Project WebSocket URL。"""
-    low = (url or "").lower().rstrip("/")
-    return "sismotide.top" in low and low.startswith(("ws://", "wss://"))
+    """是否为 Jian Project 聚合 WebSocket（api.sismotide.top/all）。"""
+    low = (url or "").strip().lower().rstrip("/")
+    if not low.startswith(("ws://", "wss://")):
+        return False
+    if "sismotide.top" not in low:
+        return False
+    # 仅 /all 聚合端；其它路径（如自定义 /gqrs）不走 Jian 适配器
+    return low.endswith("/all") or "/all?" in low or low == JIAN_PROJECT_ALL_URL.rstrip("/").lower()
 
 
 def is_jian_logical_key(key: str) -> bool:
@@ -290,8 +310,8 @@ def wolfx_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     )
 
 
-def _any_jian_report_enabled(config: "Config") -> bool:
-    """任一 Jian 速报逻辑键或总开关启用。"""
+def _any_jian_connection_enabled(config: "Config") -> bool:
+    """总开关或任一速报/预警逻辑键启用（表示 Jian 连接范围内有订阅）。"""
     if config.enabled_sources.get(JIAN_MASTER_KEY, False):
         return True
     for key in JIAN_SUB_SOURCE_KEYS:
@@ -300,19 +320,28 @@ def _any_jian_report_enabled(config: "Config") -> bool:
     return False
 
 
+# 兼容旧调用名
+_any_jian_report_enabled = _any_jian_connection_enabled
+
+
 def jian_internal_enabled(config: "Config", internal: str) -> bool:
-    """判断 Jian 子源是否启用（速报走逻辑键；预警需有速报订阅且解析开关打开）。"""
-    logical = JIAN_INTERNAL_TO_LOGICAL_KEY.get(internal)
-    if logical:
-        return bool(config.enabled_sources.get(logical, False))
+    """判断 Jian 子源是否启用。
+
+    - 速报：总开关或对应逻辑键
+    - 预警：总开关或任一子源启用时，由 jian_parse_* 控制（与设置页文案一致）
+    """
     if internal in JIAN_WARNING_INTERNALS:
-        if not _any_jian_report_enabled(config):
+        if not _any_jian_connection_enabled(config):
             return False
         flag = JIAN_WARNING_PARSE_FLAGS.get(internal)
         if flag:
             return bool(getattr(config.message_config, flag, True))
         return True
-    return False
+    logical = JIAN_INTERNAL_TO_LOGICAL_KEY.get(internal)
+    if not logical:
+        return False
+    master_on = bool(config.enabled_sources.get(JIAN_MASTER_KEY, False))
+    return master_on or bool(config.enabled_sources.get(logical, False))
 
 
 def any_jian_source_enabled(config: "Config") -> bool:
@@ -363,21 +392,19 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.1"  # 当前程序版本
+APP_VERSION = "2.8.2"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.1
+CHANGELOG_TEXT = """版本 2.8.2
 
-1、国际源改为 Jian Project WebSocket，替代原 HTTP 轮询
-2、Wolfx 改为全局辅助源；主数据源仅 Fan Studio / WeJet 二选一
-3、优化各性能档内存占用
-4、优化自定义数据源解析器
-5、WeJet 适配新情报源
-6、优化 WeJet 灾害预警区域滚动字幕展示"""
+1、Jian Project 可作为主数据源（与 Fan Studio / WeJet 三选一）
+2、Fan Studio / WeJet / Jian / Wolfx / EQSC 可并行作为辅助数据源
+3、补全 Jian Project 全部预警与速报子源开关
+4、性能档内存目标：低配 ≤50MB、标准 ≤80MB、高配 OpenGL 全开 ≤120MB（默认 60fps）"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -405,7 +432,7 @@ class GUIConfig:
     window_y: int = -1
     resizable: bool = True
     vsync_enabled: bool = True  # 垂直同步开关
-    target_fps: int = 30  # 目标帧率（字幕足够流畅；过高会持续拉高 CPU/电源占用）
+    target_fps: int = 60  # 默认 60fps；低配预设可降为 30
     timezone: str = "Asia/Shanghai"  # 显示时区（IANA 名称），默认北京时间
     last_seen_changelog_version: str = ""  # 上次已读的更新说明版本，用于弹窗仅展示一次
     use_gpu_rendering: bool = False  # True=GPU 渲染，False=CPU(软件) 渲染，与 render_backend 同步
@@ -432,8 +459,8 @@ class GUIConfig:
     minimize_to_tray: bool = False
     toast_notifications_enabled: bool = False
     performance_mode: str = "standard"  # low | standard | high | custom
-    image_cache_max: int = 16  # 图片纹理缓存上限（气象/沙滩球等）
-    text_texture_cache_max: int = 10  # 文本纹理缓存上限
+    image_cache_max: int = 6  # 图片纹理缓存上限（气象/沙滩球等）
+    text_texture_cache_max: int = 5  # 文本纹理缓存上限
     auto_save_settings: bool = False  # Auto-save settings window changes to disk
 
     def validate(self) -> bool:
@@ -522,8 +549,8 @@ class MessageConfig:
     max_report_inactivity_time: int = 300
     max_other_inactivity_time: int = 300
     # 主线程消息队列与展示缓冲区容量（字幕场景无需过大缓冲）
-    message_queue_maxsize: int = 100
-    message_buffer_max_size: int = 40
+    message_queue_maxsize: int = 45
+    message_buffer_max_size: int = 20
     no_activity_message: str = '系统运行中，等待最新地震信息...'
     custom_text: str = '系统运行中，等待最新地震信息...'
     use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
@@ -644,6 +671,12 @@ class MessageConfig:
     whews_parse_igp: bool = True
     whews_parse_nepal: bool = True
     whews_parse_typhoon: bool = False
+    # Jian Project 预警子源解析开关（/all 聚合内按 type 细分）
+    jian_parse_cea: bool = True
+    jian_parse_cwa_eew: bool = True
+    jian_parse_jma_eew: bool = True
+    jian_parse_sa: bool = True
+    jian_parse_early_est: bool = True
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報）；HTTP 聚合拉取逻辑不变
     p2pquake_parse_551: bool = True
     p2pquake_parse_552: bool = True
@@ -1213,6 +1246,11 @@ class Config:
                 'whews_parse_igp': getattr(self.message_config, 'whews_parse_igp', True),
                 'whews_parse_nepal': getattr(self.message_config, 'whews_parse_nepal', True),
                 'whews_parse_typhoon': getattr(self.message_config, 'whews_parse_typhoon', False),
+                'jian_parse_cea': getattr(self.message_config, 'jian_parse_cea', True),
+                'jian_parse_cwa_eew': getattr(self.message_config, 'jian_parse_cwa_eew', True),
+                'jian_parse_jma_eew': getattr(self.message_config, 'jian_parse_jma_eew', True),
+                'jian_parse_sa': getattr(self.message_config, 'jian_parse_sa', True),
+                'jian_parse_early_est': getattr(self.message_config, 'jian_parse_early_est', True),
                 'min_report_magnitude': getattr(self.message_config, 'min_report_magnitude', 0.0),
                 'geo_filter_enabled': getattr(self.message_config, 'geo_filter_enabled', False),
                 'geo_filter_latitude': getattr(self.message_config, 'geo_filter_latitude', 39.9042),
@@ -1377,6 +1415,10 @@ class Config:
             *all_whews_ws_urls(),
         }
 
+    def _allowed_logical_source_keys(self) -> frozenset:
+        """设置页逻辑开关键（非 URL），需持久化且不被公开版清理。"""
+        return frozenset([JIAN_MASTER_KEY, WOLFX_MASTER_KEY, *JIAN_SUB_SOURCE_KEYS])
+
     def _enforce_public_ws_sources(self) -> List[str]:
         """
         公开版连接策略：仅保留 Fan Studio /all、无界科技、Wolfx/P2P 等公开 WebSocket，
@@ -1386,6 +1428,7 @@ class Config:
         """
         allowed_ws = self._allowed_public_ws_urls()
         allowed_http = set(ALL_KNOWN_HTTP_SOURCE_KEYS)
+        allowed_logical = self._allowed_logical_source_keys()
         removed: List[str] = []
         for url in list(self.enabled_sources.keys()):
             if self._is_websocket_url(url) and url not in allowed_ws:
@@ -1393,6 +1436,8 @@ class Config:
                 del self.enabled_sources[url]
                 continue
             if (not self._is_websocket_url(url)) and url not in allowed_http:
+                if url in allowed_logical:
+                    continue
                 removed.append(url)
                 del self.enabled_sources[url]
         return removed
@@ -1402,13 +1447,14 @@ class Config:
         all_url = FANSTUDIO_ALL_URL
         allowed_ws = self._allowed_public_ws_urls()
         allowed_http = set(ALL_KNOWN_HTTP_SOURCE_KEYS)
+        allowed_logical = self._allowed_logical_source_keys()
         return {
             k: v
             for k, v in self.enabled_sources.items()
             if (
                 (k == all_url or not self._is_fanstudio_individual_url(k))
                 and (not self._is_websocket_url(k) or k in allowed_ws)
-                and (self._is_websocket_url(k) or k in allowed_http)
+                and (self._is_websocket_url(k) or k in allowed_http or k in allowed_logical)
             )
         }
 
@@ -1430,6 +1476,51 @@ class Config:
             if is_whews_dedicated_endpoint(url):
                 self.enabled_sources[url] = False
 
+    def _clamp_resource_limits_for_performance_mode(self) -> None:
+        """按性能档上限裁剪过大的队列/缓冲与纹理缓存（兼容旧版超大配置）。"""
+        try:
+            from utils.memory_policy import (
+                QUEUE_BUFFER_LIMITS,
+                GUI_CACHE_LIMITS,
+                PERFORMANCE_MODE_CUSTOM,
+                PERFORMANCE_MODE_HIGH,
+                normalize_performance_mode,
+            )
+
+            mode = normalize_performance_mode(
+                getattr(self.gui_config, "performance_mode", "standard")
+            )
+            cap_mode = (
+                PERFORMANCE_MODE_HIGH
+                if mode == PERFORMANCE_MODE_CUSTOM
+                else mode
+            )
+            qcap = QUEUE_BUFFER_LIMITS[cap_mode]
+            gcap = GUI_CACHE_LIMITS[cap_mode]
+            mc = self.message_config
+            gc = self.gui_config
+            changed = False
+            for key, cap in (
+                ("message_queue_maxsize", qcap["message_queue_maxsize"]),
+                ("message_buffer_max_size", qcap["message_buffer_max_size"]),
+            ):
+                cur = int(getattr(mc, key, cap) or cap)
+                if cur > cap:
+                    setattr(mc, key, cap)
+                    changed = True
+            for key, cap in (
+                ("image_cache_max", gcap["image_cache_max"]),
+                ("text_texture_cache_max", gcap["text_texture_cache_max"]),
+            ):
+                cur = int(getattr(gc, key, cap) or cap)
+                if cur > cap:
+                    setattr(gc, key, cap)
+                    changed = True
+            if changed:
+                logger.info("已按性能档(%s)上限裁剪资源缓存配置", mode)
+        except Exception as e:
+            logger.debug(f"裁剪资源上限失败: {e}")
+
     def get_whews_host(self) -> str:
         """返回当前无界科技主机。"""
         return normalize_whews_host(getattr(self.ws_config, "whews_host", WHEWS_HOST_PRIMARY))
@@ -1443,6 +1534,15 @@ class Config:
     def get_active_data_provider(self) -> str:
         """返回当前规范化后的数据源提供者。"""
         return normalize_data_provider(getattr(self, "data_provider", DATA_PROVIDER_FANSTUDIO))
+
+    def is_fanstudio_ws_enabled(self) -> bool:
+        """Fan Studio /all 是否已勾选连接（主源或辅助源）。"""
+        return bool(self.enabled_sources.get(FANSTUDIO_ALL_URL, False))
+
+    def is_whews_ws_enabled(self) -> bool:
+        """WeJet /ws/all 是否已勾选连接（主源或辅助源）。"""
+        all_url = self.get_whews_endpoint_urls().get("all")
+        return bool(all_url and self.enabled_sources.get(all_url, False))
 
     def is_url_active_for_provider(self, url: str, provider: Optional[str] = None) -> bool:
         """判断 URL 是否属于当前（或指定）数据源提供者。P2PQuake / Nowquake / 台风 HTTP 始终可用。"""
@@ -1477,13 +1577,21 @@ class Config:
             or "typhoon.php" in low
         ):
             return True
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            return "fanstudio" in low
-        if provider == DATA_PROVIDER_WHEWS:
-            # 仅 /ws/all 可连接；cea_all/cenc 专用线已废弃
-            return is_whews_all_url(u)
-        if "fanstudio" in low or is_whews_url(u):
-            return False
+        if "fanstudio" in low:
+            if provider == DATA_PROVIDER_FANSTUDIO:
+                return True
+            return self.is_fanstudio_ws_enabled()
+        if is_whews_url(u):
+            if provider == DATA_PROVIDER_WHEWS:
+                return is_whews_all_url(u)
+            all_url = self.get_whews_endpoint_urls().get("all")
+            return bool(
+                all_url
+                and self.enabled_sources.get(all_url, False)
+                and is_whews_all_url(u)
+            )
+        if provider == DATA_PROVIDER_JIAN and is_jian_project_url(u):
+            return True
         return False
 
     def get_http_poll_interval(self, url: str) -> int:
@@ -1999,6 +2107,8 @@ class Config:
             self._ensure_whews_source_defaults()
             self._ensure_eqsc_http_defaults()
 
+            self._clamp_resource_limits_for_performance_mode()
+
             # 根据服务器选择更新URL
             self._cleanup_invalid_fanstudio_ws_sources()
             removed_ws = self._enforce_public_ws_sources()
@@ -2175,24 +2285,34 @@ class Config:
         self.ws_urls = self._build_ws_urls_ordered()
         self.custom_data_source_url = ""
         self.custom_data_source_insecure_ssl = False
+        self._clamp_resource_limits_for_performance_mode()
         logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
     
     def _build_ws_urls_ordered(self) -> List[str]:
-        """按主提供者构建 ws_urls；Jian / Wolfx / P2P / Nowquake 为全局辅助源。"""
+        """按主提供者与辅助开关构建 ws_urls；Wolfx / P2P / Nowquake 等为全局辅助源。"""
         self._cleanup_invalid_fanstudio_ws_sources()
         self._enforce_public_ws_sources()
         self._disable_whews_dedicated_endpoints()
         provider = self.get_active_data_provider()
         ws_urls: List[str] = []
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            if self.enabled_sources.get(FANSTUDIO_ALL_URL, False):
-                ws_urls.append(FANSTUDIO_ALL_URL)
+        if provider == DATA_PROVIDER_FANSTUDIO and self.is_fanstudio_ws_enabled():
+            ws_urls.append(FANSTUDIO_ALL_URL)
         elif provider == DATA_PROVIDER_WHEWS:
             all_url = self.get_whews_endpoint_urls().get("all")
             if all_url and self.enabled_sources.get(all_url, False):
                 ws_urls.append(all_url)
-        # Jian Project（全局辅助）
-        if any_jian_source_enabled(self):
+        elif provider == DATA_PROVIDER_JIAN and any_jian_source_enabled(self):
+            ws_urls.append(JIAN_PROJECT_ALL_URL)
+        # Fan Studio / WeJet / Jian：非当前主提供者时仍可按开关作辅助源建连
+        if provider != DATA_PROVIDER_FANSTUDIO and self.is_fanstudio_ws_enabled():
+            if FANSTUDIO_ALL_URL not in ws_urls:
+                ws_urls.append(FANSTUDIO_ALL_URL)
+        if provider != DATA_PROVIDER_WHEWS:
+            aux_whews = self.get_whews_endpoint_urls().get("all")
+            if aux_whews and self.enabled_sources.get(aux_whews, False):
+                if aux_whews not in ws_urls:
+                    ws_urls.append(aux_whews)
+        if provider != DATA_PROVIDER_JIAN and any_jian_source_enabled(self):
             if JIAN_PROJECT_ALL_URL not in ws_urls:
                 ws_urls.append(JIAN_PROJECT_ALL_URL)
         # Wolfx（全局辅助）
