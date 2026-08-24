@@ -203,31 +203,8 @@ class MessageQueue:
         Args:
             maxsize: 队列最大容量
         """
-        self._maxsize = max(10, int(maxsize or 10))
-        self.queue = queue.Queue(maxsize=self._maxsize)
+        self.queue = queue.Queue(maxsize=maxsize)
         self._lock = threading.Lock()
-
-    @property
-    def maxsize(self) -> int:
-        return self._maxsize
-
-    def rebuild_with_maxsize(self, new_max: int) -> "MessageQueue":
-        """按新容量重建队列，尽量保留已有消息（从新到旧截断）。"""
-        new_max = max(10, int(new_max or 10))
-        if new_max == self._maxsize:
-            return self
-        kept: List[MessageItem] = []
-        try:
-            while True:
-                kept.append(self.queue.get_nowait())
-        except queue.Empty:
-            pass
-        if len(kept) > new_max:
-            kept = kept[-new_max:]
-        rebuilt = MessageQueue(maxsize=new_max)
-        for item in kept:
-            rebuilt.put(item, block=False)
-        return rebuilt
         
     def put(self, item: MessageItem, block: bool = True, timeout: Optional[float] = None) -> bool:
         """
@@ -321,6 +298,7 @@ class MessageBuffer:
         self.current_index = 0
         self.use_priority = use_priority
         self._lock = threading.Lock()
+        # 用于优先级轮播：记录每个优先级组的当前索引
         self._priority_group_index: Dict[int, int] = {}
         # 用于记录消息的添加顺序，确保相同优先级内的消息按添加顺序排序
         self._add_order_counter = 0
@@ -328,16 +306,6 @@ class MessageBuffer:
         self._message_add_order: Dict[int, int] = {}
         # 记录当前正在显示的消息ID，用于排序后重新定位
         self._current_displaying_msg_id: Optional[int] = None
-
-    def set_max_size(self, new_max: int) -> None:
-        """热调整缓冲上限，并剔除超出容量的低优先级项。"""
-        new_max = max(4, int(new_max or 4))
-        with self._lock:
-            self.max_size = new_max
-            while len(self.buffer) > self.max_size:
-                self._remove_lowest_priority_message()
-            if self.buffer and self.current_index >= len(self.buffer):
-                self.current_index = 0
     
     def add(self, message: MessageItem):
         """

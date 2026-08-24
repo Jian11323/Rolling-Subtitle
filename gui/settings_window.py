@@ -32,7 +32,7 @@ from config import (
     p2pquake_master_enabled,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
-    JIAN_REPORT_SOURCE_SPECS,
+    JIAN_SUB_SOURCE_SPECS,
     jian_logical_key,
     JIAN_MASTER_KEY,
     WOLFX_MASTER_KEY,
@@ -42,7 +42,6 @@ from config import (
     WHEWS_HOST_BACKUP,
     DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
-    DATA_PROVIDER_JIAN,
     normalize_data_provider,
     wolfx_master_enabled,
     normalize_whews_host,
@@ -2281,9 +2280,9 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_STANDARD)
         performance_mode_combo.setCurrentIndex(max(0, mode_index))
         performance_mode_combo.setToolTip(
-            "低配：目标常驻 ≤50MB，CPU 30fps，仅核心预警与单源连接；\n"
-            "标准：目标 ≤80MB，CPU 60fps，默认数据源组合；\n"
-            "高配（全开）：目标 ≤120MB，OpenGL 60fps，启用全部辅助源。"
+            "低配：降低帧率与数据源负载，保留核心预警；\n"
+            "标准：与程序默认配置接近；\n"
+            "高配：启用 GPU 渲染、完整数据源与告警体验。"
         )
         apply_preset_btn = QPushButton("应用性能模式")
         _set_widget_style(apply_preset_btn, STYLE_SECONDARY_BTN)
@@ -2293,7 +2292,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         preset_row.addWidget(performance_mode_combo, 1)
         preset_row.addWidget(apply_preset_btn)
         block3_layout.addLayout(preset_row)
-        preset_hint = QLabel("切换后覆盖渲染、数据源与告警等设置；低配/标准/高配分别目标 ≤50/80/120MB。")
+        preset_hint = QLabel("切换后覆盖渲染、数据源与告警等设置，立即生效。")
         preset_hint.setToolTip("会覆盖相关设置；预警显示能力保留，应用后热重载。")
         preset_hint.setWordWrap(True)
         _set_widget_style(preset_hint, STYLE_HINT)
@@ -2309,9 +2308,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         else:
             cpu_radio.setChecked(True)
         cpu_radio.setToolTip("兼容性更好，修改后立即热切换生效")
-        opengl_radio.setToolTip(
-            "硬件加速（OpenGL），目标常驻尽量 ≤120MB；修改后立即热切换生效"
-        )
+        opengl_radio.setToolTip("硬件加速（OpenGL），修改后立即热切换生效")
         render_row.addWidget(cpu_radio)
         render_row.addWidget(opengl_radio)
         render_row.addStretch()
@@ -3406,7 +3403,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             show_warning(self, "错误", "音频设置保存失败")
 
     def _create_data_source_tab(self):
-        """创建数据源设置标签页（主数据源三选一 + 全局辅助源）。"""
+        """创建数据源设置标签页（主数据源二选一 + 全局辅助源）。"""
         scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
         _prepare_scroll_body(scrollable_widget)
@@ -3417,13 +3414,12 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         fanstudio_http_poll_sources = [
             (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
         ]
-        # 速报子源用逻辑开关键；预警由下方 jian_parse_* 控制（总开关或任一速报启用时生效）
         jian_sources = [
             (jian_logical_key(short), label, False)
-            for short, label in JIAN_REPORT_SOURCE_SPECS
+            for short, label in JIAN_SUB_SOURCE_SPECS
         ]
 
-        # 顶部：主数据源三选一
+        # 顶部：主数据源二选一
         group_provider = QGroupBox("主数据源")
         _prep_groupbox(group_provider)
         gp_layout = QVBoxLayout(group_provider)
@@ -3434,19 +3430,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.data_provider_group = QButtonGroup(self)
         self.radio_provider_fanstudio = QRadioButton("Fan Studio")
         self.radio_provider_whews = QRadioButton("WeJet")
-        self.radio_provider_jian = QRadioButton("Jian Project")
-        for rb in (self.radio_provider_fanstudio, self.radio_provider_whews, self.radio_provider_jian):
+        for rb in (self.radio_provider_fanstudio, self.radio_provider_whews):
             _set_widget_style(rb, STYLE_PROVIDER_RADIO)
             provider_row.addWidget(rb)
         self.data_provider_group.addButton(self.radio_provider_fanstudio, 0)
         self.data_provider_group.addButton(self.radio_provider_whews, 1)
-        self.data_provider_group.addButton(self.radio_provider_jian, 2)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。Fan Studio / WeJet / Jian / Wolfx / EQSC 可勾选为辅助源并行。")
+        provider_hint = QLabel("二者择一；切换后清空缓冲并重连。")
         provider_hint.setToolTip(
-            "主提供者决定默认数据流优先级；勾选连接后各源可并存。"
-            "Wolfx / 台风 / CENC 烈度速报 / P2PQuake 等为全局辅助项。"
+            "保存后仅连接当前主提供者。"
+            "Jian Project 接替原「官方 HTTP」国际速报；"
+            "Wolfx / 台风 / CENC 烈度速报 / EQSC / P2PQuake 为全局辅助项，与主源无关。"
         )
         _set_widget_style(provider_hint, STYLE_HINT)
         provider_hint.setWordWrap(True)
@@ -3743,8 +3738,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         gj_layout.setContentsMargins(*GROUP_MARGINS)
         gj_layout.setSpacing(GROUP_SPACING)
         jian_hint = QLabel(
-            "国际速报与预警；经 WebSocket api.sismotide.top/all 推送。"
-            "可作为主数据源，也可与 Fan Studio / WeJet 等辅助并行。"
+            "接替原「官方 HTTP」国际速报与预警；经 WebSocket api.sismotide.top/all 推送，任意主提供者下可用。"
         )
         _set_widget_style(jian_hint, STYLE_HINT)
         jian_hint.setWordWrap(True)
@@ -3770,26 +3764,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 status_connected_text="已启用",
                 status_disconnected_text="未启用",
             )
-
-        def _jian_warn_cb(cfg_name: str, text: str) -> QCheckBox:
-            cb = QCheckBox(text)
-            cb.setChecked(getattr(self.config.message_config, cfg_name, True))
-            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
-            row = QHBoxLayout()
-            row.addWidget(cb)
-            row.addStretch()
-            gj_layout.addLayout(row)
-            return cb
-
-        jian_warn_label = QLabel("预警解析（总开关或子源启用时生效）")
-        _set_widget_style(jian_warn_label, STYLE_HINT)
-        jian_warn_label.setWordWrap(True)
-        gj_layout.addWidget(jian_warn_label)
-        self.jian_parse_cea_cb = _jian_warn_cb("jian_parse_cea", "中国地震预警网")
-        self.jian_parse_cwa_eew_cb = _jian_warn_cb("jian_parse_cwa_eew", "台湾气象署地震预警")
-        self.jian_parse_jma_eew_cb = _jian_warn_cb("jian_parse_jma_eew", "日本气象厅紧急地震速报")
-        self.jian_parse_sa_cb = _jian_warn_cb("jian_parse_sa", "美国 ShakeAlert 地震预警")
-        self.jian_parse_early_est_cb = _jian_warn_cb("jian_parse_early_est", "Early-est 地震预警")
 
         # ---------- 全局辅助源：Wolfx ----------
         group_wolfx = QGroupBox("Wolfx")
@@ -4085,13 +4059,17 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         )
         if provider == DATA_PROVIDER_WHEWS:
             self.radio_provider_whews.setChecked(True)
-        elif provider == DATA_PROVIDER_JIAN:
-            self.radio_provider_jian.setChecked(True)
         else:
             self.radio_provider_fanstudio.setChecked(True)
 
-        self.ds_panel_fanstudio.setVisible(True)
-        self.ds_panel_whews.setVisible(True)
+        def _update_data_provider_panels_visible():
+            """切换主数据源时显示/隐藏 Fan Studio / WeJet 面板。"""
+            self.ds_panel_fanstudio.setVisible(self.radio_provider_fanstudio.isChecked())
+            self.ds_panel_whews.setVisible(self.radio_provider_whews.isChecked())
+
+        self.radio_provider_fanstudio.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.radio_provider_whews.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        _update_data_provider_panels_visible()
 
         scroll_layout.addStretch()
 
@@ -4215,8 +4193,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
     def _current_data_provider_from_ui(self) -> str:
         """从设置页单选框读取当前数据源提供者。"""
-        if hasattr(self, "radio_provider_jian") and self.radio_provider_jian.isChecked():
-            return DATA_PROVIDER_JIAN
         if hasattr(self, "radio_provider_whews") and self.radio_provider_whews.isChecked():
             return DATA_PROVIDER_WHEWS
         return DATA_PROVIDER_FANSTUDIO
@@ -4606,11 +4582,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
             ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
             ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
-            ('jian_parse_cea_cb', 'jian_parse_cea'),
-            ('jian_parse_cwa_eew_cb', 'jian_parse_cwa_eew'),
-            ('jian_parse_jma_eew_cb', 'jian_parse_jma_eew'),
-            ('jian_parse_sa_cb', 'jian_parse_sa'),
-            ('jian_parse_early_est_cb', 'jian_parse_early_est'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -6065,11 +6036,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
             ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
             ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
-            ('jian_parse_cea_cb', 'jian_parse_cea'),
-            ('jian_parse_cwa_eew_cb', 'jian_parse_cwa_eew'),
-            ('jian_parse_jma_eew_cb', 'jian_parse_jma_eew'),
-            ('jian_parse_sa_cb', 'jian_parse_sa'),
-            ('jian_parse_early_est_cb', 'jian_parse_early_est'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:

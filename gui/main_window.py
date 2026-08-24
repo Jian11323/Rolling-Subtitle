@@ -37,6 +37,8 @@ from config import (
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
+    DATA_PROVIDER_FANSTUDIO,
+    DATA_PROVIDER_WHEWS,
     wolfx_master_enabled,
     jian_internal_enabled,
     any_jian_source_enabled,
@@ -49,7 +51,6 @@ from utils.geo_utils import should_accept_message
 from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import set_tray_icon_provider, show_event_notification
-from utils.memory_policy import slim_parsed_for_storage
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
@@ -145,8 +146,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config if config is not None else Config()
         self.message_processor = MessageProcessor()
-        _mq = int(getattr(self.config.message_config, "message_queue_maxsize", 45) or 45)
-        _mb = int(getattr(self.config.message_config, "message_buffer_max_size", 20) or 20)
+        _mq = getattr(self.config.message_config, "message_queue_maxsize", 300)
+        _mb = getattr(self.config.message_config, "message_buffer_max_size", 100)
         self.message_queue = MessageQueue(maxsize=_mq)
         self.message_buffer = MessageBuffer(max_size=_mb)
         # 分别存储预警和速报消息
@@ -744,9 +745,6 @@ class MainWindow(QMainWindow):
 
             # 数据源连接热重载（WebSocket / HTTP）
             self._hot_reload_data_sources()
-
-            # 消息队列 / 缓冲容量热调整
-            self._apply_buffer_capacity_from_config()
             
             logger.info("配置热修改应用完成")
             
@@ -754,23 +752,6 @@ class MainWindow(QMainWindow):
             logger.error(f"应用配置热修改失败: {e}")
             import traceback
             logger.exception("详细错误信息:")
-
-    def _apply_buffer_capacity_from_config(self) -> None:
-        """按性能模式同步消息队列与滚动缓冲容量。"""
-        try:
-            mc = self.config.message_config
-            mq_size = max(10, int(getattr(mc, "message_queue_maxsize", 45) or 45))
-            mb_size = max(8, int(getattr(mc, "message_buffer_max_size", 20) or 20))
-            if getattr(self.message_queue, "maxsize", mq_size) != mq_size:
-                self.message_queue = self.message_queue.rebuild_with_maxsize(mq_size)
-            if getattr(self, "message_buffer", None) is not None:
-                self.message_buffer.set_max_size(mb_size)
-            if getattr(self, "warning_buffer", None) is not None:
-                self.warning_buffer.set_max_size(mb_size)
-            if getattr(self, "report_buffer", None) is not None:
-                self.report_buffer.set_max_size(mb_size)
-        except Exception as e:
-            logger.debug(f"同步缓冲容量失败: {e}")
 
     def _hot_reload_data_sources(self) -> None:
         """按当前配置热启停 WebSocket / HTTP 数据源（仅在连接相关配置变化时执行）。"""
@@ -1911,23 +1892,24 @@ class MainWindow(QMainWindow):
         # source_type 统一小写，兼容上游（尤其无界科技）大小写混杂
         st = (parsed_data.get("source_type") or "").strip().lower()
         sn = source_name or ""
-        fanstudio_connected = self.config.is_fanstudio_ws_enabled()
-        whews_connected = self.config.is_whews_ws_enabled()
+        provider = self.config.get_active_data_provider()
 
-        # 连接开关门控：Fan Studio / WeJet 可作为辅助源，按勾选状态而非主提供者过滤
+        # 主提供者门控：隐藏面板勾选残留不得继续投递/保留缓冲
+        # 台风 HTTP 虽带 fanstudio 标记，但是全局源，不随主提供者切换丢弃
         is_typhoon = (
             st == "fanstudio_typhoon"
             or sn == "fanstudio_typhoon"
             or source_name == "fanstudio_typhoon"
         )
-        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and not fanstudio_connected:
-            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」连接已关闭")
+        # Fan Studio 专属子源：无标记时也按名称门控，防止旧缓冲窜屏
+        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and provider != DATA_PROVIDER_FANSTUDIO:
+            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」不属于当前提供者")
             return False
-        if parsed_data.get("fanstudio") and not fanstudio_connected and not is_typhoon:
-            logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
+        if parsed_data.get("fanstudio") and provider != DATA_PROVIDER_FANSTUDIO and not is_typhoon:
+            logger.debug("已忽略消息：当前非 Fan Studio 提供者")
             return False
-        if parsed_data.get("whews") and not whews_connected:
-            logger.debug("已忽略消息：WeJet 连接已关闭")
+        if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
+            logger.debug("已忽略消息：当前非 WeJet 提供者")
             return False
 
         fanstudio_all_url = FANSTUDIO_ALL_URL
@@ -2260,9 +2242,15 @@ class MainWindow(QMainWindow):
             )
             pd_store = None
             if isinstance(parsed_data, dict):
-                slim = slim_parsed_for_storage(parsed_data, message_type)
-                if slim is not None:
-                    pd_store = slim
+                # 始终保留提供者溯源字段，供主源二选一热切换时清理缓冲、拦截窜数据
+                pd_store = {
+                    k: parsed_data[k]
+                    for k in _MSG_PROVENANCE_KEYS
+                    if k in parsed_data
+                }
+                if message_type in ("weather", "warning"):
+                    # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
+                    pd_store = dict(parsed_data)
                 elif message_type == 'report' and (
                     parsed_data.get('source_type') == 'fssn-cmt'
                     or parsed_data.get('source_type') == 'cenc-ir'
@@ -2270,19 +2258,10 @@ class MainWindow(QMainWindow):
                 ):
                     pd_store = dict(parsed_data)
                 elif parsed_data.get("is_tsunami") and parsed_data.get("logo_url"):
-                    pd_store = {
-                        k: parsed_data[k]
-                        for k in _MSG_PROVENANCE_KEYS
-                        if k in parsed_data
-                    }
+                    # 海啸图标轮播需要 logo_url
+                    pd_store = dict(pd_store)
                     pd_store["logo_url"] = parsed_data.get("logo_url")
                     pd_store["is_tsunami"] = True
-                else:
-                    pd_store = {
-                        k: parsed_data[k]
-                        for k in _MSG_PROVENANCE_KEYS
-                        if k in parsed_data
-                    } or None
             msg_item = MessageItem(
                 text=message,
                 color=color,
