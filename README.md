@@ -1,7 +1,7 @@
 # 地震预警及情报实况栏
 
 > [!NOTE]
-> **当前版本：2.8.0**。主数据源支持 Fan Studio / WeJet / 官方+Wolfx 三选一；WeJet 为独立解析并覆盖 api.2v8.cn 聚合源，支持 WAuth 统一登录。全局辅助源新增 EQSC（equake.top）。外观支持自定义背景与无边框模式。
+> **当前版本：2.8.1**。主数据源支持 **Fan Studio / WeJet 二选一**；国际速报经 **Jian Project** WebSocket（api.sismotide.top）推送。全局辅助源含 **Wolfx**、**EQSC**（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等。WeJet 主站 api.beecld.com，备站 api.2v8.cn（含 CEA）。外观支持自定义背景与无边框模式。
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,9 +18,9 @@
 ## 功能
 
 * 滚动字幕显示地震预警、速报、海啸情报、火山情报、气象预警等
-* **主数据源三选一**：Fan Studio / WeJet / 官方数据源+Wolfx（切换时清空缓冲并重新拉取）
-* 全局辅助源：EQSC（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一提供者并用
-* 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA（ExpTech）、BMKG、GeoNet、INGV、PTWC 等
+* **主数据源二选一**：Fan Studio / WeJet（切换时清空缓冲并重新拉取）
+* 全局辅助源：Jian Project（国际速报）、Wolfx、EQSC（equake.top）、台风、CENC 烈度速报（Nowquake）、P2PQuake 等，可与任一主提供者并用
+* 国际/独立源：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
 * 可自定义界面样式与颜色；支持音效、TTS、NHK/JMA 独立音效与系统通知
 * **性能模式**：低配 / 标准 / 高配一键预设（调整渲染、数据源与告警负载），保存后热重载
 * 完整的日志记录；打包版支持自动检查更新
@@ -28,11 +28,11 @@
 
 ## 数据来源
 
-* 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net)
+* 日本气象厅地震情报、海啸情报：[P2PQuake API](https://www.p2pquake.net/develop/json_api_v2/)
 * 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
-* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)、[Wolfx](https://wolfx.jp/)、[Nowquake](https://int.nowquake.cn/)
-* 气象预警：[中央气象台](https://www.nmc.cn/)、[Fan Studio](https://api.fanstudio.tech/)、[WeJet](https://auth.beecld.com/)
-* 其他机构速报：[WeJet](https://auth.beecld.com/)：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC
+* 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、Fan Studio、WeJet、Wolfx、Nowquake（烈度速报）
+* 气象预警：[中央气象台](https://www.nmc.cn/)、Fan Studio、WeJet
+* 其他机构速报：USGS、EMSC、HKO、GFZ、USP、CWA、BMKG、GeoNet、INGV、PTWC 等（经 Jian Project 或 Fan Studio / WeJet 聚合）
 
 ## 系统要求与性能模式
 

@@ -1305,21 +1305,29 @@ class MessageProcessor:
         格式化气象预警消息
         格式：图片 【气象预警】 标题。时间，描述
         """
-        title = data.get('title', data.get('headline', ''))
-        effective = data.get('shock_time', '')
-        description = data.get('description', '')
-        
-        # 构建消息文本（图片会在显示时单独处理）
-        prefix = "【中国气象局气象预警】" if data.get("fanstudio") else "【气象预警】"
+        title = (data.get('title', data.get('headline', '')) or '').strip()
+        effective = (data.get('shock_time', '') or '').strip()
+        description = (data.get('description', '') or '').strip()
+        if getattr(self.config.message_config, 'force_single_line', True):
+            title = title.replace('\n', ' ')
+            description = description.replace('\n', ' ')
+        if len(description) > 120:
+            description = description[:117].rstrip() + "..."
+
+        if data.get("whews"):
+            prefix = "【中国气象局气象预警】"
+        elif data.get("fanstudio"):
+            prefix = "【中国气象局气象预警】"
+        else:
+            prefix = "【气象预警】"
         parts = [prefix, title]
-        
+
         if effective:
-            # 格式化时间，将 2026/02/04 21:25 转换为 2026/02/04 21:25
             parts.append(f"。{effective}")
-        
+
         if description:
             parts.append(f"，{description}")
-        
+
         return "".join(parts)
     
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:

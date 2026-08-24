@@ -30,47 +30,33 @@ from config import (
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     p2pquake_master_enabled,
-    BMKG_HTTP_URL,
-    GEONET_HTTP_URL,
-    INGV_HTTP_URL,
-    EARLYEST_HTTP_URL,
-    JMA_ATOM_LONG_URL,
-    PTWC_CAP_URL,
-    USGS_HTTP_URL,
-    HKO_HTTP_URL,
-    GFZ_HTTP_URL,
-    USP_HTTP_URL,
-    CWA_REPORT_HTTP_URL,
-    EMSC_HTTP_URL,
-    TMD_HTTP_URL,
-    BCSF_HTTP_URL,
-    KMA_HTTP_URL,
-    MMD_HTTP_URL,
-    NRCAN_HTTP_URL,
-    CENC_HTTP_URL,
-    DEFAULT_HTTP_POLL_INTERVALS,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
+    JIAN_SUB_SOURCE_SPECS,
+    jian_logical_key,
+    JIAN_MASTER_KEY,
+    WOLFX_MASTER_KEY,
     WHEWS_ALL_URL,
     WHEWS_WS_URLS,
     WHEWS_HOST_PRIMARY,
     WHEWS_HOST_BACKUP,
     DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
-    DATA_PROVIDER_OFFICIAL,
     normalize_data_provider,
+    wolfx_master_enabled,
     normalize_whews_host,
+    whews_host_supports_cea,
     is_whews_url,
     is_whews_dedicated_endpoint,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
-    EMSC_WSS_URL,
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     EQSC_WS_URL,
+    DEFAULT_HTTP_POLL_INTERVALS,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path, get_resource_path
@@ -1322,6 +1308,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('whews_parse_sgc_cb', 'whews_parse_sgc'),
                 ('whews_parse_ga_cb', 'whews_parse_ga'),
                 ('whews_parse_cenais_cb', 'whews_parse_cenais'),
+                ('whews_parse_gsras_cb', 'whews_parse_gsras'),
+                ('whews_parse_bgs_cb', 'whews_parse_bgs'),
+                ('whews_parse_ipma_cb', 'whews_parse_ipma'),
+                ('whews_parse_ssn_cb', 'whews_parse_ssn'),
+                ('whews_parse_afad_cb', 'whews_parse_afad'),
+                ('whews_parse_sed_cb', 'whews_parse_sed'),
+                ('whews_parse_noa_cb', 'whews_parse_noa'),
+                ('whews_parse_scsn_cb', 'whews_parse_scsn'),
+                ('whews_parse_iag_cb', 'whews_parse_iag'),
+                ('whews_parse_igp_cb', 'whews_parse_igp'),
+                ('whews_parse_nepal_cb', 'whews_parse_nepal'),
+                ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
                 ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ]:
                 cb = getattr(self, attr, None)
@@ -3405,7 +3403,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             show_warning(self, "错误", "音频设置保存失败")
 
     def _create_data_source_tab(self):
-        """创建数据源设置标签页（顶部三选一：Fan Studio / WeJet / 官方+Wolfx）。"""
+        """创建数据源设置标签页（主数据源二选一 + 全局辅助源）。"""
         scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
         _prepare_scroll_body(scrollable_widget)
@@ -3416,29 +3414,12 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         fanstudio_http_poll_sources = [
             (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
         ]
-        intl_sources = [  # 国际/独立 HTTP/WS 数据源：(URL, 显示名, 默认是否启用)
-            (BMKG_HTTP_URL, "BMKG 印尼地震速报", False),
-            (GEONET_HTTP_URL, "GeoNet 新西兰地震速报", False),
-            (INGV_HTTP_URL, "INGV 意大利地震速报", False),
-            (EARLYEST_HTTP_URL, "Early-est 地震预警", False),
-            (JMA_ATOM_LONG_URL, "JMA-Atom 火山情报（长周期）", False),
-            (PTWC_CAP_URL, "PTWC 太平洋海啸预警", False),
-            (USGS_HTTP_URL, "USGS 美国地质调查局", False),
-            (EMSC_WSS_URL, "EMSC 欧洲地中海地震中心（WebSocket）", False),
-            (HKO_HTTP_URL, "HKO 香港天文台", False),
-            (GFZ_HTTP_URL, "GFZ 德国地学研究中心", False),
-            (USP_HTTP_URL, "USP 巴西圣保罗大学", False),
-            (CWA_REPORT_HTTP_URL, "CWA 台湾中央气象署速报（ExpTech）", False),
-            (EMSC_HTTP_URL, "EMSC 欧洲地中海地震中心（HTTP）", False),
-            (TMD_HTTP_URL, "TMD 泰国地震局", False),
-            (BCSF_HTTP_URL, "BCSF 法国中央地震研究所", False),
-            (KMA_HTTP_URL, "KMA 韩国气象厅（HTTP）", False),
-            (MMD_HTTP_URL, "MMD 马来西亚气象局", False),
-            (NRCAN_HTTP_URL, "NRCan 加拿大自然资源部", False),
-            (CENC_HTTP_URL, "CENC 中国地震台网（个推 HTTP）", False),
+        jian_sources = [
+            (jian_logical_key(short), label, False)
+            for short, label in JIAN_SUB_SOURCE_SPECS
         ]
 
-        # 顶部：主数据源提供者三选一（并排）
+        # 顶部：主数据源二选一
         group_provider = QGroupBox("主数据源")
         _prep_groupbox(group_provider)
         gp_layout = QVBoxLayout(group_provider)
@@ -3449,22 +3430,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.data_provider_group = QButtonGroup(self)
         self.radio_provider_fanstudio = QRadioButton("Fan Studio")
         self.radio_provider_whews = QRadioButton("WeJet")
-        self.radio_provider_official = QRadioButton("官方数据源+Wolfx")
-        for rb in (
-            self.radio_provider_fanstudio,
-            self.radio_provider_whews,
-            self.radio_provider_official,
-        ):
+        for rb in (self.radio_provider_fanstudio, self.radio_provider_whews):
             _set_widget_style(rb, STYLE_PROVIDER_RADIO)
             provider_row.addWidget(rb)
         self.data_provider_group.addButton(self.radio_provider_fanstudio, 0)
         self.data_provider_group.addButton(self.radio_provider_whews, 1)
-        self.data_provider_group.addButton(self.radio_provider_official, 2)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。")
+        provider_hint = QLabel("二者择一；切换后清空缓冲并重连。")
         provider_hint.setToolTip(
-            "保存后仅连接当前提供者。台风 / CENC 烈度速报 / EQSC / P2PQuake 为全局辅助项，切换后仍会重新接入。"
+            "保存后仅连接当前主提供者。"
+            "Jian Project 接替原「官方 HTTP」国际速报；"
+            "Wolfx / 台风 / CENC 烈度速报 / EQSC / P2PQuake 为全局辅助项，与主源无关。"
         )
         _set_widget_style(provider_hint, STYLE_HINT)
         provider_hint.setWordWrap(True)
@@ -3716,13 +3693,30 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.whews_parse_sgc_cb = _wh_cb("whews_parse_sgc", "哥伦比亚地质服务局速报")
         self.whews_parse_ga_cb = _wh_cb("whews_parse_ga", "澳大利亚地球科学局速报")
         self.whews_parse_cenais_cb = _wh_cb("whews_parse_cenais", "古巴国家地震研究中心速报")
+        self.whews_parse_gsras_cb = _wh_cb("whews_parse_gsras", "希腊地震研究与监测中心速报")
+        self.whews_parse_bgs_cb = _wh_cb("whews_parse_bgs", "英国地质调查局速报")
+        self.whews_parse_ipma_cb = _wh_cb("whews_parse_ipma", "葡萄牙海洋与大气研究所速报")
+        self.whews_parse_ssn_cb = _wh_cb("whews_parse_ssn", "墨西哥国家地震局速报")
+        self.whews_parse_afad_cb = _wh_cb("whews_parse_afad", "土耳其灾害和应急管理总局速报")
+        self.whews_parse_sed_cb = _wh_cb("whews_parse_sed", "瑞士地震局速报")
+        self.whews_parse_noa_cb = _wh_cb("whews_parse_noa", "挪威地震阵列速报")
+        self.whews_parse_scsn_cb = _wh_cb("whews_parse_scsn", "南加州地震网络速报")
+        self.whews_parse_iag_cb = _wh_cb("whews_parse_iag", "阿根廷国家地震研究所速报")
+        self.whews_parse_igp_cb = _wh_cb("whews_parse_igp", "秘鲁地质矿产与金属研究所速报")
+        self.whews_parse_nepal_cb = _wh_cb("whews_parse_nepal", "尼泊尔地震局速报")
+        self.whews_parse_typhoon_cb = _wh_cb("whews_parse_typhoon", "台风实况（/ws/typhoon）")
         self.whews_parse_beijing_cb = _wh_cb("whews_parse_beijing", "北京地震局速报")
         self.whews_parse_yunnan_cb = _wh_cb("whews_parse_yunnan", "云南地震局速报")
         self.whews_parse_ningxia_cb = _wh_cb("whews_parse_ningxia", "宁夏地震局速报")
 
         def _update_whews_host_ui():
-            """切换主站/备用时显示或隐藏 CEA 解析项（备用站无 CEA）。"""
-            use_cea = self.radio_whews_host_primary.isChecked()
+            """备站 api.2v8.cn 含 CEA；主站 api.beecld.com 不含。"""
+            host = (
+                WHEWS_HOST_BACKUP
+                if self.radio_whews_host_backup.isChecked()
+                else WHEWS_HOST_PRIMARY
+            )
+            use_cea = whews_host_supports_cea(host)
             self.whews_parse_cea_cb.setVisible(use_cea)
             self.whews_parse_cea_pr_cb.setVisible(use_cea)
             for cfg in ("whews_parse_cea", "whews_parse_cea_pr"):
@@ -3737,30 +3731,57 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         wh_panel_layout.addWidget(group_whews)
         scroll_layout.addWidget(self.ds_panel_whews)
 
-        # ---------- 官方数据源+Wolfx 面板 ----------
-        self.ds_panel_official = QWidget()
-        apply_light_palette(self.ds_panel_official, COLOR_PAGE_BG, COLOR_TEXT)
-        self.ds_panel_official.setAttribute(Qt.WA_StyledBackground, True)
-        _set_widget_style(self.ds_panel_official, f"background-color: {COLOR_PAGE_BG};")
-        of_panel_layout = QVBoxLayout(self.ds_panel_official)
-        of_panel_layout.setContentsMargins(0, 0, 0, 0)
-        of_panel_layout.setSpacing(SPACING_BLOCK)
+        # ---------- 全局辅助源：Jian Project ----------
+        group_jian = QGroupBox("Jian Project")
+        _prep_groupbox(group_jian)
+        gj_layout = QVBoxLayout(group_jian)
+        gj_layout.setContentsMargins(*GROUP_MARGINS)
+        gj_layout.setSpacing(GROUP_SPACING)
+        jian_hint = QLabel(
+            "接替原「官方 HTTP」国际速报与预警；经 WebSocket api.sismotide.top/all 推送，任意主提供者下可用。"
+        )
+        _set_widget_style(jian_hint, STYLE_HINT)
+        jian_hint.setWordWrap(True)
+        gj_layout.addWidget(jian_hint)
+        self._add_source_checkbox(
+            group_jian,
+            JIAN_MASTER_KEY,
+            "Jian Project 总开关",
+            default_value=False,
+            status_key=JIAN_MASTER_KEY,
+            status_tooltip="连接状态：已启用 / 未启用",
+            status_connected_text="已启用",
+            status_disconnected_text="未启用",
+        )
+        for url, label, default_on in jian_sources:
+            self._add_source_checkbox(
+                group_jian,
+                url,
+                label,
+                default_value=default_on,
+                status_key=url,
+                status_tooltip="解析状态：已启用 / 未启用",
+                status_connected_text="已启用",
+                status_disconnected_text="未启用",
+            )
 
-        group_ali = QGroupBox("Wolfx")
-        _prep_groupbox(group_ali)
-        ga_layout = QVBoxLayout(group_ali)
-        ga_layout.setContentsMargins(*GROUP_MARGINS)
-        ga_layout.setSpacing(GROUP_SPACING)
-        ali_hint = QLabel("勾选后连接 all_eew；台湾走独立通道。")
-        ali_hint.setToolTip("中国地震台网/JMA 地震情報经 all_eew 推送，需同时勾选对应项。")
-        _set_widget_style(ali_hint, STYLE_HINT)
-        ali_hint.setWordWrap(True)
-        ga_layout.addWidget(ali_hint)
-        wolfx_url = WOLFX_ALL_EEW_URL
+        # ---------- 全局辅助源：Wolfx ----------
+        group_wolfx = QGroupBox("Wolfx")
+        _prep_groupbox(group_wolfx)
+        gw_layout = QVBoxLayout(group_wolfx)
+        gw_layout.setContentsMargins(*GROUP_MARGINS)
+        gw_layout.setSpacing(GROUP_SPACING)
+        wolfx_hint = QLabel("全局辅助源（非主数据源）：预警与列表经 all_eew；台湾走独立通道。")
+        wolfx_hint.setToolTip("中国地震台网/JMA 地震情報经 all_eew 推送，需同时勾选对应项。")
+        _set_widget_style(wolfx_hint, STYLE_HINT)
+        wolfx_hint.setWordWrap(True)
+        gw_layout.addWidget(wolfx_hint)
         self.wolfx_all_connect_cb = QCheckBox("Wolfx")
-        self.wolfx_all_connect_cb.setChecked(self.config.enabled_sources.get(wolfx_url, True))
+        self.wolfx_all_connect_cb.setChecked(
+            wolfx_master_enabled(self.config.enabled_sources)
+        )
         _set_widget_style(self.wolfx_all_connect_cb, STYLE_CHECKBOX_SOURCE)
-        ga_layout.addWidget(self.wolfx_all_connect_cb)
+        gw_layout.addWidget(self.wolfx_all_connect_cb)
 
         def _wolfx_row(parse_key: str, title: str):
             """创建 Wolfx 子源复选框行（含解析状态标签）。"""
@@ -3770,30 +3791,37 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             st = QLabel("未解析")
             _set_widget_style(st, STYLE_STATUS_NEUTRAL)
             st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            st.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            st.setToolTip(
+                "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析"
+            )
             self.source_parse_labels[parse_key] = st
-            self.source_status_texts[parse_key] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
+            self.source_status_texts[parse_key] = (
+                "已解析",
+                "未解析",
+                "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析",
+            )
             row = QHBoxLayout()
             row.addWidget(cb)
             row.addStretch()
             row.addWidget(st)
-            ga_layout.addLayout(row)
+            gw_layout.addLayout(row)
             return cb
 
-        self.ali_all_parse_nied_cb = _wolfx_row('ali_all_parse_nied', "緊急地震速報（JMA）")
-        self.ali_all_parse_early_est_cb = _wolfx_row('ali_all_parse_early_est', "四川省地震局")
-        self.ali_all_parse_jma_volcano_cb = _wolfx_row('ali_all_parse_jma_volcano', "福建省地震局")
-        self.ali_all_parse_bmkg_cb = _wolfx_row('ali_all_parse_bmkg', "中国地震台网地震预警")
-        self.ali_all_parse_cq_eew_cb = _wolfx_row('ali_all_parse_cq_eew', "重庆市地震局")
-        wolfx_cwa_url = WOLFX_CWA_EEW_URL
+        self.ali_all_parse_nied_cb = _wolfx_row("ali_all_parse_nied", "緊急地震速報（JMA）")
+        self.ali_all_parse_early_est_cb = _wolfx_row("ali_all_parse_early_est", "四川省地震局")
+        self.ali_all_parse_jma_volcano_cb = _wolfx_row(
+            "ali_all_parse_jma_volcano", "福建省地震局"
+        )
+        self.ali_all_parse_bmkg_cb = _wolfx_row("ali_all_parse_bmkg", "中国地震台网地震预警")
+        self.ali_all_parse_cq_eew_cb = _wolfx_row("ali_all_parse_cq_eew", "重庆市地震局")
         self._add_source_checkbox(
-            group_ali,
-            wolfx_cwa_url,
+            group_wolfx,
+            WOLFX_CWA_EEW_URL,
             "台湾中央气象署",
-            default_value=False
+            default_value=False,
         )
         self._add_source_checkbox(
-            group_ali,
+            group_wolfx,
             WOLFX_CENC_EQLIST_URL,
             "中国地震台网地震信息",
             default_value=False,
@@ -3803,7 +3831,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             status_disconnected_text="未解析",
         )
         self._add_source_checkbox(
-            group_ali,
+            group_wolfx,
             WOLFX_JMA_EQLIST_URL,
             "JMA 地震情報",
             default_value=False,
@@ -3812,32 +3840,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             status_connected_text="已解析",
             status_disconnected_text="未解析",
         )
-        of_panel_layout.addWidget(group_ali)
-
-        group_intl = QGroupBox("国际数据源")
-        _prep_groupbox(group_intl)
-        gi_layout = QVBoxLayout(group_intl)
-        gi_layout.setContentsMargins(*GROUP_MARGINS)
-        gi_layout.setSpacing(GROUP_SPACING)
-        intl_hint = QLabel("勾选后启用对应连接。")
-        _set_widget_style(intl_hint, STYLE_HINT)
-        intl_hint.setWordWrap(True)
-        gi_layout.addWidget(intl_hint)
-        for url, label, default_on in intl_sources:
-            is_ws = str(url).startswith(("ws://", "wss://"))
-            self._add_source_checkbox(
-                group_intl,
-                url,
-                label,
-                default_value=default_on,
-                status_key=url,
-                status_tooltip=(
-                    "连接状态：已启用 / 未启用" if is_ws else "拉取状态：已启用 / 未启用"
-                ),
-                status_connected_text="已启用",
-                status_disconnected_text="未启用",
-            )
-        of_panel_layout.addWidget(group_intl)
 
         group_history = QGroupBox("P2PQuake")
         _prep_groupbox(group_history)
@@ -3883,7 +3885,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         self.p2pquake_parse_551_cb = _p2p_parse_row("p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報")
         self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")
-        # P2PQuake 不放入 official 面板：固定在数据源页最下方，切换提供者时始终可见
+        # P2PQuake：固定在全局辅助区，切换主提供者时始终可见
 
         # CENC 烈度速报（Nowquake）：与 P2P / 台风一样固定在提供者面板下方，任意提供者均可启用
         group_cenc_ir = QGroupBox("CENC 烈度速报")
@@ -4045,49 +4047,28 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         )
         self._add_http_poll_interval_grid(gt_layout, fanstudio_http_poll_sources)
 
-        poll_interval_sources = [
-            (url, label) for url, label, _ in intl_sources if not str(url).startswith(("ws://", "wss://"))
-        ]
-        group_poll = QGroupBox("数据源访问间隔")
-        _prep_groupbox(group_poll)
-        gp_layout = QVBoxLayout(group_poll)
-        gp_layout.setContentsMargins(*GROUP_MARGINS)
-        gp_layout.setSpacing(GROUP_SPACING)
-        poll_hint = QLabel("各源独立设置轮询间隔（秒，最低 1）。")
-        _set_widget_style(poll_hint, STYLE_HINT)
-        poll_hint.setWordWrap(True)
-        gp_layout.addWidget(poll_hint)
-        self._add_http_poll_interval_grid(gp_layout, poll_interval_sources)
-        of_panel_layout.addWidget(group_poll)
-        scroll_layout.addWidget(self.ds_panel_official)
-
-        # 台风 / CENC 烈度速报 / EQSC / P2PQuake：固定在三个提供者面板下方（切换提供者时始终可见）
+        scroll_layout.addWidget(group_jian)
+        scroll_layout.addWidget(group_wolfx)
         scroll_layout.addWidget(group_typhoon)
         scroll_layout.addWidget(group_cenc_ir)
         scroll_layout.addWidget(group_eqsc)
         scroll_layout.addWidget(group_history)
 
-        # 按配置选中提供者并切换可见性（参考百度翻译区域 setVisible）
-        provider = normalize_data_provider(getattr(self.config, "data_provider", DATA_PROVIDER_FANSTUDIO))
+        provider = normalize_data_provider(
+            getattr(self.config, "data_provider", DATA_PROVIDER_FANSTUDIO)
+        )
         if provider == DATA_PROVIDER_WHEWS:
             self.radio_provider_whews.setChecked(True)
-        elif provider == DATA_PROVIDER_OFFICIAL:
-            self.radio_provider_official.setChecked(True)
         else:
             self.radio_provider_fanstudio.setChecked(True)
 
         def _update_data_provider_panels_visible():
-            """切换数据源提供者时显示/隐藏对应配置面板（台风 / 烈度速报 / EQSC / P2PQuake 始终可见）。"""
-            show_fs = self.radio_provider_fanstudio.isChecked()
-            show_wh = self.radio_provider_whews.isChecked()
-            show_of = self.radio_provider_official.isChecked()
-            self.ds_panel_fanstudio.setVisible(show_fs)
-            self.ds_panel_whews.setVisible(show_wh)
-            self.ds_panel_official.setVisible(show_of)
+            """切换主数据源时显示/隐藏 Fan Studio / WeJet 面板。"""
+            self.ds_panel_fanstudio.setVisible(self.radio_provider_fanstudio.isChecked())
+            self.ds_panel_whews.setVisible(self.radio_provider_whews.isChecked())
 
         self.radio_provider_fanstudio.toggled.connect(lambda _: _update_data_provider_panels_visible())
         self.radio_provider_whews.toggled.connect(lambda _: _update_data_provider_panels_visible())
-        self.radio_provider_official.toggled.connect(lambda _: _update_data_provider_panels_visible())
         _update_data_provider_panels_visible()
 
         scroll_layout.addStretch()
@@ -4214,8 +4195,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         """从设置页单选框读取当前数据源提供者。"""
         if hasattr(self, "radio_provider_whews") and self.radio_provider_whews.isChecked():
             return DATA_PROVIDER_WHEWS
-        if hasattr(self, "radio_provider_official") and self.radio_provider_official.isChecked():
-            return DATA_PROVIDER_OFFICIAL
         return DATA_PROVIDER_FANSTUDIO
 
     def _make_http_poll_spinbox(self, url: str) -> QSpinBox:
@@ -4469,6 +4448,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'whews_parse_sgc_cb',
             'whews_parse_ga_cb',
             'whews_parse_cenais_cb',
+            'whews_parse_gsras_cb',
+            'whews_parse_bgs_cb',
+            'whews_parse_ipma_cb',
+            'whews_parse_ssn_cb',
+            'whews_parse_afad_cb',
+            'whews_parse_sed_cb',
+            'whews_parse_noa_cb',
+            'whews_parse_scsn_cb',
+            'whews_parse_iag_cb',
+            'whews_parse_igp_cb',
+            'whews_parse_nepal_cb',
+            'whews_parse_typhoon_cb',
             'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
             'p2pquake_parse_552_cb',
@@ -4501,7 +4492,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.whews_all_connect_cb.setChecked(self.config.enabled_sources.get(urls.get("all", WHEWS_ALL_URL), False))
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(
-                self.config.enabled_sources.get(WOLFX_ALL_EEW_URL, True)
+                wolfx_master_enabled(self.config.enabled_sources)
             )
         if hasattr(self, "p2pquake_connect_cb"):
             self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
@@ -4565,6 +4556,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_sgc_cb', 'whews_parse_sgc'),
             ('whews_parse_ga_cb', 'whews_parse_ga'),
             ('whews_parse_cenais_cb', 'whews_parse_cenais'),
+            ('whews_parse_gsras_cb', 'whews_parse_gsras'),
+            ('whews_parse_bgs_cb', 'whews_parse_bgs'),
+            ('whews_parse_ipma_cb', 'whews_parse_ipma'),
+            ('whews_parse_ssn_cb', 'whews_parse_ssn'),
+            ('whews_parse_afad_cb', 'whews_parse_afad'),
+            ('whews_parse_sed_cb', 'whews_parse_sed'),
+            ('whews_parse_noa_cb', 'whews_parse_noa'),
+            ('whews_parse_scsn_cb', 'whews_parse_scsn'),
+            ('whews_parse_iag_cb', 'whews_parse_iag'),
+            ('whews_parse_igp_cb', 'whews_parse_igp'),
+            ('whews_parse_nepal_cb', 'whews_parse_nepal'),
+            ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
             ('p2pquake_parse_552_cb', 'p2pquake_parse_552'),
@@ -6009,6 +6012,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_sgc_cb', 'whews_parse_sgc'),
             ('whews_parse_ga_cb', 'whews_parse_ga'),
             ('whews_parse_cenais_cb', 'whews_parse_cenais'),
+            ('whews_parse_gsras_cb', 'whews_parse_gsras'),
+            ('whews_parse_bgs_cb', 'whews_parse_bgs'),
+            ('whews_parse_ipma_cb', 'whews_parse_ipma'),
+            ('whews_parse_ssn_cb', 'whews_parse_ssn'),
+            ('whews_parse_afad_cb', 'whews_parse_afad'),
+            ('whews_parse_sed_cb', 'whews_parse_sed'),
+            ('whews_parse_noa_cb', 'whews_parse_noa'),
+            ('whews_parse_scsn_cb', 'whews_parse_scsn'),
+            ('whews_parse_iag_cb', 'whews_parse_iag'),
+            ('whews_parse_igp_cb', 'whews_parse_igp'),
+            ('whews_parse_nepal_cb', 'whews_parse_nepal'),
+            ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
             ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
@@ -6026,8 +6041,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if cb is not None:
                 setattr(self.config.message_config, cfg_name, cb.isChecked())
         # JMA 情报仅走 P2PQuake：强制关闭无界科技情报解析（若配置残留）
-        if hasattr(self.config.message_config, "whews_parse_jma"):
-            self.config.message_config.whews_parse_jma = False
         if hasattr(self, 'ali_all_parse_nied_cb'):
             self.config.message_config.ali_all_parse_nied = self.ali_all_parse_nied_cb.isChecked()
         if hasattr(self, 'ali_all_parse_early_est_cb'):
@@ -6326,7 +6339,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ):
                 wolfx_on = True
                 self.wolfx_all_connect_cb.setChecked(True)
+            self.config.enabled_sources[WOLFX_MASTER_KEY] = wolfx_on
             self.config.enabled_sources[WOLFX_ALL_EEW_URL] = wolfx_on
+            if hasattr(self.config, "_ensure_wolfx_source_defaults"):
+                self.config._ensure_wolfx_source_defaults()
         # EQSC：总开关 + 解析勾选 → 各 HTTP 子源；强制关闭不稳定的 WebSocket
         for attr, cfg_name in (
             ("eqsc_parse_jma_eew_cb", "eqsc_parse_jma_eew"),

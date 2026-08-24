@@ -9,7 +9,8 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
 
 from .base_adapter import BaseAdapter
 from utils import timezone_utils
@@ -40,12 +41,30 @@ def _normalize_shock_time_raw(raw: str) -> str:
     return s
 
 
+def _epoch_ms_to_display(ms: int) -> str:
+    """毫秒时间戳转展示时间（默认东八区）。"""
+    try:
+        dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone(timedelta(hours=8)))
+        return timezone_utils.cst_to_display(dt.strftime("%Y-%m-%d %H:%M:%S"))
+    except (ValueError, TypeError, OSError, OverflowError):
+        return ""
+
+
 def _parse_shock_time(data: Dict[str, Any]) -> str:
-    """从 shockTime / id（EE_ 前缀）/ reportTime 解析发震时间。"""
-    for key in ("shockTime", "shock_time"):
-        raw = str(data.get(key) or "").strip()
-        if raw:
-            normalized = _normalize_shock_time_raw(raw)
+    """从 originTime / shockTime / id（EE_ 前缀）/ reportTime 解析发震时间。"""
+    for key in ("originTime", "shockTime", "shock_time"):
+        raw = data.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (int, float)) or (
+            isinstance(raw, str) and raw.strip().isdigit()
+        ):
+            text = _epoch_ms_to_display(int(raw))
+            if text:
+                return text
+        raw_str = str(raw).strip()
+        if raw_str:
+            normalized = _normalize_shock_time_raw(raw_str)
             return timezone_utils.cst_to_display(normalized) if normalized else ""
 
     id_raw = _strip_html(str(data.get("id") or ""))
@@ -76,9 +95,18 @@ def _parse_updates(data: Dict[str, Any]) -> Optional[int]:
 
 
 def _parse_organization(data: Dict[str, Any]) -> str:
-    """机构名：source / sourceName，默认「自定义」。"""
+    """机构名：source / sourceName / 嵌套 source 对象，默认「自定义」。"""
+    nested = data.get("source")
+    if isinstance(nested, dict):
+        for key in ("name", "sourceName", "title"):
+            name = _strip_html(str(nested.get(key) or ""))
+            if name:
+                return name
     for key in ("source", "sourceName"):
-        name = _strip_html(str(data.get(key) or ""))
+        val = data.get(key)
+        if isinstance(val, dict):
+            continue
+        name = _strip_html(str(val or ""))
         if name:
             return name
     return "自定义"
@@ -93,7 +121,9 @@ def _build_event_id(
     生成稳定 event_id。
     beecld 等源的 id 可能含 HTML 或仅 ``EE_ 发震时间``；无效时用地名+发震时间。
     """
-    raw_id = _strip_html(str(data.get("id") or data.get("eventId") or ""))
+    raw_id = _strip_html(
+        str(data.get("id") or data.get("eventId") or data.get("eventID") or "")
+    )
     if raw_id and "<" not in raw_id and len(raw_id) >= 4:
         if not raw_id.upper().startswith("EE_"):
             return raw_id
@@ -107,23 +137,37 @@ def _build_event_id(
 class CustomAdapter(BaseAdapter):
     """自定义数据源适配器，解析约定格式的预警 JSON"""
 
+    def parse_all(self, raw_data: Any) -> List[Dict[str, Any]]:
+        """解析单条或多条记录（数组时返回全部有效项）。"""
+        if raw_data is None:
+            return []
+        if isinstance(raw_data, list):
+            results: List[Dict[str, Any]] = []
+            for item in raw_data:
+                if not isinstance(item, dict):
+                    continue
+                if "Data" in item and isinstance(item.get("Data"), dict):
+                    one = self._parse_record(item["Data"], raw_data=item)
+                else:
+                    one = self._parse_record(item, raw_data=item)
+                if one:
+                    results.append(one)
+            return results
+        if isinstance(raw_data, dict):
+            if "Data" in raw_data and isinstance(raw_data.get("Data"), dict):
+                one = self._parse_record(raw_data["Data"], raw_data=raw_data)
+            else:
+                one = self._parse_record(raw_data, raw_data=raw_data)
+            return [one] if one else []
+        return []
+
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
         """
         解析原始数据。支持格式 A（平铺）或格式 B（Data 嵌套）。
-        若为数组则取第一条解析。
+        若为数组则取第一条有效记录。
         """
-        if raw_data is None:
-            return None
-        data = raw_data
-        if isinstance(data, list):
-            if not data:
-                return None
-            data = data[0]
-        if not isinstance(data, dict):
-            return None
-        if "Data" in data and isinstance(data["Data"], dict):
-            return self._parse_record(data["Data"], raw_data=data)
-        return self._parse_record(data, raw_data=data)
+        items = self.parse_all(raw_data)
+        return items[0] if items else None
 
     def _parse_record(
         self,
@@ -134,7 +178,12 @@ class CustomAdapter(BaseAdapter):
         """解析单条预警记录（平铺或 Data 内层）。"""
         place_name = _strip_html(str(data.get("placeName") or ""))
         if not place_name:
-            return None
+            lat = self._safe_float(data.get("latitude"), default=None)
+            lon = self._safe_float(data.get("longitude"), default=None)
+            if lat is not None and lon is not None:
+                place_name = f"{lat:.2f}°N, {lon:.2f}°E" if lat >= 0 else f"{abs(lat):.2f}°S, {lon:.2f}°E"
+            else:
+                return None
 
         shock_time = _parse_shock_time(data)
         magnitude = self._safe_float(data.get("magnitude", 0))
@@ -144,6 +193,12 @@ class CustomAdapter(BaseAdapter):
         updates = _parse_updates(data)
         organization = _parse_organization(data)
         event_id = _build_event_id(data, place_name, shock_time)
+        org_lower = organization.lower()
+        source_type = (
+            "globalquake"
+            if "globalquake" in org_lower or "地震预警" in organization
+            else "custom"
+        )
 
         result: Dict[str, Any] = {
             "type": "warning",
@@ -154,7 +209,7 @@ class CustomAdapter(BaseAdapter):
             "depth": depth,
             "shock_time": shock_time,
             "organization": organization,
-            "source_type": "custom",
+            "source_type": source_type,
             "updates": updates,
             "raw_data": raw_data,
         }
@@ -170,7 +225,7 @@ class CustomAdapter(BaseAdapter):
 
         return result
 
-    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+    def _safe_float(self, value: Any, default: Optional[float] = 0.0) -> Optional[float]:
         """安全转换为浮点数。"""
         try:
             if value is None:

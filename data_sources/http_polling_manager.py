@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 HTTP轮询管理器
-用于管理HTTP API数据源的定期轮询
+用于管理HTTP API数据源的定期轮询（台风 / P2P 补拉 / EQSC / 自定义源）
 """
 
 import time
@@ -16,86 +16,37 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import (
-    Config,  # 读取应用配置
-    APP_VERSION,  # 用于设置 User-Agent 的版本号
-    P2PQUAKE_HTTP_SOURCE_KEYS,  # P2PQuake 仅启动补拉，不进持续轮询
-    FANSTUDIO_HTTP_SOURCE_KEYS,  # Fan Studio HTTP 数据源键集合
+    Config,
+    APP_VERSION,
+    P2PQUAKE_HTTP_SOURCE_KEYS,
+    FANSTUDIO_HTTP_SOURCE_KEYS,
     fanstudio_http_canonical_key,
-    BMKG_HTTP_URL,  # 印尼 BMKG 地震数据地址
-    GEONET_HTTP_URL,  # 新西兰 GeoNet 地震数据地址
-    INGV_HTTP_URL,  # 意大利 INGV 地震数据地址
-    EARLYEST_HTTP_URL,  # INGV Early-est 数据地址
-    JMA_ATOM_LONG_URL,  # 日本气象厅火山 XML 地址
-    PTWC_CAP_URL,  # PTWC 海啸 CAP 地址
-    USGS_HTTP_URL,
-    HKO_HTTP_URL,
-    GFZ_HTTP_URL,
-    USP_HTTP_URL,
-    CWA_REPORT_HTTP_URL,
-    EMSC_HTTP_URL,
-    TMD_HTTP_URL,
-    BCSF_HTTP_URL,
-    KMA_HTTP_URL,
-    MMD_HTTP_URL,
-    NRCAN_HTTP_URL,
-    CENC_HTTP_URL,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     EQSC_HTTP_URL_TO_SCOPE,
-)
-from adapters import (
-    FanStudioHttpAdapter,
-    P2PQuakeAdapter,
-    P2PQuakeTsunamiAdapter,
-    CustomAdapter,
-    BMKGAdapter,
-    GeoNetAdapter,
-    INGVAdapter,
-    EarlyEstAdapter,
-    JmaAtomAdapter,
-    PtwcAdapter,
-    UsgsAdapter,
-    HkoAdapter,
-    GfzAdapter,
-    UspAdapter,
-    CwaReportAdapter,
-    EmscHttpAdapter,
-    TmdAdapter,
-    BcsfAdapter,
-    KmaHttpAdapter,
-    MmdAdapter,
-    NrcanAdapter,
-    CencHttpAdapter,
-    EqscAdapter,
 )
 from utils.logger import get_logger
 
 logger = get_logger()
 
-# 多路 HTTP 数据源同时启动时，各线程首次请求前的错开间隔（秒），减轻瞬时负载
-HTTP_POLL_STARTUP_STAGGER_SEC = 1.0  # 启动阶段错峰首包请求
+HTTP_POLL_STARTUP_STAGGER_SEC = 1.0
 
 
 def is_http_source_enabled(config: Config, url: str) -> bool:
-    """判断指定 HTTP URL 是否应发起 Get 轮询（与设置页开关、P2PQuake 总开关一致）。"""
+    """判断指定 HTTP URL 是否应发起轮询。"""
     if not url:
         return False
     low = url.lower()
     lookup_url = fanstudio_http_canonical_key(url) if "api.fanstudio" in low else url
-    # P2PQuake HTTP：仅由 WebSocketManager 启动时补拉一次，绝不进入持续轮询
     if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in low:
         return False
-    # EQSC 总开关逻辑键不轮询
     if url == EQSC_HTTP_MASTER or url.rstrip("/") == "https://equake.top":
         return False
-    # 自定义 HTTP：URL 非空即启用（由 start_all_connections 单独判断）
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
-        return True  # 自定义 HTTP 源只要 URL 匹配就允许轮询
-    # 三选一数据源提供者：不属于当前提供者的 HTTP 源不轮询
+        return True
     if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(lookup_url):
         return False
-    # EQSC 子源：需总开关开启且该 URL 启用；未配置登录密钥则跳过
     if url in EQSC_HTTP_SOURCE_KEYS or "equake.top" in low:
         if not bool(config.enabled_sources.get(EQSC_HTTP_MASTER, False)):
             return False
@@ -106,50 +57,37 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
             return False
         return True
     if not config.enabled_sources.get(lookup_url, False):
-        return False  # 未启用的数据源直接跳过
+        return False
     return True
 
 
 class HTTPPollingConnection:
     """单个HTTP轮询连接管理"""
-    
+
     def __init__(self, url: str, source_name: str, adapter: Any, config: Config, poll_interval: int = 2):
-        """
-        初始化HTTP轮询连接
-        
-        Args:
-            url: API URL
-            source_name: 数据源名称
-            adapter: 数据适配器
-            config: 配置对象
-            poll_interval: 轮询间隔（秒），默认2秒
-        """
         self.url = url
         self.source_name = source_name
         self.adapter = adapter
         self.config = config
         self.poll_interval = poll_interval
-        self._running = True  # 连接存活标志
-        self._last_poll_time = 0  # 上次轮询时间戳
-        self._last_data_hash = None  # 用于检测数据变化
-        self._last_error_log_time = 0.0  # 重复错误降噪：上次打 ERROR 的时间
-        self._last_error_msg = ""  # 重复错误降噪：上次错误摘要
-        self.last_request_ok = False  # 最近一次请求是否成功（供设置页状态指示）
-        self.last_request_time = 0.0  # 最近一次请求时间
+        self._running = True
+        self._last_poll_time = 0
+        self._last_data_hash = None
+        self._last_error_log_time = 0.0
+        self._last_error_msg = ""
+        self.last_request_ok = False
+        self.last_request_time = 0.0
         self._session = requests.Session()
         self._session.headers.update({
-            'User-Agent': f'EarthquakeScroller/{APP_VERSION}'  # 统一请求标识，便于服务端识别
+            'User-Agent': f'EarthquakeScroller/{APP_VERSION}'
         })
-        
-        # 所有HTTP数据源都需要禁用代理
         self._session.proxies = {
             'http': None,
             'https': None
-        }  # 强制直连，避免系统代理影响轮询
+        }
         logger.debug(f"[{self.source_name}] 已禁用代理（HTTP数据源）")
 
     def _request_verify_ssl(self) -> bool:
-        """自定义 HTTP 源可配置跳过 SSL 校验；适配器可声明 ssl_verify=False。"""
         custom_url = (self.config.custom_data_source_url or "").strip()
         if custom_url and self.url == custom_url:
             return not bool(getattr(self.config, 'custom_data_source_insecure_ssl', False))
@@ -163,288 +101,93 @@ class HTTPPollingConnection:
         message_callback: Callable[[str, Dict], None],
         startup_delay: float = 0.0,
     ):
-        """启动轮询
-
-        Args:
-            message_callback: 收到数据后的回调
-            startup_delay: 线程启动后、首次轮询前的等待秒数（用于多源错开首包请求）
-        """
+        """启动轮询线程。"""
         def poll_loop():
-            """轮询线程主循环：按间隔调用 _poll 并处理异常。"""
-            if startup_delay and startup_delay > 0:
+            if startup_delay > 0:
                 time.sleep(startup_delay)
-            logger.info(f"[{self.source_name}] HTTP轮询线程已启动，轮询间隔: {self.poll_interval}秒")
-            
             while self._running:
                 try:
-                    # 检查是否应该轮询
-                    current_time = time.time()
-                    if current_time - self._last_poll_time < self.poll_interval:
-                        time.sleep(1)
-                        continue
-                    
-                    # 执行轮询
-                    self._poll(message_callback)
-                    self._last_poll_time = current_time
-                    
+                    now = time.time()
+                    if now - self._last_poll_time >= self.poll_interval:
+                        self._last_poll_time = now
+                        self._poll_once(message_callback)
                 except Exception as e:
-                    logger.error(f"[{self.source_name}] 轮询循环出错: {e}")
-                    time.sleep(5)  # 出错后等待5秒再继续
-        
+                    logger.error(f"[{self.source_name}] 轮询循环异常: {e}")
+                time.sleep(0.5)
+
         thread = threading.Thread(target=poll_loop, daemon=True, name=f"HTTPPoll-{self.source_name}")
         thread.start()
-    
-    def _poll(self, message_callback: Callable[[str, Dict], None]):
-        """执行一次轮询（失败时最多重试3次，每次间隔2秒；同源同错误60秒内只记一次ERROR）"""
+
+    def _poll_once(self, message_callback: Callable[[str, Dict], None]):
         try:
-            if not is_http_source_enabled(self.config, self.url):
-                logger.debug(f"[{self.source_name}] 数据源已关闭，跳过 Get: {self.url}")
-                return
-            logger.debug(f"[{self.source_name}] 开始轮询: {self.url}")
-
-            timeout = int(getattr(self.adapter, "fetch_timeout", 30) or 30)
-            fetch_raw = getattr(self.adapter, "fetch_raw", None)
-            data = None
-            response = None
-
-            for attempt in range(1, 4):
-                try:
-                    if callable(fetch_raw):
-                        data = fetch_raw(self._session, self.url)
-                    else:
-                        req_headers = dict(getattr(self.adapter, "fetch_headers", None) or {})
-                        response = self._session.get(
-                            self.url,
-                            timeout=timeout,
-                            proxies={'http': None, 'https': None},
-                            headers=req_headers if req_headers else None,
-                            verify=self._request_verify_ssl(),
-                        )
-                        response.raise_for_status()
-                    break
-                except Exception as e:
-                    if attempt < 3:
-                        time.sleep(2)
-                        continue
-                    now = time.time()
-                    err_summary = f"{type(e).__name__}: {str(e)[:120]}"
-                    if now - self._last_error_log_time < 60 and err_summary == self._last_error_msg:
-                        logger.debug(f"[{self.source_name}] HTTP请求失败（已降噪）: {e}")
-                    else:
-                        is_ssl = isinstance(e, requests.exceptions.SSLError)
-                        if is_ssl and not self._request_verify_ssl():
-                            logger.warning(
-                                f"[{self.source_name}] HTTP请求失败（已跳过 SSL 校验仍失败）: {e}"
-                            )
-                        elif is_ssl:
-                            logger.warning(
-                                f"[{self.source_name}] HTTP请求失败（SSL 证书无效）: {e}"
-                            )
-                        else:
-                            logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
-                        self._last_error_log_time = now
-                        self._last_error_msg = err_summary
-                    self.last_request_ok = False
-                    return
-
-            if not callable(fetch_raw):
-                if response is None:
-                    self.last_request_ok = False
-                    return
-                response_format = getattr(self.adapter, "response_format", "json")
-                if response_format == "json":
-                    data = response.json()
-                elif response_format == "text":
-                    data = response.text
-                elif response_format == "bytes":
-                    data = response.content
-                else:
-                    data = response.content
-
-            if data is None:
-                self.last_request_ok = False
-                return
-
-            self.last_request_ok = True
+            verify = self._request_verify_ssl()
+            response = self._session.get(self.url, timeout=15, verify=verify)
             self.last_request_time = time.time()
-            
-            # 计算数据哈希（简单检测是否有新数据）
-            import hashlib
-            if isinstance(data, (bytes, bytearray)):
-                data_hash = hashlib.md5(bytes(data)).hexdigest()
-            elif isinstance(data, str):
-                data_hash = hashlib.md5(data.encode("utf-8", errors="replace")).hexdigest()
-            else:
-                data_str = json.dumps(data, sort_keys=True, default=str)
-                data_hash = hashlib.md5(data_str.encode()).hexdigest()
-            
-            # 如果数据没有变化，跳过处理
-            if data_hash == self._last_data_hash:
-                logger.debug(f"[{self.source_name}] 数据未变化，跳过处理")
+            self.last_request_ok = response.status_code == 200
+            if response.status_code != 200:
+                self._log_error_throttled(f"HTTP {response.status_code}")
                 return
-
-            is_first_poll = self._last_data_hash is None
+            try:
+                data = response.json()
+            except json.JSONDecodeError:
+                data = response.text
+            data_hash = hash(str(data))
+            if data_hash == self._last_data_hash:
+                return
             self._last_data_hash = data_hash
-            
-            # 使用适配器解析数据（P2PQuake HTTP 等仅需首条时由 parse() 返回单条）
-            logger.debug(f"[{self.source_name}] 开始解析数据，数据类型: {type(data)}, 数据长度: {len(data) if isinstance(data, (list, dict)) else 'N/A'}")
-            parsed_result = self.adapter.parse(data)
-            
-            if parsed_result:
-                if isinstance(parsed_result, list):
-                    for idx, item in enumerate(parsed_result, start=1):
-                        if is_first_poll and isinstance(item, dict):
-                            item["_suppress_tts"] = True
-                        message_callback(self.source_name, item)
-                    logger.info(f"[{self.source_name}] 解析成功，处理了{len(parsed_result)}条数据")
-                else:
-                    if is_first_poll and isinstance(parsed_result, dict):
-                        parsed_result["_suppress_tts"] = True
-                    logger.info(f"[{self.source_name}] 解析成功，解析结果: type={parsed_result.get('type')}, organization={parsed_result.get('organization')}, place_name={parsed_result.get('place_name')}")
-                    message_callback(self.source_name, parsed_result)
-                    logger.info(f"[{self.source_name}] 轮询成功，处理了最新1条数据")
-            else:
-                empty_data = (
-                    data is None
-                    or (isinstance(data, list) and len(data) == 0)
-                    or (isinstance(data, dict) and not data)
-                )
-                _silent_none_sources = (
-                    'p2pquake', 'p2pquake_tsunami',
-                    'fanstudio_typhoon', 'early_est',
-                    'eqsc_jma_eew', 'eqsc_jma_report', 'eqsc_jma_tsunami',
-                    'eqsc_cenc', 'eqsc_cenc_ir', 'eqsc_cwa', 'eqsc_hko',
-                    'eqsc_usgs', 'eqsc_emsc', 'eqsc_typhoon', 'eqsc_volcano',
-                )
-                if empty_data or self.source_name in _silent_none_sources:
-                    logger.debug(
-                        f"[{self.source_name}] 轮询成功，无新数据可解析（适配器返回 None）"
-                    )
-                else:
-                    logger.warning(
-                        f"[{self.source_name}] 轮询成功，但适配器解析返回None，可能数据格式不正确或解析失败"
-                    )
-                # 输出更详细的数据信息用于调试
-                if isinstance(data, dict):
-                    logger.debug(f"[{self.source_name}] 数据键: {list(data.keys())}")
-                    logger.debug(f"[{self.source_name}] 数据类型字段: {data.get('type', 'N/A')}")
-                    if 'No1' in data:
-                        logger.debug(f"[{self.source_name}] No1字段存在，类型: {type(data.get('No1'))}")
-                    else:
-                        logger.debug(f"[{self.source_name}] No1字段不存在")
-                elif isinstance(data, list):
-                    logger.debug(f"[{self.source_name}] 数据是列表，长度: {len(data)}")
-                    if len(data) > 0:
-                        logger.debug(f"[{self.source_name}] 列表第一项类型: {type(data[0])}, 内容预览: {str(data[0])[:300]}")
-                else:
-                    logger.debug(f"[{self.source_name}] 原始数据预览: {str(data)[:500] if isinstance(data, (str, dict, list)) else type(data)}")
-                
-        except requests.exceptions.RequestException as e:
-            self.last_request_ok = False
-            logger.error(f"[{self.source_name}] HTTP请求失败: {e}")
+            parsed = self.adapter.parse(data)
+            if parsed:
+                message_callback(self.source_name, parsed)
         except Exception as e:
             self.last_request_ok = False
-            logger.error(f"[{self.source_name}] 轮询处理失败: {e}")
-    
+            self.last_request_time = time.time()
+            self._log_error_throttled(str(e))
+
+    def _log_error_throttled(self, msg: str):
+        now = time.time()
+        if msg == self._last_error_msg and now - self._last_error_log_time < 60:
+            return
+        self._last_error_msg = msg
+        self._last_error_log_time = now
+        logger.error(f"[{self.source_name}] 轮询失败: {msg}")
+
     def stop(self):
-        """停止轮询"""
-        logger.info(f"[{self.source_name}] 正在停止HTTP轮询...")
         self._running = False
-        self._session.close()
 
 
 class HTTPPollingManager:
     """HTTP轮询管理器"""
-    
-    def __init__(self, message_callback: Callable[[str, Dict], None]):
-        """
-        初始化HTTP轮询管理器
-        
-        Args:
-            message_callback: 消息回调函数，接收(source_name, parsed_data)
-        """
+
+    def __init__(self, message_callback: Optional[Callable] = None):
         self.message_callback = message_callback
         self.config = Config()
         self.connections: Dict[str, HTTPPollingConnection] = {}
         self._running = True
-        
         logger.info("HTTP轮询管理器初始化完成")
-    
+
     def get_adapter(self, url: str) -> Optional[Any]:
-        """根据URL获取对应的适配器"""
-        # 自定义数据源（HTTP/HTTPS）
+        """根据URL获取对应的适配器。"""
         if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
             if url.startswith('http://') or url.startswith('https://'):
+                from adapters.custom_adapter import CustomAdapter
                 return CustomAdapter('custom', url)
-        # P2PQuake 海啸预报
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
+            from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
-        # Fan Studio 台风 HTTP 数据源
-        if "api.fanstudio.tech" in url:
-            if 'typhoon.php' in url:
-                return FanStudioHttpAdapter('fanstudio_typhoon', url)
-        # P2PQuake 地震情报
+        if "api.fanstudio.tech" in url and 'typhoon.php' in url:
+            from adapters.fanstudio_http_adapter import FanStudioHttpAdapter
+            return FanStudioHttpAdapter('fanstudio_typhoon', url)
         if 'api.p2pquake.net' in url:
+            from adapters.p2pquake_adapter import P2PQuakeAdapter
             return P2PQuakeAdapter('p2pquake', url)
-        if url == BMKG_HTTP_URL:
-            return BMKGAdapter('bmkg', url)
-        if url == GEONET_HTTP_URL:
-            return GeoNetAdapter('geonet', url)
-        if url == INGV_HTTP_URL:
-            return INGVAdapter('ingv', url)
-        if url == EARLYEST_HTTP_URL:
-            return EarlyEstAdapter('early_est', url)
-        if url == JMA_ATOM_LONG_URL:
-            return JmaAtomAdapter('jma_volcano', url)
-        if url == PTWC_CAP_URL:
-            return PtwcAdapter('ptwc', url)
-        if url == USGS_HTTP_URL:
-            return UsgsAdapter('usgs', url)
-        if url == HKO_HTTP_URL:
-            return HkoAdapter('hko', url)
-        if url == GFZ_HTTP_URL:
-            return GfzAdapter('gfz', url)
-        if url == USP_HTTP_URL:
-            return UspAdapter('usp', url)
-        if url == CWA_REPORT_HTTP_URL:
-            return CwaReportAdapter('cwa', url)
-        if url == EMSC_HTTP_URL:
-            return EmscHttpAdapter('emsc', url)
-        if url == TMD_HTTP_URL:
-            return TmdAdapter('tmd', url)
-        if url == BCSF_HTTP_URL:
-            return BcsfAdapter('bcsf', url)
-        if url == KMA_HTTP_URL:
-            return KmaHttpAdapter('kma', url)
-        if url == MMD_HTTP_URL:
-            return MmdAdapter('mmd', url)
-        if url == NRCAN_HTTP_URL:
-            return NrcanAdapter('nrcan', url)
-        if url == CENC_HTTP_URL:
-            return CencHttpAdapter('cenc', url)
-        # EQSC HTTP（总开关逻辑键不建连）
-        if url == EQSC_HTTP_MASTER:
-            return None
-        if url in EQSC_HTTP_URL_TO_SCOPE or (
-            isinstance(url, str) and "equake.top" in url.lower()
-            and (".json" in url.lower())
-        ):
-            scope = EQSC_HTTP_URL_TO_SCOPE.get(url)
-            if not scope:
-                path = (url or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
-                for u, s in EQSC_HTTP_URL_TO_SCOPE.items():
-                    if u.split("?", 1)[0].endswith(path):
-                        scope = s
-                        break
-            if scope:
-                source_name = self.config.get_source_name(url)
-                return EqscAdapter(source_name, url, http_scope=scope)
-            return None
-        # 已下线的 Wolfx HTTP 不提供适配器，跳过
+        if "equake.top" in url:
+            from adapters.eqsc_adapter import EqscAdapter
+            scope = EQSC_HTTP_URL_TO_SCOPE.get(url, "")
+            return EqscAdapter(scope or "eqsc", url)
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
         return None
-    
+
     def start_all_connections(self):
         """启动所有HTTP轮询连接"""
         http_urls = self._collect_desired_http_urls()
@@ -452,13 +195,11 @@ class HTTPPollingManager:
             logger.info("没有启用的HTTP数据源")
             return
 
-        # EQSC 多路轮询前预热 AccessToken，避免冷启动 stampede
         if any("equake.top" in (u or "").lower() for u in http_urls):
             login = (getattr(self.config.ws_config, "eqsc_login_token", "") or "").strip()
             if login:
                 try:
                     from utils.eqsc_credentials import warm_eqsc_access_token
-
                     ok, msg = warm_eqsc_access_token(login)
                     if ok:
                         logger.info("EQSC AccessToken 预热成功")
@@ -475,36 +216,26 @@ class HTTPPollingManager:
         http_urls = []
         for url in self.config.enabled_sources.keys():
             if url.startswith('http://') or url.startswith('https://'):
-                # P2PQuake HTTP 键即使残留为 True 也不轮询（启动补拉由 WSS 管理器完成）
                 if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in url.lower():
                     logger.debug(f"跳过 P2PQuake HTTP 持续轮询（仅启动补拉）: {url}")
                     continue
                 if url in FANSTUDIO_HTTP_SOURCE_KEYS:
                     if is_http_source_enabled(self.config, url):
                         http_urls.append(url)
-                        logger.debug(f"发现启用的 Fan Studio HTTP 数据源: {url}")
-                    else:
-                        logger.debug(f"Fan Studio HTTP 数据源已禁用: {url}")
                 elif is_http_source_enabled(self.config, url):
                     http_urls.append(url)
-                    logger.debug(f"发现启用的HTTP数据源: {url}")
-                else:
-                    logger.debug(f"HTTP数据源已禁用: {url}")
         custom_url = (self.config.custom_data_source_url or "").strip()
-        if custom_url and (custom_url.startswith('http://') or custom_url.startswith('https://')):
+        if custom_url and custom_url.startswith(('http://', 'https://')):
             if custom_url not in http_urls:
                 http_urls.append(custom_url)
-                logger.debug(f"发现自定义HTTP数据源: {custom_url}")
         return http_urls
 
     def _start_urls(self, http_urls: list, stagger: bool = True) -> None:
-        """启动给定 URL 列表中尚未运行的连接。"""
         http_started_index = len(self.connections)
         for url in http_urls:
             if url in self.connections:
                 continue
             source_name = self.config.get_source_name(url)
-            logger.debug(f"正在为 {url} 创建适配器，数据源名称: {source_name}")
             adapter = self.get_adapter(url)
             if adapter is None:
                 continue
@@ -520,77 +251,29 @@ class HTTPPollingManager:
             connection.start(self.message_callback, startup_delay=startup_delay)
             logger.info(f"已启动HTTP轮询: {source_name}（首包延迟 {startup_delay:.1f}s）")
 
-    def reload_connections(self) -> None:
-        """根据当前 Config 热启停 HTTP 轮询（无需重启进程）。"""
-        desired = self._collect_desired_http_urls()
-        desired_set = set(desired)
-        for url in list(self.connections.keys()):
-            if url in desired_set:
-                continue
-            conn = self.connections.pop(url, None)
-            if conn is None:
-                continue
-            try:
-                conn.stop()
-                logger.info(f"已热停止HTTP轮询: {conn.source_name}")
-            except Exception as e:
-                logger.error(f"热停止HTTP轮询 {url} 时出错: {e}")
-        self._running = True
-        # 热重载时若新增 EQSC 源，同样预热 Token
-        if any("equake.top" in (u or "").lower() for u in desired):
-            login = (getattr(self.config.ws_config, "eqsc_login_token", "") or "").strip()
-            if login:
-                try:
-                    from utils.eqsc_credentials import warm_eqsc_access_token
-
-                    ok, msg = warm_eqsc_access_token(login)
-                    if not ok:
-                        logger.warning(f"EQSC AccessToken 预热失败: {msg}")
-                except Exception as e:
-                    logger.warning(f"EQSC AccessToken 预热异常: {e}")
-        self._start_urls(desired, stagger=False)
-        self.update_poll_intervals(dict(self.config.http_poll_intervals))
-    
-    def get_custom_source_status(self, url: str) -> Optional[str]:
-        """
-        获取自定义数据源（HTTP/HTTPS）的最近一次请求状态，供设置页状态指示使用。
-
-        Args:
-            url: 自定义数据源 URL
-
-        Returns:
-            'ok' 表示最近一次请求成功，'error' 表示失败，None 表示该 URL 未在连接中（未配置或未运行）
-        """
-        if not url or url not in self.connections:
-            return None
-        conn = self.connections[url]
-        return 'ok' if conn.last_request_ok else 'error'
-    
-    def stop_all(self):
-        """停止所有轮询连接"""
-        logger.info("正在停止所有HTTP轮询连接...")
-        self._running = False
-        
-        for url, connection in self.connections.items():
-            try:
-                connection.stop()
-                logger.info(f"已停止HTTP轮询: {connection.source_name}")
-            except Exception as e:
-                logger.error(f"停止HTTP轮询 {url} 时出错: {e}")
-        
+    def reload_connections(self):
+        """根据当前配置重载 HTTP 轮询连接。"""
+        self.config = Config()
+        for conn in list(self.connections.values()):
+            conn.stop()
         self.connections.clear()
-        logger.info("所有HTTP轮询连接已停止")
+        if self.message_callback:
+            self.start_all_connections()
 
-    def update_poll_intervals(self, intervals: Dict[str, int]) -> None:
-        """热更新已运行连接的轮询间隔（秒）"""
-        for url, connection in self.connections.items():
-            lookup = fanstudio_http_canonical_key(url) if "api.fanstudio" in url else url
-            if lookup in intervals:
-                connection.poll_interval = max(1, int(intervals[lookup]))
-            elif url in intervals:
-                connection.poll_interval = max(1, int(intervals[url]))
-            else:
-                continue
-            logger.info(
-                f"已更新 HTTP 轮询间隔: {connection.source_name} -> {connection.poll_interval}s"
-            )
+    def get_custom_source_status(self, url: str) -> str:
+        """自定义 HTTP 源连接状态（供设置页展示）。"""
+        conn = self.connections.get(url)
+        if conn is None:
+            return "unknown"
+        if conn.last_request_ok:
+            return "ok"
+        if conn.last_request_time > 0:
+            return "error"
+        return "unknown"
+
+    def stop_all(self):
+        """停止所有轮询。"""
+        for conn in self.connections.values():
+            conn.stop()
+        self.connections.clear()
+        self._running = False

@@ -112,8 +112,11 @@ class _ScrollingTextMixin:
         self._render_font = QFont(self.font)
         self._image_cache: Dict[str, QPixmap] = {}
         self._image_cache_lock = threading.Lock()
+        gc = config.gui_config
+        self._image_cache_max = max(4, int(getattr(gc, "image_cache_max", 16) or 16))
         self._text_texture_cache: OrderedDict[Tuple[str, str, int], QPixmap] = OrderedDict()
         self._text_texture_cache_lock = threading.Lock()
+        self._text_texture_cache_max = max(4, int(getattr(gc, "text_texture_cache_max", 10) or 10))
         self._pil_font_cache: Dict[int, Any] = {}
         self._pil_font_cache_lock = threading.Lock()
         self._current_load_task_id = 0
@@ -163,12 +166,13 @@ class _ScrollingTextMixin:
         self._lead_badge_timer.timeout.connect(self._on_lead_badge_timeout)
 
         self.timer = QTimer(self)
-        self.timer.setTimerType(Qt.PreciseTimer)
+        # 字幕滚动用 CoarseTimer 足够；PreciseTimer 会明显抬高空闲功耗
+        self.timer.setTimerType(Qt.CoarseTimer)
         self.timer.timeout.connect(self._scroll)
-        target_fps = config.gui_config.target_fps
-        timer_interval = max(1, int(1000 / target_fps))
+        target_fps = max(1, int(config.gui_config.target_fps or 30))
+        timer_interval = max(16, int(1000 / target_fps))  # 最低约 16ms，避免无意义的过高刷新
         self.timer.start(timer_interval)
-        logger.info(f"定时器间隔设置为: {timer_interval}ms (PreciseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
+        logger.info(f"定时器间隔设置为: {timer_interval}ms (CoarseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
         self._timer_interval = timer_interval
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
         # 启动后尽快预取背景，避免首帧才开始防抖等待
@@ -723,7 +727,8 @@ class _ScrollingTextMixin:
             pixmap = QPixmap.fromImage(qimg)
             with self._text_texture_cache_lock:
                 self._text_texture_cache[cache_key] = pixmap
-                if len(self._text_texture_cache) > 50:
+                max_tex = int(getattr(self, "_text_texture_cache_max", 12) or 12)
+                while len(self._text_texture_cache) > max_tex:
                     self._text_texture_cache.popitem(last=False)
             self._cached_text_width = text_width
             return pixmap
@@ -1034,9 +1039,14 @@ class _ScrollingTextMixin:
                         logger.info(f"VSync已更新: {'开启' if new_vsync == 1 else '关闭'}")
                 except Exception as e:
                     logger.debug(f"更新 VSync 失败（非 OpenGL 控件可忽略）: {e}")
-            new_target_fps = self.config.gui_config.target_fps
-            new_timer_interval = max(1, int(1000 / new_target_fps))
+            new_target_fps = max(1, int(self.config.gui_config.target_fps or 30))
+            new_timer_interval = max(16, int(1000 / new_target_fps))
             self._timer_interval = new_timer_interval
+            gc = self.config.gui_config
+            self._image_cache_max = max(4, int(getattr(gc, "image_cache_max", 16) or 16))
+            self._text_texture_cache_max = max(
+                4, int(getattr(gc, "text_texture_cache_max", 10) or 10)
+            )
             try:
                 if self.timer.interval() != new_timer_interval:
                     self.timer.setInterval(new_timer_interval)
@@ -1165,7 +1175,8 @@ class _ScrollingTextMixin:
         """主线程写入图片缓存并按条数淘汰最旧项。"""
         with self._image_cache_lock:
             self._image_cache[cache_key] = pixmap
-            while len(self._image_cache) > 200:
+            max_img = int(getattr(self, "_image_cache_max", 24) or 24)
+            while len(self._image_cache) > max_img:
                 oldest_key = next(iter(self._image_cache))
                 del self._image_cache[oldest_key]
 
