@@ -96,18 +96,23 @@ def all_whews_ws_urls() -> List[str]:
     return urls
 
 
+def _whews_url_path(url: str) -> str:
+    """去掉 query/fragment 后的 WHEWS URL 路径（小写、无尾斜杠）。"""
+    return (url or "").lower().split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
 def is_whews_all_url(url: str) -> bool:
-    """判断是否为无界科技 /ws/all 聚合通道。"""
-    low = (url or "").lower().rstrip("/")
-    return is_whews_url(low) and low.endswith("/ws/all")
+    """判断是否为无界科技 /ws/all 聚合通道（兼容 URL 携带 token 查询参数）。"""
+    path = _whews_url_path(url)
+    return is_whews_url(path) and path.endswith("/ws/all")
 
 
 def is_whews_dedicated_endpoint(url: str) -> bool:
     """cea_all / cenc 专用线：已废弃，CEA/CENC 数据统一走 /ws/all。"""
-    low = (url or "").lower().rstrip("/")
-    if not is_whews_url(low):
+    path = _whews_url_path(url)
+    if not is_whews_url(path):
         return False
-    return low.endswith("/ws/cenc") or low.endswith("/ws/cea_all") or "/ws/cea/" in (low + "/")
+    return path.endswith("/ws/cenc") or path.endswith("/ws/cea_all") or "/ws/cea/" in (path + "/")
 
 
 def normalize_data_provider(value: Any) -> str:
@@ -518,21 +523,16 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.2"  # 当前程序版本
+APP_VERSION = "2.8.3"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.2
+CHANGELOG_TEXT = """版本 2.8.3
 
-1、修复数据源开关无法保存、主源不加载等严重问题
-2、主数据源扩展为 Fan Studio / WeJet / Jian Project 三选一
-3、全面适配 Jian Project API 
-4、WeJet 适配新增数据源，重写灾害预警展示
-5、Wolfx / EQSC / P2PQuake 调整为辅助数据源，采用与主源相同的页面切换方式
-6、重写性能模式"""
+1、修复 WeJet 配置令牌后聚合 URL 被误判为非 /ws/all，导致主源无法建连的问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (

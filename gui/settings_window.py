@@ -3842,9 +3842,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         gap_layout = QVBoxLayout(group_aux_provider)
         gap_layout.setContentsMargins(*GROUP_MARGINS)
         gap_layout.setSpacing(GROUP_SPACING)
-        self.aux_sources_master_cb = QCheckBox(
-            "启用辅助数据源（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）"
-        )
+        self.aux_sources_master_cb = QCheckBox("启用辅助数据源")
         self.aux_sources_master_cb.setChecked(
             aux_sources_enabled(self.config.enabled_sources)
         )
@@ -3853,7 +3851,9 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         )
         _set_widget_style(self.aux_sources_master_cb, STYLE_CHECKBOX_SOURCE)
         gap_layout.addWidget(self.aux_sources_master_cb)
-        aux_hint = QLabel("开启后各辅助源全部展示；可与任一主源并存，各自独立开关。")
+        aux_hint = QLabel(
+            "含 Wolfx、EQSC、P2PQuake、OpenQuakeAPI；开启后各辅助源全部展示，可与任一主源并存。"
+        )
         _set_widget_style(aux_hint, STYLE_HINT)
         aux_hint.setWordWrap(True)
         gap_layout.addWidget(aux_hint)

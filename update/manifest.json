@@ -1,10 +1,10 @@
 {
-  "latest_version": "2.8.2",
+  "latest_version": "2.8.3",
   "min_supported_version": "2.0.0",
   "channel": "stable",
   "installer": {
     "url": "https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe",
-    "sha256": "4192adf05026a4fe80c2d373ad535516dc55d8e32c5d1842b2107baae61fa2ad",
+    "sha256": "6e40bfdbcb66114ef1e69036e60f64d68561736199857c7377dc5732eb298df4",
     "user_interface": "progress"
   },
   "release_notes_url": ""
