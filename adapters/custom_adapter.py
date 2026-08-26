@@ -3,7 +3,7 @@
 """
 自定义数据源适配器
 支持两种约定 JSON 格式：平铺格式与 Data 嵌套格式
-兼容 beecld mix_all_one_live 等非标准字段（HTML 残留、id 内嵌发震时间、零坐标等）
+兼容软件标准解析字段（place_name / type 等）与 beecld 等非标准字段
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _SHOCK_IN_TEXT_RE = re.compile(
     r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})[-\sT]+(\d{1,2}):(\d{2}):(\d{2})"
 )
+_STANDARD_TYPES = frozenset({"warning", "report", "weather"})
 
 
 def _strip_html(text: str) -> str:
@@ -50,9 +51,31 @@ def _epoch_ms_to_display(ms: int) -> str:
         return ""
 
 
+def _extract_place_name(data: Dict[str, Any]) -> str:
+    """从多种字段名提取地名。"""
+    for key in (
+        "placeName",
+        "place_name",
+        "region",
+        "title",
+        "headline",
+        "location",
+    ):
+        val = _strip_html(str(data.get(key) or ""))
+        if val:
+            return val
+    lat = _safe_float(data.get("latitude"), default=None)
+    lon = _safe_float(data.get("longitude"), default=None)
+    if lat is not None and lon is not None and (lat != 0 or lon != 0):
+        if lat >= 0:
+            return f"{lat:.2f}°N, {lon:.2f}°E"
+        return f"{abs(lat):.2f}°S, {lon:.2f}°E"
+    return ""
+
+
 def _parse_shock_time(data: Dict[str, Any]) -> str:
     """从 originTime / shockTime / id（EE_ 前缀）/ reportTime 解析发震时间。"""
-    for key in ("originTime", "shockTime", "shock_time"):
+    for key in ("originTime", "shockTime", "shock_time", "effective"):
         raw = data.get(key)
         if raw is None:
             continue
@@ -65,7 +88,9 @@ def _parse_shock_time(data: Dict[str, Any]) -> str:
         raw_str = str(raw).strip()
         if raw_str:
             normalized = _normalize_shock_time_raw(raw_str)
-            return timezone_utils.cst_to_display(normalized) if normalized else ""
+            if normalized:
+                return timezone_utils.flexible_time_to_display(normalized) or timezone_utils.cst_to_display(normalized)
+            return timezone_utils.flexible_time_to_display(raw_str) or timezone_utils.cst_to_display(raw_str)
 
     id_raw = _strip_html(str(data.get("id") or ""))
     if id_raw:
@@ -80,8 +105,8 @@ def _parse_shock_time(data: Dict[str, Any]) -> str:
 
 
 def _parse_updates(data: Dict[str, Any]) -> Optional[int]:
-    """解析报数：updates / reportNum。"""
-    for key in ("updates", "reportNum"):
+    """解析报数：updates / reportNum / revisionId。"""
+    for key in ("updates", "reportNum", "revisionId"):
         val = data.get(key)
         if val is None:
             continue
@@ -95,7 +120,10 @@ def _parse_updates(data: Dict[str, Any]) -> Optional[int]:
 
 
 def _parse_organization(data: Dict[str, Any]) -> str:
-    """机构名：source / sourceName / 嵌套 source 对象，默认「自定义」。"""
+    """机构名：source / sourceName / organization / 嵌套 source 对象，默认「自定义」。"""
+    org = _strip_html(str(data.get("organization") or ""))
+    if org:
+        return org
     nested = data.get("source")
     if isinstance(nested, dict):
         for key in ("name", "sourceName", "title"):
@@ -117,12 +145,15 @@ def _build_event_id(
     place_name: str,
     shock_time: str,
 ) -> str:
-    """
-    生成稳定 event_id。
-    beecld 等源的 id 可能含 HTML 或仅 ``EE_ 发震时间``；无效时用地名+发震时间。
-    """
+    """生成稳定 event_id。"""
     raw_id = _strip_html(
-        str(data.get("id") or data.get("eventId") or data.get("eventID") or "")
+        str(
+            data.get("event_id")
+            or data.get("id")
+            or data.get("eventId")
+            or data.get("eventID")
+            or ""
+        )
     )
     if raw_id and "<" not in raw_id and len(raw_id) >= 4:
         if not raw_id.upper().startswith("EE_"):
@@ -134,8 +165,18 @@ def _build_event_id(
     return raw_id
 
 
+def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    """安全转 float。"""
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class CustomAdapter(BaseAdapter):
-    """自定义数据源适配器，解析约定格式的预警 JSON"""
+    """自定义数据源适配器，解析约定格式的预警/速报/气象 JSON"""
 
     def parse_all(self, raw_data: Any) -> List[Dict[str, Any]]:
         """解析单条或多条记录（数组时返回全部有效项）。"""
@@ -159,15 +200,78 @@ class CustomAdapter(BaseAdapter):
             else:
                 one = self._parse_record(raw_data, raw_data=raw_data)
             return [one] if one else []
+        if isinstance(raw_data, str):
+            try:
+                import json
+                return self.parse_all(json.loads(raw_data))
+            except Exception:
+                return []
         return []
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
-        """
-        解析原始数据。支持格式 A（平铺）或格式 B（Data 嵌套）。
-        若为数组则取第一条有效记录。
-        """
+        """解析原始数据；数组时取第一条有效记录。"""
         items = self.parse_all(raw_data)
         return items[0] if items else None
+
+    def _try_passthrough_standard(
+        self, data: Dict[str, Any], *, raw_data: Any
+    ) -> Optional[Dict[str, Any]]:
+        """已是软件标准字段时直接透传（WS/HTTP 回推场景）。"""
+        msg_type = str(data.get("type") or "").strip().lower()
+        if msg_type not in _STANDARD_TYPES:
+            return None
+        place_name = _extract_place_name(data)
+        if not place_name and msg_type != "weather":
+            return None
+        if msg_type == "weather" and not place_name:
+            place_name = _strip_html(
+                str(data.get("title") or data.get("headline") or "气象预警")
+            )
+        shock_time = str(data.get("shock_time") or "").strip() or _parse_shock_time(data)
+        organization = _parse_organization(data)
+        source_type = str(data.get("source_type") or "custom").strip() or "custom"
+        result: Dict[str, Any] = {
+            "type": msg_type,
+            "place_name": place_name,
+            "magnitude": _safe_float(data.get("magnitude"), 0.0),
+            "latitude": _safe_float(data.get("latitude"), 0.0),
+            "longitude": _safe_float(data.get("longitude"), 0.0),
+            "depth": _safe_float(data.get("depth"), 0.0),
+            "shock_time": shock_time,
+            "organization": organization,
+            "source_type": source_type,
+            "raw_data": raw_data,
+        }
+        updates = _parse_updates(data)
+        if updates is not None:
+            result["updates"] = updates
+        event_id = str(data.get("event_id") or "").strip()
+        if event_id:
+            result["event_id"] = event_id
+        else:
+            built = _build_event_id(data, place_name, shock_time)
+            if built:
+                result["event_id"] = built
+        for key in (
+            "title",
+            "headline",
+            "description",
+            "warning_type",
+            "intensity",
+            "epiIntensity",
+            "mmi",
+            "cancel",
+            "final",
+            "is_tsunami",
+        ):
+            if key in data and data.get(key) not in (None, ""):
+                result[key] = data.get(key)
+        if msg_type == "weather":
+            result["title"] = str(
+                data.get("title") or data.get("headline") or place_name
+            ).strip()
+            result["description"] = str(data.get("description") or "").strip()
+        return result
 
     def _parse_record(
         self,
@@ -175,30 +279,31 @@ class CustomAdapter(BaseAdapter):
         *,
         raw_data: Any,
     ) -> Optional[Dict[str, Any]]:
-        """解析单条预警记录（平铺或 Data 内层）。"""
-        place_name = _strip_html(str(data.get("placeName") or ""))
+        """解析单条记录（平铺或 Data 内层）。"""
+        passthrough = self._try_passthrough_standard(data, raw_data=raw_data)
+        if passthrough:
+            return passthrough
+
+        place_name = _extract_place_name(data)
         if not place_name:
-            lat = self._safe_float(data.get("latitude"), default=None)
-            lon = self._safe_float(data.get("longitude"), default=None)
-            if lat is not None and lon is not None:
-                place_name = f"{lat:.2f}°N, {lon:.2f}°E" if lat >= 0 else f"{abs(lat):.2f}°S, {lon:.2f}°E"
-            else:
-                return None
+            return None
 
         shock_time = _parse_shock_time(data)
-        magnitude = self._safe_float(data.get("magnitude", 0))
-        latitude = self._safe_float(data.get("latitude", 0))
-        longitude = self._safe_float(data.get("longitude", 0))
-        depth = self._safe_float(data.get("depth", 0))
+        magnitude = _safe_float(data.get("magnitude"), 0.0)
+        latitude = _safe_float(data.get("latitude"), 0.0)
+        longitude = _safe_float(data.get("longitude"), 0.0)
+        depth = _safe_float(data.get("depth"), 0.0)
         updates = _parse_updates(data)
         organization = _parse_organization(data)
         event_id = _build_event_id(data, place_name, shock_time)
         org_lower = organization.lower()
-        source_type = (
-            "globalquake"
-            if "globalquake" in org_lower or "地震预警" in organization
-            else "custom"
-        )
+        source_type = str(data.get("source_type") or "").strip()
+        if not source_type:
+            source_type = (
+                "globalquake"
+                if "globalquake" in org_lower or "地震预警" in organization
+                else "custom"
+            )
 
         result: Dict[str, Any] = {
             "type": "warning",
@@ -216,23 +321,14 @@ class CustomAdapter(BaseAdapter):
         if event_id:
             result["event_id"] = event_id
 
-        intensity = data.get("intensity")
+        intensity = data.get("intensity") or data.get("epiIntensity") or data.get("mmi")
         if intensity is not None and str(intensity).strip():
             try:
                 result["epiIntensity"] = float(intensity)
             except (TypeError, ValueError):
-                pass
+                result["intensity"] = str(intensity).strip()
 
         return result
-
-    def _safe_float(self, value: Any, default: Optional[float] = 0.0) -> Optional[float]:
-        """安全转换为浮点数。"""
-        try:
-            if value is None:
-                return default
-            return float(value)
-        except (TypeError, ValueError):
-            return default
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
         """获取消息类型（自定义源默认为预警）。"""

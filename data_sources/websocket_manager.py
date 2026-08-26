@@ -36,6 +36,10 @@ from config import (
     WOLFX_JMA_EQLIST_URL,
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_WS_URL,
+    P2PQUAKE_HISTORY_AGGREGATE_URL,
+    OPENQUAKE_WS_ALL_URL,
+    is_custom_data_source_url,
+    is_ws_url_enabled,
 )
 from utils.logger import get_logger
 from utils.message_processor import warning_shock_validity_remaining_seconds
@@ -46,8 +50,8 @@ from utils.fanstudio_credentials import (
 
 logger = get_logger()
 
-# P2PQuake HTTP 聚合接口：同时包含 551 地震情报与 552 津波预报
-P2PQUAKE_HISTORY_URL = "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"  # 启动前聚合拉取
+# P2PQuake HTTP 聚合接口：551 地震情报 / 552 津波预报 / 556 緊急地震速报
+P2PQUAKE_HISTORY_URL = P2PQUAKE_HISTORY_AGGREGATE_URL
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "fanstudio": 45,
@@ -57,6 +61,7 @@ HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
     "nowquake": 90,  # 服务端约 60s 发一次 heartbeat
     "p2pquake": 120,
     "eqsc": 45,  # 服务端心跳，客户端需原样回传
+    "openquake": 120,
 }
 
 
@@ -240,6 +245,8 @@ class WebSocketManager:
             return "p2pquake"
         if "equake.top" in normalized:
             return "eqsc"
+        if normalized == OPENQUAKE_WS_ALL_URL or "api.aloys23.link" in normalized:
+            return "openquake"
         return "other"
 
     def _ensure_health_entry(self, url: str, source_name: str = "") -> Dict[str, Any]:
@@ -387,20 +394,27 @@ class WebSocketManager:
             adapter = FanStudioAdapter(source_type, url)
             adapter._manager_source_type = source_type
             return adapter
-        # P2PQuake WebSocket（仅解析 551、552）
+        # P2PQuake WebSocket（解析 551 / 552 / 556）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
             from adapters.p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
             adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
             adapter._manager_source_type = 'p2pquake_ws'
             return adapter
+        # OpenQuakeAPI WebSocket（/ws/all 聚合）
+        if 'api.aloys23.link' in url and (url.startswith('ws://') or url.startswith('wss://')):
+            from adapters.openquake_api_adapter import OpenQuakeApiAdapter
+            adapter = OpenQuakeApiAdapter('openquake', url)
+            adapter._manager_source_type = 'openquake'
+            return adapter
         # 自定义数据源（WS/WSS）
         config = Config()
-        if config.custom_data_source_url and url == config.custom_data_source_url:
-            if url.startswith('ws://') or url.startswith('wss://'):
-                from adapters.custom_adapter import CustomAdapter
-                adapter = CustomAdapter('custom', url)
-                adapter._manager_source_type = 'custom'
-                return adapter
+        if is_custom_data_source_url(url, config) and (
+            url.startswith("ws://") or url.startswith("wss://")
+        ):
+            from adapters.custom_adapter import CustomAdapter
+            adapter = CustomAdapter("custom", url)
+            adapter._manager_source_type = "custom"
+            return adapter
         # 未知 URL：不回落到 Fan Studio，避免非 Fan 通道被错误解析
         logger.warning(f"未识别的 WebSocket URL，跳过建连: {url}")
         return None
@@ -427,12 +441,17 @@ class WebSocketManager:
             from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
             if source_type in EQSC_DIRECT_SOURCE_TYPES:
                 return source_type
+            from adapters.openquake_api_adapter import OPENQUAKE_DIRECT_SOURCE_TYPES
+            if source_type in OPENQUAKE_DIRECT_SOURCE_TYPES:
+                return source_type
             if source_type in ("ptwc", "emsc", "cenc-ir"):
                 return source_type
             if source_type:
                 if parsed_data.get('whews'):
                     return source_type
                 if parsed_data.get('jian') and source_type:
+                    return source_type
+                if parsed_data.get('openquake') and source_type:
                     return source_type
                 return config.get_source_name(fanstudio_ws_url(source_type))
             
@@ -568,7 +587,7 @@ class WebSocketManager:
                     return
             
             cfg = Config()
-            if not cfg.enabled_sources.get(url, True):
+            if not is_ws_url_enabled(cfg, url):
                 logger.debug(f"[{source_name}] 该 WebSocket 已在配置中关闭，跳过业务消息: {url}")
                 return
 
@@ -629,7 +648,22 @@ class WebSocketManager:
                             self, parsed_data, actual_source, source_name
                         )
             else:
-                # 普通解析（包括 update 类型、NIED、P2PQuake）
+                # 普通解析（包括 update 类型、NIED、P2PQuake、自定义源）
+                if is_custom_data_source_url(url, cfg) and hasattr(adapter, "parse_all"):
+                    all_parsed = await asyncio.to_thread(adapter.parse_all, data)
+                    if not all_parsed:
+                        logger.debug(f"[{source_name}] 数据无效或被过滤")
+                        return
+                    for parsed_data in all_parsed:
+                        if not parsed_data:
+                            continue
+                        pt = parsed_data.get("source_type", "") or "custom"
+                        actual_source = pt if pt not in ("", "custom") else source_name
+                        _dispatch_parsed_message(
+                            self, parsed_data, actual_source, source_name
+                        )
+                    return
+
                 parsed_data = await asyncio.to_thread(adapter.parse, data)
                 if parsed_data:
                     # EQSC 烈度列表：详情失败则丢弃薄事件，不入队
@@ -658,21 +692,29 @@ class WebSocketManager:
                                 parsed_data = None
                     if not parsed_data:
                         return
-                    # Wolfx / P2PQuake / EMSC / Nowquake / EQSC：用 parsed_data 的 source_type 作为 actual_source
+                    # Wolfx / P2PQuake / EMSC / Nowquake / EQSC / OpenQuake：用 parsed_data 的 source_type
                     pt = parsed_data.get('source_type', '')
                     direct_sources = WOLFX_DIRECT_SOURCE_TYPES + (
                         'p2pquake',
                         'p2pquake_tsunami',
+                        'p2pquake_eew',
                         'emsc',
                         'cenc-ir',
                     )
                     from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
-                    if pt and (pt in direct_sources or pt in EQSC_DIRECT_SOURCE_TYPES):
+                    from adapters.openquake_api_adapter import OPENQUAKE_DIRECT_SOURCE_TYPES
+                    if pt and (
+                        pt in direct_sources
+                        or pt in EQSC_DIRECT_SOURCE_TYPES
+                        or pt in OPENQUAKE_DIRECT_SOURCE_TYPES
+                    ):
                         actual_source = pt
                     elif parsed_data.get("whews") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif parsed_data.get("jian") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
+                    elif parsed_data.get("openquake") and pt:
+                        actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     else:
@@ -1195,7 +1237,7 @@ class WebSocketManager:
         在启用 P2PQuake WebSocket 时，启动阶段先通过 HTTP 拉取一次最新地震与海啸情报。
         """
         try:
-            logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸情报（聚合 551/552）")
+            logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸/EEW 情报（聚合 551/552/556）")
 
             async def _fetch_history():
                 """异步拉取 P2PQuake 历史 HTTP 接口并逐条解析推送。"""
@@ -1225,18 +1267,26 @@ class WebSocketManager:
 
                 from adapters.p2pquake_adapter import P2PQuakeAdapter
                 from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
+                from adapters.p2pquake_eew_adapter import P2PQuakeEEWAdapter
                 eq_adapter = P2PQuakeAdapter("p2pquake", P2PQUAKE_HISTORY_URL)
                 tsu_adapter = P2PQuakeTsunamiAdapter("p2pquake_tsunami", P2PQUAKE_HISTORY_URL)
+                eew_adapter = P2PQuakeEEWAdapter("p2pquake_eew", P2PQUAKE_HISTORY_URL)
                 eq_count = 0
                 tsu_count = 0
+                eew_count = 0
 
                 msg_cfg = config.message_config
                 parse_551 = getattr(msg_cfg, "p2pquake_parse_551", True)
                 parse_552 = getattr(msg_cfg, "p2pquake_parse_552", True)
+                parse_556 = getattr(msg_cfg, "p2pquake_parse_556", True)
                 for item in data:
                     if not isinstance(item, dict):
                         continue
-                    code = item.get("code")
+                    code_raw = item.get("code")
+                    try:
+                        code = int(code_raw) if code_raw is not None else None
+                    except (TypeError, ValueError):
+                        code = None
                     if code == 551:
                         if not parse_551:
                             continue
@@ -1261,8 +1311,24 @@ class WebSocketManager:
                             parsed["_suppress_tts"] = True
                             self.message_callback("p2pquake_tsunami", parsed)
                             tsu_count += 1
+                    elif code == 556:
+                        if not parse_556:
+                            continue
+                        try:
+                            parsed = eew_adapter.parse_single_item(item)
+                        except Exception as e:
+                            logger.error(f"[p2pquake_eew] 启动前 HTTP 解析 EEW 单条失败: {e}", exc_info=True)
+                            continue
+                        if parsed:
+                            parsed["_suppress_tts"] = True
+                            self.message_callback("p2pquake_eew", parsed)
+                            eew_count += 1
 
-                logger.info(f"[p2pquake] 启动前 HTTP 推送 {eq_count} 条地震情报, {tsu_count} 条海啸情报")
+                logger.info(
+                    f"[p2pquake] 启动前 HTTP 推送 {eq_count} 条地震情报, "
+                    f"{tsu_count} 条海啸情报, {eew_count} 条緊急地震速报；"
+                    "后续由 WSS 长连接接收实时更新"
+                )
 
             await _fetch_history()
         except Exception as e:
@@ -1375,6 +1441,10 @@ class WebSocketManager:
             return "wolfx"
         if normalized_url == EQSC_WS_URL.strip().lower().rstrip("/"):
             return "eqsc"
+        if normalized_url == OPENQUAKE_WS_ALL_URL.strip().lower().rstrip("/"):
+            return "openquake"
+        if is_custom_data_source_url(normalized_url):
+            return "other"
         if normalized_url == NOWQUAKE_CENCINT_WSS_URL:
             return "other"
         return "other"
@@ -1438,13 +1508,14 @@ class WebSocketManager:
             "p2pquake": [],
             "wolfx": [],
             "eqsc": [],
+            "openquake": [],
             "other": [],
         }
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> eqsc -> other
-        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "eqsc", "other")
+        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> eqsc -> openquake -> other
+        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "eqsc", "openquake", "other")
         tasks = []
         urls_for_tasks = []
         stagger = float(getattr(config.ws_config, "startup_stagger_seconds", 1.5) or 0.0)
@@ -1571,7 +1642,8 @@ class WebSocketManager:
             "p2pquake": 2,
             "wolfx": 3,
             "eqsc": 4,
-            "other": 5,
+            "openquake": 5,
+            "other": 6,
         }
 
         def _start_key(u: str) -> tuple:

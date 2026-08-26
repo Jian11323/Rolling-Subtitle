@@ -19,14 +19,15 @@ CHINESE_SOURCE_TYPES = frozenset({
     "nmefc", "nmefc-tsunami",
     # NMEFC 海啸正文已是中文地点+预报区，勿被 FE 粗分区覆盖
     "tsunami", "海啸信息",
+    "openquake_nmefc", "openquake_nmefc_wave", "openquake_nmefc_surge", "openquake_cma",
 })
 
 # JMA / P2PQuake：使用官方原始地名（日文），不做 FE 粗分区覆盖
 JMA_ORIGINAL_PLACE_SOURCES = frozenset({
-    "jma", "jma_volcano", "jma_tsunami",
+    "jma", "jma_eq", "jma_volcano", "jma_tsunami",
     "wolfx_jma_eew", "wolfx_jma_eqlist",
     "eqsc_jma_eew", "eqsc_jma_report", "eqsc_jma_tsunami", "eqsc_volcano",
-    "p2pquake", "p2pquake_tsunami",
+    "p2pquake", "p2pquake_tsunami", "p2pquake_eew",
 })
 
 KEEP_ORIGINAL_PLACE_NAME_SOURCES = CHINESE_SOURCE_TYPES | JMA_ORIGINAL_PLACE_SOURCES

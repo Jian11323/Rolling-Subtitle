@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 P2PQuake数据源适配器
-用于解析日本气象厅地震情报API数据
-API: https://api.p2pquake.net/v2/history?codes=551&limit=3
+用于解析日本气象厅地震情报（code 551）
+API: https://api.p2pquake.net/v2/history?codes=551&codes=552&codes=556&limit=10
+（本适配器仅处理 code=551；聚合列表中其它 code 会被跳过）
 """
 
 import json
@@ -14,12 +15,13 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.logger import get_logger
 from utils import timezone_utils
+from utils.jma_shindo import p2pquake_scale_to_shindo_text
 
 logger = get_logger()
 
 
 class P2PQuakeAdapter(BaseAdapter):
-    """P2PQuake数据源适配器（日本气象厅地震情报）"""
+    """P2PQuake数据源适配器（日本气象厅地震情报 code 551）"""
     
     def __init__(self, source_name: str, source_url: str):
         """初始化 P2PQuake 地震情报适配器。"""
@@ -47,6 +49,10 @@ class P2PQuakeAdapter(BaseAdapter):
             else:
                 data = raw_data
             
+            # 单条 dict（如 WebSocket）直接解析
+            if isinstance(data, dict):
+                return self._parse_single_item(data)
+
             # API返回的是数组
             if not isinstance(data, list):
                 logger.warning(f"【P2PQuake适配器】 数据格式错误，期望数组，得到: {type(data)}")
@@ -106,7 +112,7 @@ class P2PQuakeAdapter(BaseAdapter):
     
     def _parse_single_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        解析单个地震事件
+        解析单个地震事件（仅 code 551）
         
         Args:
             item: 单个地震事件数据
@@ -115,18 +121,28 @@ class P2PQuakeAdapter(BaseAdapter):
             解析后的标准化数据字典
         """
         try:
+            if not isinstance(item, dict):
+                return None
+            code = item.get("code")
+            if code is not None and int(code) != 551:
+                return None
             # 检查必要字段
             if 'earthquake' not in item:
                 return None
             
             earthquake = item.get('earthquake', {})
-            hypocenter = earthquake.get('hypocenter', {})
+            hypocenter = earthquake.get('hypocenter', {}) or {}
             
-            # 提取基本信息
-            magnitude = self._safe_float(hypocenter.get('magnitude', 0))
-            latitude = self._safe_float(hypocenter.get('latitude', 0))
-            longitude = self._safe_float(hypocenter.get('longitude', 0))
-            depth = self._safe_float(hypocenter.get('depth', 0))
+            # 提取基本信息；magnitude/maxScale 为 -1 表示不明（远地/火山等），不作为地震情报展示
+            magnitude = self._safe_float(hypocenter.get('magnitude'), None)
+            if magnitude is None or magnitude < 0:
+                return None
+
+            latitude = self._safe_float(hypocenter.get('latitude'), 0.0)
+            longitude = self._safe_float(hypocenter.get('longitude'), 0.0)
+            depth_raw = self._safe_float(hypocenter.get('depth'), None)
+            # P2PQuake：depth=-1 表示不明；0 表示ごく浅い，保留 0
+            depth = 10.0 if depth_raw is None or depth_raw < 0 else depth_raw
             place_name = hypocenter.get('name', '未知地区')
             
             # 提取时间（日本气象厅 API 为 JST）
@@ -134,11 +150,15 @@ class P2PQuakeAdapter(BaseAdapter):
             if shock_time:
                 shock_time = timezone_utils.jst_to_display(shock_time)
             
-            # 提取震度信息
-            max_scale = earthquake.get('maxScale', 0)
+            # 提取震度信息（-1 = 不明）
+            max_scale = earthquake.get('maxScale')
+            try:
+                max_scale_int = int(max_scale) if max_scale is not None else None
+            except (TypeError, ValueError):
+                max_scale_int = None
             
             # 提取发布信息
-            issue = item.get('issue', {})
+            issue = item.get('issue', {}) or {}
             issue_time = issue.get('time', '')
             if issue_time:
                 issue_time = timezone_utils.jst_to_display(issue_time)
@@ -165,9 +185,12 @@ class P2PQuakeAdapter(BaseAdapter):
                 'raw_data': item,
             }
             
-            # 添加特殊字段
-            if max_scale:
-                result['max_scale'] = max_scale
+            if max_scale_int is not None and max_scale_int >= 0:
+                result['max_scale'] = max_scale_int
+                shindo = p2pquake_scale_to_shindo_text(max_scale_int)
+                if shindo:
+                    result['epiIntensity'] = shindo
+                    result['epi_intensity'] = shindo
             if issue_time:
                 result['issue_time'] = issue_time
             
@@ -182,8 +205,8 @@ class P2PQuakeAdapter(BaseAdapter):
             logger.error(f"【P2PQuake适配器】 解析单个事件时出错: {e}")
             return None
     
-    def _safe_float(self, value: Any, default: float = 0.0) -> float:
-        """安全转换为浮点数"""
+    def _safe_float(self, value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+        """安全转换为浮点数；value 为 None 时返回 default。"""
         if value is None:
             return default
         try:

@@ -37,7 +37,13 @@ from config import (
     NOWQUAKE_CENCINT_WSS_URL,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
+    OPENQUAKE_WS_ALL_URL,
+    DATA_PROVIDER_FANSTUDIO,
+    DATA_PROVIDER_WHEWS,
     wolfx_master_enabled,
+    openquake_master_enabled,
+    active_weather_source,
+    weather_provider_for_parsed,
     jian_internal_enabled,
     any_jian_source_enabled,
 )
@@ -49,7 +55,6 @@ from utils.geo_utils import should_accept_message
 from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import set_tray_icon_provider, show_event_notification
-from utils.memory_policy import slim_parsed_for_storage
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
@@ -70,6 +75,7 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "p2pquake",
     "p2pquake_ws",
     "p2pquake_tsunami",
+    "p2pquake_eew",
     # EQSC 各子源（全局辅助 HTTP）
     "eqsc_jma_eew",
     "eqsc_jma_report",
@@ -82,6 +88,15 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "eqsc_emsc",
     "eqsc_typhoon",
     "eqsc_volcano",
+    # OpenQuakeAPI
+    "openquake",
+    "openquake_gq",
+    "openquake_nmefc",
+    "openquake_nmefc_wave",
+    "openquake_nmefc_surge",
+    "openquake_cma",
+    "custom",
+    "globalquake",
 }
 # 仅 Fan Studio 聚合通道会出现的子源（无界/官方直连不会产出）
 _FANSTUDIO_ONLY_SOURCES: Set[str] = {
@@ -98,6 +113,7 @@ _MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
     "whews",
     "eqsc",
     "jian",
+    "openquake",
     "type",
     "event_id",
     "is_tsunami",
@@ -145,8 +161,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config if config is not None else Config()
         self.message_processor = MessageProcessor()
-        _mq = int(getattr(self.config.message_config, "message_queue_maxsize", 45) or 45)
-        _mb = int(getattr(self.config.message_config, "message_buffer_max_size", 20) or 20)
+        _mq = getattr(self.config.message_config, "message_queue_maxsize", 300)
+        _mb = getattr(self.config.message_config, "message_buffer_max_size", 100)
         self.message_queue = MessageQueue(maxsize=_mq)
         self.message_buffer = MessageBuffer(max_size=_mb)
         # 分别存储预警和速报消息
@@ -744,9 +760,6 @@ class MainWindow(QMainWindow):
 
             # 数据源连接热重载（WebSocket / HTTP）
             self._hot_reload_data_sources()
-
-            # 消息队列 / 缓冲容量热调整
-            self._apply_buffer_capacity_from_config()
             
             logger.info("配置热修改应用完成")
             
@@ -754,23 +767,6 @@ class MainWindow(QMainWindow):
             logger.error(f"应用配置热修改失败: {e}")
             import traceback
             logger.exception("详细错误信息:")
-
-    def _apply_buffer_capacity_from_config(self) -> None:
-        """按性能模式同步消息队列与滚动缓冲容量。"""
-        try:
-            mc = self.config.message_config
-            mq_size = max(10, int(getattr(mc, "message_queue_maxsize", 45) or 45))
-            mb_size = max(8, int(getattr(mc, "message_buffer_max_size", 20) or 20))
-            if getattr(self.message_queue, "maxsize", mq_size) != mq_size:
-                self.message_queue = self.message_queue.rebuild_with_maxsize(mq_size)
-            if getattr(self, "message_buffer", None) is not None:
-                self.message_buffer.set_max_size(mb_size)
-            if getattr(self, "warning_buffer", None) is not None:
-                self.warning_buffer.set_max_size(mb_size)
-            if getattr(self, "report_buffer", None) is not None:
-                self.report_buffer.set_max_size(mb_size)
-        except Exception as e:
-            logger.debug(f"同步缓冲容量失败: {e}")
 
     def _hot_reload_data_sources(self) -> None:
         """按当前配置热启停 WebSocket / HTTP 数据源（仅在连接相关配置变化时执行）。"""
@@ -1911,23 +1907,36 @@ class MainWindow(QMainWindow):
         # source_type 统一小写，兼容上游（尤其无界科技）大小写混杂
         st = (parsed_data.get("source_type") or "").strip().lower()
         sn = source_name or ""
-        fanstudio_connected = self.config.is_fanstudio_ws_enabled()
-        whews_connected = self.config.is_whews_ws_enabled()
+        provider = self.config.get_active_data_provider()
 
-        # 连接开关门控：Fan Studio / WeJet 可作为辅助源，按勾选状态而非主提供者过滤
+        # 气象预警：全局仅允许一个数据源（Fan Studio / WeJet / OpenQuakeAPI）
+        weather_provider = weather_provider_for_parsed(parsed_data)
+        if weather_provider:
+            active_weather = active_weather_source(mc)
+            if weather_provider != active_weather:
+                logger.debug(
+                    "已忽略消息：气象预警源「%s」未启用（当前为 %s）",
+                    weather_provider,
+                    active_weather or "无",
+                )
+                return False
+
+        # 主提供者门控：隐藏面板勾选残留不得继续投递/保留缓冲
+        # 台风 HTTP 虽带 fanstudio 标记，但是全局源，不随主提供者切换丢弃
         is_typhoon = (
             st == "fanstudio_typhoon"
             or sn == "fanstudio_typhoon"
             or source_name == "fanstudio_typhoon"
         )
-        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and not fanstudio_connected:
-            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」连接已关闭")
+        # Fan Studio 专属子源：无标记时也按名称门控，防止旧缓冲窜屏
+        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and provider != DATA_PROVIDER_FANSTUDIO:
+            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」不属于当前提供者")
             return False
-        if parsed_data.get("fanstudio") and not fanstudio_connected and not is_typhoon:
-            logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
+        if parsed_data.get("fanstudio") and provider != DATA_PROVIDER_FANSTUDIO and not is_typhoon:
+            logger.debug("已忽略消息：当前非 Fan Studio 提供者")
             return False
-        if parsed_data.get("whews") and not whews_connected:
-            logger.debug("已忽略消息：WeJet 连接已关闭")
+        if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
+            logger.debug("已忽略消息：当前非 WeJet 提供者")
             return False
 
         fanstudio_all_url = FANSTUDIO_ALL_URL
@@ -1968,9 +1977,9 @@ class MainWindow(QMainWindow):
                 return False
 
         if parsed_data.get("whews"):
-            from config import is_whews_url
-            if not any(bool(v) and is_whews_url(k) for k, v in es.items()):
-                logger.debug("已忽略消息：WeJet 连接均已关闭")
+            from config import is_whews_all_enabled
+            if not is_whews_all_enabled(es):
+                logger.debug("已忽略消息：WeJet /ws/all 已关闭")
                 return False
             if st:
                 from adapters.whews_adapter import WHEWS_SOURCE_FLAG_FIELD
@@ -1978,9 +1987,8 @@ class MainWindow(QMainWindow):
                 if flag and not getattr(mc, flag, True):
                     logger.debug(f"已忽略消息：WeJet 子源「{st}」解析已关闭（{flag}=False）")
                     return False
-            # JMA 情报仅走 P2PQuake；预警（source_type=jma）随主服务
-            if st in ("jma_eq",):
-                logger.debug("已忽略消息：WeJet JMA 情报已禁用，请使用 P2PQuake")
+            if st in ("jma_eq",) and not getattr(mc, "whews_parse_jma", True):
+                logger.debug("已忽略消息：WeJet JMA 地震情报解析已关闭")
                 return False
 
         if parsed_data.get("jian"):
@@ -1990,6 +1998,24 @@ class MainWindow(QMainWindow):
             if st and not jian_internal_enabled(self.config, st):
                 logger.debug(f"已忽略消息：Jian Project 子源「{st}」未启用或解析已关闭")
                 return False
+
+        # 辅助源总开关（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）
+        from config import aux_sources_enabled
+        is_aux_msg = (
+            bool(parsed_data.get("eqsc"))
+            or bool(parsed_data.get("openquake"))
+            or st.startswith("eqsc_")
+            or sn.startswith("eqsc_")
+            or st.startswith("openquake")
+            or sn.startswith("openquake")
+            or st.startswith("wolfx_")
+            or sn.startswith("wolfx_")
+            or st in ("p2pquake", "p2pquake_tsunami", "p2pquake_eew", "wolfx_cenc", "wolfx_jma_eqlist")
+            or sn in ("p2pquake", "p2pquake_ws", "p2pquake_tsunami", "p2pquake_eew")
+        )
+        if is_aux_msg and not aux_sources_enabled(es):
+            logger.debug("已忽略消息：辅助数据源总开关已关闭")
+            return False
 
         wolfx_all_url = WOLFX_ALL_EEW_URL
         wolfx_cwa_url = WOLFX_CWA_EEW_URL
@@ -2033,7 +2059,12 @@ class MainWindow(QMainWindow):
             or st == "p2pquake_tsunami"
             or ("api.p2pquake.net" in sn and "tsunami" in sn.lower())
         )
-        if is_p2p_eq or is_p2p_tsu:
+        is_p2p_eew = (
+            source_name == "p2pquake_eew"
+            or st == "p2pquake_eew"
+            or ("api.p2pquake.net" in sn and "556" in sn)
+        )
+        if is_p2p_eq or is_p2p_tsu or is_p2p_eew:
             # 与设置页一致：总开关关闭则既不连 WSS 也不投递 HTTP 拉取结果
             if not p2p_on:
                 logger.debug("已忽略消息：P2PQuake 总开关已关闭")
@@ -2043,6 +2074,32 @@ class MainWindow(QMainWindow):
                 return False
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
                 logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
+                return False
+            if is_p2p_eew and not getattr(mc, "p2pquake_parse_556", True):
+                logger.debug("已忽略消息：P2PQuake 緊急地震速報解析已关闭")
+                return False
+
+        # OpenQuakeAPI 辅助源
+        is_openquake = (
+            bool(parsed_data.get("openquake"))
+            or st.startswith("openquake")
+            or sn.startswith("openquake")
+            or "api.aloys23.link" in sn
+        )
+        if is_openquake:
+            if not openquake_master_enabled(es):
+                logger.debug("已忽略消息：OpenQuakeAPI 总开关已关闭")
+                return False
+            oq_flag_map = {
+                "openquake_gq": "openquake_parse_gq",
+                "openquake_nmefc": "openquake_parse_nmefc",
+                "openquake_nmefc_wave": "openquake_parse_nmefc_wave",
+                "openquake_nmefc_surge": "openquake_parse_nmefc_surge",
+                "openquake_cma": "openquake_parse_cma",
+            }
+            flag = oq_flag_map.get(st)
+            if flag and not getattr(mc, flag, True):
+                logger.debug(f"已忽略消息：OpenQuakeAPI 子源「{st}」解析已关闭（{flag}=False）")
                 return False
 
         fanstudio_http_map = {
@@ -2260,9 +2317,15 @@ class MainWindow(QMainWindow):
             )
             pd_store = None
             if isinstance(parsed_data, dict):
-                slim = slim_parsed_for_storage(parsed_data, message_type)
-                if slim is not None:
-                    pd_store = slim
+                # 始终保留提供者溯源字段，供主源二选一热切换时清理缓冲、拦截窜数据
+                pd_store = {
+                    k: parsed_data[k]
+                    for k in _MSG_PROVENANCE_KEYS
+                    if k in parsed_data
+                }
+                if message_type in ("weather", "warning"):
+                    # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
+                    pd_store = dict(parsed_data)
                 elif message_type == 'report' and (
                     parsed_data.get('source_type') == 'fssn-cmt'
                     or parsed_data.get('source_type') == 'cenc-ir'
@@ -2270,19 +2333,10 @@ class MainWindow(QMainWindow):
                 ):
                     pd_store = dict(parsed_data)
                 elif parsed_data.get("is_tsunami") and parsed_data.get("logo_url"):
-                    pd_store = {
-                        k: parsed_data[k]
-                        for k in _MSG_PROVENANCE_KEYS
-                        if k in parsed_data
-                    }
+                    # 海啸图标轮播需要 logo_url
+                    pd_store = dict(pd_store)
                     pd_store["logo_url"] = parsed_data.get("logo_url")
                     pd_store["is_tsunami"] = True
-                else:
-                    pd_store = {
-                        k: parsed_data[k]
-                        for k in _MSG_PROVENANCE_KEYS
-                        if k in parsed_data
-                    } or None
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -2973,12 +3027,21 @@ class MainWindow(QMainWindow):
                     keys.append(wh_flag)
             except Exception:
                 pass
+        elif pd.get("jian") and fs_st and not fs_st.startswith("wolfx_"):
+            try:
+                from config import jian_parse_flag_for_internal
+                j_flag = jian_parse_flag_for_internal(fs_st)
+                if j_flag:
+                    keys.append(j_flag)
+            except Exception:
+                pass
         elif (
             fs_st
             and not fs_st.startswith("wolfx_")
             and not fs_st.startswith("fanstudio_")
             and not fs_st.startswith("eqsc_")
-            and fs_st not in ("p2pquake", "p2pquake_tsunami", "cenc-ir", "eqsc")
+            and not fs_st.startswith("openquake")
+            and fs_st not in ("p2pquake", "p2pquake_tsunami", "p2pquake_eew", "cenc-ir", "eqsc", "openquake")
         ):
             # Fan Studio / 同源短名：fanstudio_parse_*
             keys.append(f"fanstudio_parse_{fs_st.replace('-', '_')}")
@@ -2990,6 +3053,22 @@ class MainWindow(QMainWindow):
             keys.append("p2pquake_parse_551")
         if st == "p2pquake_tsunami" or sn_low == "p2pquake_tsunami":
             keys.append("p2pquake_parse_552")
+        if st == "p2pquake_eew" or sn_low == "p2pquake_eew":
+            keys.append("p2pquake_parse_556")
+
+        oq_status_map = {
+            "openquake_gq": "openquake_parse_gq",
+            "openquake_nmefc": "openquake_parse_nmefc",
+            "openquake_nmefc_wave": "openquake_parse_nmefc_wave",
+            "openquake_nmefc_surge": "openquake_parse_nmefc_surge",
+            "openquake_cma": "openquake_parse_cma",
+        }
+        if st in oq_status_map:
+            keys.append(oq_status_map[st])
+        if sn_low in ("custom", "globalquake") or st in ("custom", "globalquake"):
+            keys.append("custom")
+        if sn_low == "openquake" or st == "openquake":
+            keys.append(OPENQUAKE_WS_ALL_URL)
 
         if sn.startswith(("http://", "https://")):
             keys.append(sn)

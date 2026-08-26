@@ -381,6 +381,10 @@ class MessageProcessor:
         epi_intensity = self._resolve_epi_intensity_value(data)
         if epi_intensity is not None:
             es = str(epi_intensity).strip()
+            # P2PQuake 551：观测最大震度（非预估）
+            if es and st == "p2pquake" and self._raw_or_data_has_epi_intensity_key(data):
+                message_parts.append(f"，最大震度{es}")
+                return
             if (
                 es
                 and ("弱" in es or "強" in es)
@@ -637,6 +641,10 @@ class MessageProcessor:
                     message_parts.append(f"【EQSC 緊急地震速報 {warn_area_type}】")
                 else:
                     message_parts.append("【EQSC 緊急地震速報】")
+            elif source_type == 'p2pquake_eew':
+                message_parts.append("【P2PQuake 緊急地震速報】")
+            elif source_type in ('openquake_gq', 'globalquake'):
+                message_parts.append("【GlobalQuake地震预警】")
             elif source_type == 'wolfx_sc_eew':
                 message_parts.append("【Wolfx四川省地震局】")
             elif source_type == 'wolfx_fj_eew':
@@ -723,6 +731,8 @@ class MessageProcessor:
                 depth_int = int(round(depth, 0))
                 message_parts.append(f"，震源深度{depth_int}公里")
             self._append_epi_intensity_after_depth(message_parts, data, source_type)
+            if source_type == 'p2pquake_eew' and data.get('warning_areas'):
+                message_parts.append(f"，警戒区域：{data['warning_areas']}")
             self._append_wolfx_jma_accuracy_line(message_parts, data, source_type)
 
             result = "".join(message_parts)
@@ -1020,6 +1030,8 @@ class MessageProcessor:
             message_parts.append("【EQSC 美国地质调查局地震信息】")
         elif source_type == "eqsc_emsc":
             message_parts.append("【EQSC 欧洲地中海地震中心地震信息】")
+        elif source_type == "openquake_nmefc":
+            message_parts.append("【国家海洋环境预报中心海啸预警】")
         elif organization:
             if organization == "FSSN":
                 message_parts.append("【FSSN 地震信息】")
@@ -1050,6 +1062,7 @@ class MessageProcessor:
                 or source_type in (
                     "ntwc", "ptwc", "incois", "jma_tsunami", "tsunami",
                     "海啸信息", "p2pquake_tsunami", "eqsc_jma_tsunami",
+                    "openquake_nmefc",
                 )
                 or "地震信息" in organization
                 or "地震情报" in organization
@@ -1308,16 +1321,23 @@ class MessageProcessor:
         title = (data.get('title', data.get('headline', '')) or '').strip()
         effective = (data.get('shock_time', '') or '').strip()
         description = (data.get('description', '') or '').strip()
+        source_type = str(data.get('source_type') or '').strip().lower()
         if getattr(self.config.message_config, 'force_single_line', True):
             title = title.replace('\n', ' ')
             description = description.replace('\n', ' ')
         if len(description) > 120:
             description = description[:117].rstrip() + "..."
 
-        if data.get("whews"):
+        if data.get("whews") or data.get("jian"):
             prefix = "【中国气象局气象预警】"
         elif data.get("fanstudio"):
             prefix = "【中国气象局气象预警】"
+        elif source_type == "openquake_cma":
+            prefix = "【中国气象局气象预警】"
+        elif source_type == "openquake_nmefc_wave":
+            prefix = "【国家海洋环境预报中心海浪警报】"
+        elif source_type == "openquake_nmefc_surge":
+            prefix = "【国家海洋环境预报中心风暴潮警报】"
         else:
             prefix = "【气象预警】"
         parts = [prefix, title]

@@ -22,7 +22,6 @@ logger = get_logger()
 
 # Jian 短名 → 内部 source_type
 JIAN_SOURCE_TO_INTERNAL: Dict[str, str] = {
-    "cea": "cea",
     "cwa-eew": "cwa-eew",
     "jma-eew": "jma",
     "sa": "sa",
@@ -42,10 +41,12 @@ JIAN_SOURCE_TO_INTERNAL: Dict[str, str] = {
     "ingv": "ingv",
     "usp": "usp",
     "nrcan": "nrcan",
+    "afad": "afad",
+    "kma": "kma",
 }
 
-JIAN_WARNING_INTERNAL = frozenset({"cea", "cwa-eew", "jma", "sa", "early_est"})
-JIAN_SKIP_INTERNAL = frozenset({"jma_eq"})  # JMA 情报走 P2PQuake
+JIAN_WARNING_INTERNAL = frozenset({"cwa-eew", "jma", "sa", "early_est"})
+JIAN_SKIP_INTERNAL = frozenset({"cea", "cea-pr"})  # sismotide 已下线 CEA
 JIAN_UTC9_WARNING = frozenset({"jma"})
 JIAN_LIST_RESPONSE_TYPES = frozenset(
     {
@@ -134,22 +135,33 @@ def _maybe_fix_place_name(
     *,
     is_warning: bool,
 ) -> str:
-    if not place_name:
+    if not place_name or (lat == 0.0 and lon == 0.0):
         return place_name
     try:
-        from utils.place_name_fixer import get_place_name_fixer
+        from config import Config
+        from utils.place_name_utils import should_apply_place_name_fix, should_apply_fe_place_fix
 
-        fixer = get_place_name_fixer()
-        if fixer and fixer.is_enabled():
-            return fixer.fix_place_name(
-                place_name,
-                latitude=lat,
-                longitude=lon,
-                source_type=source_type,
-                is_warning=is_warning,
+        config = Config()
+        if not should_apply_place_name_fix(config):
+            return place_name
+        if is_warning and source_type in ("sa", "kma-eew"):
+            from utils.region_name_fixer import get_sa_region_fixer, get_kma_region_fixer
+
+            fixer = (
+                get_sa_region_fixer()
+                if source_type == "sa"
+                else get_kma_region_fixer()
             )
-    except Exception:
-        pass
+            if fixer and fixer.is_supported():
+                return fixer.fix_place_name(place_name, lat, lon)
+        if not is_warning and should_apply_fe_place_fix(source_type):
+            from utils.place_name_fixer import get_place_name_fixer
+
+            fixer = get_place_name_fixer()
+            if fixer and fixer.is_supported(source_type):
+                return fixer.fix_place_name(place_name, lat, lon, source_type)
+    except Exception as e:
+        logger.debug(f"[Jian] 地名修正失败: {e}")
     return place_name
 
 
@@ -160,15 +172,23 @@ class JianProjectAdapter(BaseAdapter):
         super().__init__(source_type, url)
 
     def _enabled_internals(self) -> Set[str]:
-        """根据设置页 HTTP 逻辑键（兼容旧配置）判断子源是否启用。"""
+        """根据设置页 jian_parse_* 开关判断子源是否启用。"""
         try:
-            from config import Config, jian_internal_enabled
+            from config import (
+                Config,
+                jian_internal_enabled,
+                jian_short_to_internal,
+                JIAN_SHORT_TO_PARSE_FLAG,
+            )
 
             cfg = Config()
             out: Set[str] = set()
-            for short, internal in JIAN_SOURCE_TO_INTERNAL.items():
-                if jian_internal_enabled(cfg, internal):
-                    out.add(internal)
+            for short in JIAN_SHORT_TO_PARSE_FLAG:
+                if not jian_internal_enabled(cfg, jian_short_to_internal(short)):
+                    continue
+                adapter_internal = JIAN_SOURCE_TO_INTERNAL.get(short)
+                if adapter_internal:
+                    out.add(adapter_internal)
             return out
         except Exception as e:
             logger.debug(f"[Jian] 读取子源开关失败: {e}")

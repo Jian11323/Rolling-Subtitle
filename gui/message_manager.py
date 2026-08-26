@@ -42,6 +42,7 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'shaanxi': 12,
     'hubei': 13,
     'cwa': 14,
+    'jma_eq': 15,  # 主源（WeJet/Jian）日本气象厅地震情报
     'p2pquake': 15,  # P2P日本气象厅地震情报
     'p2pquake_tsunami': 16,  # P2P日本气象厅海啸预报
     'jma_volcano': 17,  # JMA 火山情报
@@ -80,6 +81,7 @@ SOURCE_PRIORITY: Dict[str, int] = {
     'wolfx_cwa_eew': 0,
     # EQSC 预警
     'eqsc_jma_eew': 0,
+    'p2pquake_eew': 0,
     # Wolfx 列表速报
     'wolfx_cenc': 4,
     'wolfx_jma_eqlist': 11,
@@ -104,6 +106,7 @@ SOURCE_FIXED_ORDER: List[str] = [
     'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
     'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
     'eqsc_jma_eew',
+    'p2pquake_eew',
     'early_est',
     # 速报
     'weatheralarm', 'fanstudio_typhoon', 'eqsc_typhoon',
@@ -112,7 +115,7 @@ SOURCE_FIXED_ORDER: List[str] = [
     'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan',
     'fujian', 'sichuan', 'shaanxi', 'hubei',
     'cwa', 'eqsc_cwa',
-    'p2pquake', 'wolfx_jma_eqlist', 'eqsc_jma_report', 'p2pquake_tsunami', 'jma_volcano', 'eqsc_volcano',
+    'jma_eq', 'p2pquake', 'wolfx_jma_eqlist', 'eqsc_jma_report', 'p2pquake_tsunami', 'jma_volcano', 'eqsc_volcano',
     'hko', 'eqsc_hko', 'usgs', 'eqsc_usgs', 'emsc', 'eqsc_emsc',
     'bcsf', 'gfz', 'usp', 'kma',
     'bmkg', 'geonet', 'ingv', 'tmd', 'mmd', 'nrcan', 'phivolcs', 'sgc', 'ga', 'cenais', 'fssn', 'fssn-cmt',

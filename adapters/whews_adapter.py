@@ -28,8 +28,14 @@ from utils import timezone_utils
 
 logger = get_logger()
 
-# JMA 情报仅使用 P2PQuake；预警由主服务（WeJet）解析
-WHEWS_SKIP_SOURCES = frozenset({"jma"})
+# WeJet 已删除 CEA / CEA-PR：收到相关 source 直接丢弃
+WHEWS_SKIP_SOURCES = frozenset({"cea", "cea-pr", "cea_pr", "cea_all"})
+
+
+def _is_whews_cea_source(short: str) -> bool:
+    """判断是否为已下线的 WeJet CEA / CEA-PR 源名。"""
+    s = (short or "").strip().lower().replace("_", "-")
+    return s in WHEWS_SKIP_SOURCES or s.startswith("cea-") or s == "cea"
 
 # 省级地震局情报（api.beecld.com：仅北京 / 云南 / 宁夏；福建/四川/陕西/湖北已下架）
 WHEWS_PROVINCIAL_SOURCES = (
@@ -42,11 +48,10 @@ WHEWS_PROVINCIAL_SOURCES = (
 # 键一律小写；实际查找走 _WHEWS_SOURCE_LOOKUP（兼容大小写与 -/_）
 WHEWS_SOURCE_TO_INTERNAL = {
     "jma_eew": "jma",
+    "jma": "jma_eq",
     "cwa_eew": "cwa-eew",
     "sa_eew": "sa",
     "kma_eew": "kma-eew",
-    "cea": "cea",
-    "cea-pr": "cea-pr",
     "cenc": "cenc",
     "cwa": "cwa",
     "hko": "hko",
@@ -121,11 +126,10 @@ def resolve_whews_internal_source(short: str) -> Optional[str]:
 # 内部 source_type → message_config.whews_parse_* 字段名
 WHEWS_SOURCE_FLAG_FIELD = {
     "jma": "whews_parse_jma_eew",
+    "jma_eq": "whews_parse_jma",
     "cwa-eew": "whews_parse_cwa_eew",
     "sa": "whews_parse_sa_eew",
     "kma-eew": "whews_parse_kma_eew",
-    "cea": "whews_parse_cea",
-    "cea-pr": "whews_parse_cea_pr",
     "cenc": "whews_parse_cenc",
     "cwa": "whews_parse_cwa",
     "hko": "whews_parse_hko",
@@ -168,7 +172,7 @@ WHEWS_SOURCE_FLAG_FIELD = {
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_FLAG_FIELD[_prov] = f"whews_parse_{_prov}"
 
-WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "cea", "cea-pr", "kma-eew"})
+WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "kma-eew"})
 
 # 发震时间为 UTC+9（JST/KST）的预警源
 WHEWS_UTC9_WARNING = frozenset({"jma", "kma-eew"})
@@ -289,27 +293,18 @@ class WhewsAdapter(BaseAdapter):
 
     def _enabled_internal_sources(self) -> Set[str]:
         """根据配置返回当前允许解析的内部 source_type 集合。"""
-        from config import Config, is_whews_url
+        from config import Config, is_whews_all_enabled, DATA_PROVIDER_WHEWS
 
         config = getattr(self, "_config", None) or Config()
-        enabled_sources = getattr(self, "_enabled_sources", None) or config.enabled_sources
-        if not any(bool(v) and is_whews_url(k) for k, v in (enabled_sources or {}).items()):
+        if config.get_active_data_provider() != DATA_PROVIDER_WHEWS:
+            return set()
+        if not is_whews_all_enabled(config.enabled_sources):
             return set()
         msg = getattr(config, "message_config", None)
         if msg is None:
             return set()
-        host = ""
-        try:
-            host = config.get_whews_host()
-        except Exception:
-            host = ""
-        from config import whews_host_supports_cea
-
-        allow_cea = whews_host_supports_cea(host)
         out: Set[str] = set()
         for internal, field in WHEWS_SOURCE_FLAG_FIELD.items():
-            if internal in ("cea", "cea-pr") and not allow_cea:
-                continue
             if getattr(msg, field, True):
                 out.add(internal)
         return out
@@ -343,7 +338,7 @@ class WhewsAdapter(BaseAdapter):
     # ------------------------------------------------------------------
 
     def _parse_warning(self, data: Dict[str, Any], source_type: str) -> Optional[Dict[str, Any]]:
-        """解析地震预警（jma_eew / cwa_eew / sa_eew / cea / cea-pr / kma_eew）。"""
+        """解析地震预警（jma_eew / cwa_eew / sa_eew / kma_eew）。"""
         place_name = (
             data.get("placeName")
             or data.get("place_name")
@@ -437,9 +432,6 @@ class WhewsAdapter(BaseAdapter):
             if "cancel" in data:
                 result["cancel"] = data.get("cancel", False)
 
-        if source_type == "cea-pr" and "province" in data:
-            result["province"] = data.get("province")
-
         if source_type == "cwa-eew" and "locationDesc" in data:
             result["location_desc"] = data.get("locationDesc")
 
@@ -515,34 +507,65 @@ class WhewsAdapter(BaseAdapter):
         return result
 
     def _parse_weather(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """解析气象预警。"""
+        """解析气象预警（国内为主、香港为辅的展示文案）。"""
         event_id = data.get("id", data.get("eventId", ""))
+        headline = str(data.get("headline") or data.get("title") or "").strip()
+        title = str(data.get("title") or headline or "").strip()
         if not event_id:
-            title = data.get("title", data.get("headline", ""))
             effective = data.get("effective", "")
-            if title and effective:
-                event_id = f"{title}_{effective}"
+            if headline and effective:
+                event_id = f"{headline}_{effective}"
+
+        display_title = self._format_weatheralarm_display(headline or title)
 
         eff_raw = data.get("effective", "")
         eff_display = (
             timezone_utils.flexible_time_to_display(str(eff_raw)) if eff_raw else ""
         )
+        description = str(data.get("description") or "").strip()
+        if description:
+            description = re.sub(r"\s+", " ", description.replace("\n", " ")).strip()
+        if len(description) > 120:
+            description = description[:117].rstrip() + "..."
+
         return {
             "type": "weather",
             "magnitude": 0,
             "latitude": _safe_float(data.get("latitude", 0)),
             "longitude": _safe_float(data.get("longitude", 0)),
             "depth": 0,
-            "place_name": data.get("headline", data.get("title", "")),
+            "place_name": display_title,
             "shock_time": eff_display or str(eff_raw).strip(),
             "organization": _get_organization_name("weatheralarm"),
-            "title": data.get("title", data.get("headline", "")),
-            "description": data.get("description", ""),
+            "title": display_title,
+            "description": description,
             "warning_type": data.get("type", ""),
             "event_id": event_id,
             "source_type": "weatheralarm",
             "raw_data": data,
         }
+
+    @staticmethod
+    def _format_weatheralarm_display(headline: str) -> str:
+        """
+        重写气象预警滚动文案：大陆 NMC 预警保留省市区主体；
+        香港/澳门相关预警单独标注，不作为大陆主体。
+        """
+        text = (headline or "").strip()
+        if not text:
+            return ""
+        hk_markers = ("香港", "澳門", "澳门", "HKO", "Hong Kong")
+        is_hk = any(m in text for m in hk_markers)
+        m = re.match(r"^(.+?)发布(.+)$", text)
+        if m:
+            region = m.group(1).strip()
+            warning = m.group(2).strip()
+            if is_hk or any(x in region for x in ("香港", "澳门", "澳門")):
+                return f"【港澳气象预警】{region} {warning}"
+            return f"{region} {warning}"
+        if is_hk:
+            return f"【港澳气象预警】{text}"
+        return text
 
     def _parse_volcano(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """解析日本气象厅火山情报（source=va）。"""
@@ -1086,18 +1109,18 @@ class WhewsAdapter(BaseAdapter):
             return None
 
         short = self._extract_source_short(frame)
-        if not short and self.endpoint in ("cea_all", "cea", "cea-pr"):
-            short = "cea" if self.endpoint != "cea-pr" else "cea-pr"
-            if isinstance(data_obj, dict) and self._dict_get_ci(data_obj, "province"):
-                short = "cea-pr"
         if not short and self.endpoint == "cenc":
             short = "cenc"
         if not short:
             logger.debug("[WHEWS] 无法识别 source，跳过")
             return None
 
-        if short in WHEWS_SKIP_SOURCES:
-            logger.debug(f"[WHEWS] source={short}（JMA 情报）由 P2PQuake 负责，跳过")
+        if _is_whews_cea_source(short) or _is_whews_cea_source(self.endpoint):
+            logger.debug(f"[WHEWS] source={short}（CEA/CEA-PR 已删除）直接丢弃")
+            return None
+
+        if short in WHEWS_SKIP_SOURCES or short.replace("_", "-") in WHEWS_SKIP_SOURCES:
+            logger.debug(f"[WHEWS] source={short} 已下线/跳过，忽略")
             return None
 
         internal = resolve_whews_internal_source(short)
@@ -1118,6 +1141,7 @@ class WhewsAdapter(BaseAdapter):
             return None
         parsed["fanstudio"] = False
         parsed["whews"] = True
+        parsed["jian"] = False
         # 溯源：规范化短名写入 raw 旁注，便于调试
         parsed.setdefault("update_source", short)
         return parsed

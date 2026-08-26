@@ -135,9 +135,15 @@ class HTTPPollingConnection:
             if data_hash == self._last_data_hash:
                 return
             self._last_data_hash = data_hash
-            parsed = self.adapter.parse(data)
-            if parsed:
-                message_callback(self.source_name, parsed)
+            if hasattr(self.adapter, "parse_all"):
+                parsed_list = self.adapter.parse_all(data)
+            else:
+                one = self.adapter.parse(data)
+                parsed_list = [one] if one else []
+            for parsed in parsed_list:
+                if parsed:
+                    pt = parsed.get("source_type") or self.source_name
+                    message_callback(pt if pt != "custom" else self.source_name, parsed)
         except Exception as e:
             self.last_request_ok = False
             self.last_request_time = time.time()
@@ -167,10 +173,12 @@ class HTTPPollingManager:
 
     def get_adapter(self, url: str) -> Optional[Any]:
         """根据URL获取对应的适配器。"""
-        if self.config.custom_data_source_url and url == self.config.custom_data_source_url:
-            if url.startswith('http://') or url.startswith('https://'):
-                from adapters.custom_adapter import CustomAdapter
-                return CustomAdapter('custom', url)
+        from config import is_custom_data_source_url
+        if is_custom_data_source_url(url, self.config) and url.startswith(
+            ("http://", "https://")
+        ):
+            from adapters.custom_adapter import CustomAdapter
+            return CustomAdapter("custom", url)
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)

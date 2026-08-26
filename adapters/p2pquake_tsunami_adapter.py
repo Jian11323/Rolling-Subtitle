@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-P2PQuake 海啸预报数据源适配器
-API: https://api.p2pquake.net/v2/jma/tsunami?limit=1
-只取第一条；cancelled 为 True 时不展示。
+P2PQuake 海啸预报（code 552）数据源适配器
+API: https://api.p2pquake.net/v2/history?codes=551&codes=552&codes=556&limit=10
+（兼容旧接口 /v2/jma/tsunami；本适配器仅处理 code=552 或未带 code 的海啸对象）
+cancelled 为 True 时不展示。
 """
 
 import json
@@ -19,7 +20,7 @@ logger = get_logger()
 
 
 class P2PQuakeTsunamiAdapter(BaseAdapter):
-    """P2PQuake 海啸预报适配器（日本气象厅）"""
+    """P2PQuake 海啸预报适配器（日本气象厅 code 552）"""
 
     def __init__(self, source_name: str, source_url: str):
         """初始化 P2PQuake 海啸预报适配器。"""
@@ -27,13 +28,19 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
 
     def parse_single_item(self, item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
-        解析单条海啸对象（用于 HTTP 数组首条或 WebSocket 单条消息）。
-        cancelled 为 True 时返回 None。
+        解析单条海啸对象（用于 HTTP 数组条目或 WebSocket 单条消息）。
+        cancelled 为 True 时返回 None；显式 code 且非 552 时跳过。
         """
         try:
             if not isinstance(item, dict):
                 return None
+            code = item.get('code')
+            if code is not None and int(code) != 552:
+                return None
             if item.get('cancelled') is True:
+                return None
+            # 552 须有 areas；旧 jma/tsunami 接口同结构
+            if 'areas' not in item and 'issue' not in item:
                 return None
             issue = item.get('issue') or {}
             issue_time = issue.get('time') or item.get('time') or ''
@@ -62,8 +69,7 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
         """
-        解析海啸 API 返回的数组，只取第一条；cancelled 时返回 None。
-        若 raw_data 为单条 dict（如 WebSocket），则直接调用 parse_single_item。
+        解析海啸数据：单条 dict 或数组中首个有效 552；cancelled 时返回 None。
         """
         try:
             if isinstance(raw_data, str):
@@ -74,7 +80,11 @@ class P2PQuakeTsunamiAdapter(BaseAdapter):
                 return self.parse_single_item(data)
             if not isinstance(data, list) or len(data) == 0:
                 return None
-            return self.parse_single_item(data[0])
+            for item in data:
+                parsed = self.parse_single_item(item) if isinstance(item, dict) else None
+                if parsed:
+                    return parsed
+            return None
         except Exception as e:
             logger.debug(f"[P2PQuake海啸] 解析跳过: {e}")
             return None

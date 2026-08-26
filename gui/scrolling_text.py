@@ -166,13 +166,13 @@ class _ScrollingTextMixin:
         self._lead_badge_timer.timeout.connect(self._on_lead_badge_timeout)
 
         self.timer = QTimer(self)
-        # 字幕滚动用 CoarseTimer 足够；PreciseTimer 会明显抬高空闲功耗
-        self.timer.setTimerType(Qt.CoarseTimer)
+        # 滚动流畅优先：PreciseTimer 保证帧间隔稳定；占用由性能档的 target_fps/缓存等控制
+        self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._scroll)
         target_fps = max(1, int(config.gui_config.target_fps or 30))
-        timer_interval = max(16, int(1000 / target_fps))  # 最低约 16ms，避免无意义的过高刷新
+        timer_interval = max(16, int(1000 / target_fps))  # 约 60fps 上限（16ms）
         self.timer.start(timer_interval)
-        logger.info(f"定时器间隔设置为: {timer_interval}ms (CoarseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
+        logger.info(f"定时器间隔设置为: {timer_interval}ms (PreciseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
         self._timer_interval = timer_interval
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
         # 启动后尽快预取背景，避免首帧才开始防抖等待
@@ -1557,16 +1557,25 @@ class ScrollingText(QOpenGLWidget, _ScrollingTextMixin):
         fmt.setRenderableType(QSurfaceFormat.OpenGL)
         fmt.setProfile(QSurfaceFormat.CompatibilityProfile)
         fmt.setVersion(2, 1)
-        fmt.setDepthBufferSize(24)
-        fmt.setStencilBufferSize(8)
-        fmt.setSamples(4)  # 多重采样，改善 OpenGL 下文字抗锯齿
+        # 2D 滚动字幕不需要深度/模板缓冲，可明显降低显存占用
+        fmt.setDepthBufferSize(0)
+        fmt.setStencilBufferSize(0)
+        try:
+            msaa = int(getattr(config.gui_config, "opengl_msaa_samples", 0) or 0)
+        except (TypeError, ValueError):
+            msaa = 0
+        if msaa not in (0, 2, 4, 8):
+            msaa = 0
+        fmt.setSamples(msaa)
         fmt.setSwapBehavior(QSurfaceFormat.DoubleBuffer)
         fmt.setOption(QSurfaceFormat.DeprecatedFunctions, False)
         super().__init__()
         self.setFormat(fmt)
         self._init_scrolling(config)
-        logger.info(f"滚动组件使用 QOpenGLWidget 硬件加速（VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'}）")
-    
+        logger.info(
+            f"滚动组件使用 QOpenGLWidget 硬件加速"
+            f"（VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'}, MSAA: {msaa}x）"
+        ) 
     def initializeGL(self):
         """OpenGL初始化（QOpenGLWidget要求），并校验垂直同步与硬件加速是否生效"""
         try:

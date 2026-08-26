@@ -32,11 +32,12 @@ from config import (
     p2pquake_master_enabled,
     FANSTUDIO_ALL_URL,
     FANSTUDIO_TYPHOON_HTTP,
-    JIAN_REPORT_SOURCE_SPECS,
-    jian_logical_key,
+    JIAN_SUB_SOURCE_SPECS,
+    JIAN_SHORT_TO_PARSE_FLAG,
     JIAN_MASTER_KEY,
     WOLFX_MASTER_KEY,
-    WHEWS_ALL_URL,
+    WHEWS_MASTER_KEY,
+    AUX_SOURCES_MASTER_KEY,
     WHEWS_WS_URLS,
     WHEWS_HOST_PRIMARY,
     WHEWS_HOST_BACKUP,
@@ -44,9 +45,10 @@ from config import (
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_JIAN,
     normalize_data_provider,
+    is_whews_all_enabled,
     wolfx_master_enabled,
+    aux_sources_enabled,
     normalize_whews_host,
-    whews_host_supports_cea,
     is_whews_url,
     is_whews_dedicated_endpoint,
     WOLFX_ALL_EEW_URL,
@@ -57,15 +59,21 @@ from config import (
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     EQSC_WS_URL,
+    OPENQUAKE_WS_ALL_URL,
+    openquake_master_enabled,
+    enforce_weather_source_mutex,
+    WEATHER_SOURCE_FLAGS,
     DEFAULT_HTTP_POLL_INTERVALS,
 )
 from utils.logger import get_logger
 from utils.resource_path import get_executable_path, get_resource_path
 from utils.performance_presets import (
     PERFORMANCE_MODE_CUSTOM,
-    PERFORMANCE_MODE_STANDARD,
+    PERFORMANCE_MODE_EXTREME,
+    PERFORMANCE_MODE_MEDIUM,
     PERFORMANCE_MODE_LABELS,
     PERFORMANCE_MODES,
+    performance_mode_budget_hint,
 )
 from .color_manager import Color48Picker
 from .image_crop_dialog import ImageCropDialog
@@ -1054,6 +1062,50 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         for w in self.findChildren(QSlider):
             w.valueChanged.connect(_mark)
 
+    def _wire_weather_source_mutex(self) -> None:
+        """气象预警源互斥：Fan Studio / WeJet / OpenQuakeAPI 仅能开启一个。"""
+        self._weather_mutex_sync = False
+        specs = [
+            ("fanstudio_parse_weatheralarm_cb", "fanstudio_parse_weatheralarm"),
+            ("whews_parse_weatheralarm_cb", "whews_parse_weatheralarm"),
+            ("openquake_parse_cma_cb", "openquake_parse_cma"),
+        ]
+        tip = "气象预警全局仅能启用一个数据源（Fan Studio / WeJet / OpenQuakeAPI 互斥）"
+        for cb_attr, _flag in specs:
+            cb = getattr(self, cb_attr, None)
+            if cb is None:
+                continue
+            cb.setToolTip(tip)
+            try:
+                cb.stateChanged.disconnect()
+            except Exception:
+                pass
+            cb.stateChanged.connect(
+                lambda _state, active=cb_attr, s=specs: self._on_weather_source_mutex_changed(
+                    active, s
+                )
+            )
+
+    def _on_weather_source_mutex_changed(
+        self, active_attr: str, specs: List[Tuple[str, str]]
+    ) -> None:
+        """勾选一个气象源时自动关闭其余气象源。"""
+        if getattr(self, "_weather_mutex_sync", False):
+            return
+        cb = getattr(self, active_attr, None)
+        if cb is None or not cb.isChecked():
+            return
+        self._weather_mutex_sync = True
+        try:
+            for cb_attr, _flag in specs:
+                if cb_attr == active_attr:
+                    continue
+                other = getattr(self, cb_attr, None)
+                if other is not None and other.isChecked():
+                    other.setChecked(False)
+        finally:
+            self._weather_mutex_sync = False
+
     def _on_cancel_clicked(self):
         """取消：从磁盘重新加载配置并刷新控件，避免未保存的修改残留"""
         try:
@@ -1228,7 +1280,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if hasattr(self, 'performance_vars') and self.performance_vars:
                 combo = self.performance_vars.get('performance_mode_combo')
                 if combo is not None:
-                    mode = getattr(g, 'performance_mode', 'standard') or 'standard'
+                    mode = getattr(g, 'performance_mode', 'medium') or 'medium'
                     idx = combo.findData(mode)
                     if idx < 0:
                         idx = combo.findData(PERFORMANCE_MODE_CUSTOM)
@@ -1276,12 +1328,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
                 ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
                 ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+                ('whews_parse_jma_cb', 'whews_parse_jma'),
                 ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
                 ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
                 ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
                 ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
-                ('whews_parse_cea_cb', 'whews_parse_cea'),
-                ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
                 ('whews_parse_cenc_cb', 'whews_parse_cenc'),
                 ('whews_parse_cwa_cb', 'whews_parse_cwa'),
                 ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -1340,6 +1391,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self.p2pquake_parse_551_cb.setChecked(getattr(mc, 'p2pquake_parse_551', True))
             if hasattr(self, 'p2pquake_parse_552_cb'):
                 self.p2pquake_parse_552_cb.setChecked(getattr(mc, 'p2pquake_parse_552', True))
+            if hasattr(self, 'p2pquake_parse_556_cb'):
+                self.p2pquake_parse_556_cb.setChecked(getattr(mc, 'p2pquake_parse_556', True))
             for attr, cfg_name, default in [
                 ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew', True),
                 ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report', True),
@@ -1352,10 +1405,23 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc', True),
                 ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon', True),
                 ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano', False),
+                ('openquake_parse_gq_cb', 'openquake_parse_gq', True),
+                ('openquake_parse_nmefc_cb', 'openquake_parse_nmefc', True),
+                ('openquake_parse_nmefc_wave_cb', 'openquake_parse_nmefc_wave', True),
+                ('openquake_parse_nmefc_surge_cb', 'openquake_parse_nmefc_surge', True),
+                ('openquake_parse_cma_cb', 'openquake_parse_cma', True),
             ]:
                 cb = getattr(self, attr, None)
                 if cb is not None:
                     cb.setChecked(getattr(mc, cfg_name, default))
+            if hasattr(self, "openquake_gq_min_magnitude_spin"):
+                self.openquake_gq_min_magnitude_spin.setValue(
+                    float(getattr(mc, "openquake_gq_min_magnitude", 4.5) or 0.0)
+                )
+            if hasattr(self, "openquake_connect_cb"):
+                self.openquake_connect_cb.setChecked(
+                    openquake_master_enabled(self.config.enabled_sources)
+                )
             if hasattr(self, 'radio_custom_text') and hasattr(self, 'radio_report'):
                 use_custom = getattr(mc, 'use_custom_text', False)
                 self.radio_custom_text.setChecked(use_custom)
@@ -2275,15 +2341,17 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         performance_mode_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         for mode_id in PERFORMANCE_MODES:
             performance_mode_combo.addItem(PERFORMANCE_MODE_LABELS[mode_id], mode_id)
-        current_mode = getattr(self.config.gui_config, "performance_mode", "standard") or "standard"
+        current_mode = getattr(self.config.gui_config, "performance_mode", "medium") or "medium"
         mode_index = performance_mode_combo.findData(current_mode)
         if mode_index < 0:
-            mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_STANDARD)
+            mode_index = performance_mode_combo.findData(PERFORMANCE_MODE_MEDIUM)
         performance_mode_combo.setCurrentIndex(max(0, mode_index))
         performance_mode_combo.setToolTip(
-            "低配：目标常驻 ≤50MB，CPU 30fps，仅核心预警与单源连接；\n"
-            "标准：目标 ≤80MB，CPU 60fps，默认数据源组合；\n"
-            "高配（全开）：目标 ≤120MB，OpenGL 60fps，启用全部辅助源。"
+            "低性能：约 CPU≤2%、RSS≤100MB，30fps CPU 渲染；\n"
+            "中性能：约 CPU≤3%、RSS≤160MB，30fps CPU 渲染；\n"
+            "高性能：约 CPU≤4%、RSS≤210MB，30fps OpenGL；\n"
+            "极致：约 CPU≤5%、RSS≤220MB，60fps OpenGL。\n"
+            "优先保证滚动刷新流畅不卡顿。首次启动按本机自动匹配。"
         )
         apply_preset_btn = QPushButton("应用性能模式")
         _set_widget_style(apply_preset_btn, STYLE_SECONDARY_BTN)
@@ -2293,7 +2361,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         preset_row.addWidget(performance_mode_combo, 1)
         preset_row.addWidget(apply_preset_btn)
         block3_layout.addLayout(preset_row)
-        preset_hint = QLabel("切换后覆盖渲染、数据源与告警等设置；低配/标准/高配分别目标 ≤50/80/120MB。")
+        preset_hint = QLabel("切换后覆盖渲染、数据源与告警等设置，立即生效。")
         preset_hint.setToolTip("会覆盖相关设置；预警显示能力保留，应用后热重载。")
         preset_hint.setWordWrap(True)
         _set_widget_style(preset_hint, STYLE_HINT)
@@ -2309,9 +2377,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         else:
             cpu_radio.setChecked(True)
         cpu_radio.setToolTip("兼容性更好，修改后立即热切换生效")
-        opengl_radio.setToolTip(
-            "硬件加速（OpenGL），目标常驻尽量 ≤120MB；修改后立即热切换生效"
-        )
+        opengl_radio.setToolTip("硬件加速（OpenGL），修改后立即热切换生效")
         render_row.addWidget(cpu_radio)
         render_row.addWidget(opengl_radio)
         render_row.addStretch()
@@ -3406,7 +3472,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             show_warning(self, "错误", "音频设置保存失败")
 
     def _create_data_source_tab(self):
-        """创建数据源设置标签页（主数据源三选一 + 全局辅助源）。"""
+        """创建数据源设置标签页（主数据源二选一 + 全局辅助源）。"""
         scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
         _prepare_scroll_body(scrollable_widget)
@@ -3417,11 +3483,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         fanstudio_http_poll_sources = [
             (FANSTUDIO_TYPHOON_HTTP, "台风实时与历史数据"),
         ]
-        # 速报子源用逻辑开关键；预警由下方 jian_parse_* 控制（总开关或任一速报启用时生效）
-        jian_sources = [
-            (jian_logical_key(short), label, False)
-            for short, label in JIAN_REPORT_SOURCE_SPECS
-        ]
+        jian_sources = list(JIAN_SUB_SOURCE_SPECS)
 
         # 顶部：主数据源三选一
         group_provider = QGroupBox("主数据源")
@@ -3443,10 +3505,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.data_provider_group.addButton(self.radio_provider_jian, 2)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。Fan Studio / WeJet / Jian / Wolfx / EQSC 可勾选为辅助源并行。")
+        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。")
         provider_hint.setToolTip(
-            "主提供者决定默认数据流优先级；勾选连接后各源可并存。"
-            "Wolfx / 台风 / CENC 烈度速报 / P2PQuake 等为全局辅助项。"
+            "保存后仅连接当前主提供者。"
+            "Wolfx / EQSC / P2PQuake / OpenQuakeAPI 为辅助源；可用总开关整体启停，开启后各分区全部展示。"
         )
         _set_widget_style(provider_hint, STYLE_HINT)
         provider_hint.setWordWrap(True)
@@ -3642,7 +3704,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         whews_urls = self.config.get_whews_endpoint_urls(cur_host)
         self.whews_all_connect_cb = QCheckBox("WeJet（/ws/all）")
         self.whews_all_connect_cb.setChecked(
-            self.config.enabled_sources.get(whews_urls.get("all", WHEWS_ALL_URL), False)
+            is_whews_all_enabled(self.config.enabled_sources)
         )
         _set_widget_style(self.whews_all_connect_cb, STYLE_CHECKBOX_SOURCE)
         wh_layout.addWidget(self.whews_all_connect_cb)
@@ -3666,12 +3728,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return cb
 
         self.whews_parse_jma_eew_cb = _wh_cb("whews_parse_jma_eew", "日本气象厅地震预警")
+        self.whews_parse_jma_cb = _wh_cb("whews_parse_jma", "日本气象厅地震情报")
         self.whews_parse_jma_volcano_cb = _wh_cb("whews_parse_jma_volcano", "日本气象厅火山情报")
         self.whews_parse_cwa_eew_cb = _wh_cb("whews_parse_cwa_eew", "台湾气象署地震预警")
         self.whews_parse_sa_eew_cb = _wh_cb("whews_parse_sa_eew", "美国 ShakeAlert 地震预警")
         self.whews_parse_kma_eew_cb = _wh_cb("whews_parse_kma_eew", "韩国气象厅地震预警")
-        self.whews_parse_cea_cb = _wh_cb("whews_parse_cea", "中国地震预警网")
-        self.whews_parse_cea_pr_cb = _wh_cb("whews_parse_cea_pr", "中国地震预警省网")
         self.whews_parse_weatheralarm_cb = _wh_cb("whews_parse_weatheralarm", "中国气象局气象预警")
         self.whews_parse_tsunami_cb = _wh_cb("whews_parse_tsunami", "自然资源部海啸预警中心")
         self.whews_parse_ntwc_cb = _wh_cb("whews_parse_ntwc", "美国国家海啸预警中心 (NTWC)")
@@ -3714,90 +3775,133 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.whews_parse_yunnan_cb = _wh_cb("whews_parse_yunnan", "云南地震局速报")
         self.whews_parse_ningxia_cb = _wh_cb("whews_parse_ningxia", "宁夏地震局速报")
 
-        def _update_whews_host_ui():
-            """备站 api.2v8.cn 含 CEA；主站 api.beecld.com 不含。"""
-            host = (
-                WHEWS_HOST_BACKUP
-                if self.radio_whews_host_backup.isChecked()
-                else WHEWS_HOST_PRIMARY
-            )
-            use_cea = whews_host_supports_cea(host)
-            self.whews_parse_cea_cb.setVisible(use_cea)
-            self.whews_parse_cea_pr_cb.setVisible(use_cea)
-            for cfg in ("whews_parse_cea", "whews_parse_cea_pr"):
-                lbl = self.source_parse_labels.get(cfg)
-                if lbl is not None:
-                    lbl.setVisible(use_cea)
-
-        self.radio_whews_host_primary.toggled.connect(lambda _: _update_whews_host_ui())
-        self.radio_whews_host_backup.toggled.connect(lambda _: _update_whews_host_ui())
-        _update_whews_host_ui()
-
         wh_panel_layout.addWidget(group_whews)
         scroll_layout.addWidget(self.ds_panel_whews)
 
-        # ---------- 全局辅助源：Jian Project ----------
-        group_jian = QGroupBox("Jian Project")
-        _prep_groupbox(group_jian)
-        gj_layout = QVBoxLayout(group_jian)
-        gj_layout.setContentsMargins(*GROUP_MARGINS)
-        gj_layout.setSpacing(GROUP_SPACING)
-        jian_hint = QLabel(
-            "国际速报与预警；经 WebSocket api.sismotide.top/all 推送。"
-            "可作为主数据源，也可与 Fan Studio / WeJet 等辅助并行。"
+        # ---------- Jian Project 面板 ----------
+        self.ds_panel_jian = QWidget()
+        apply_light_palette(self.ds_panel_jian, COLOR_PAGE_BG, COLOR_TEXT)
+        self.ds_panel_jian.setAttribute(Qt.WA_StyledBackground, True)
+        _set_widget_style(self.ds_panel_jian, f"background-color: {COLOR_PAGE_BG};")
+        jp_panel_layout = QVBoxLayout(self.ds_panel_jian)
+        jp_panel_layout.setContentsMargins(0, 0, 0, 0)
+        jp_panel_layout.setSpacing(SPACING_BLOCK)
+
+        group_jian_main = QGroupBox("Jian Project")
+        _prep_groupbox(group_jian_main)
+        gj_main_layout = QVBoxLayout(group_jian_main)
+        gj_main_layout.setContentsMargins(*GROUP_MARGINS)
+        gj_main_layout.setSpacing(GROUP_SPACING)
+        jian_apply_hint = QLabel(
+            '公开 WebSocket：<a href="https://api.sismotide.top/api/" style="color: #3B82F6;">'
+            'api.sismotide.top</a>（无需令牌；测站数据不在此配置）'
         )
+        jian_apply_hint.setOpenExternalLinks(True)
+        _set_widget_style(jian_apply_hint, STYLE_HINT)
+        jian_apply_hint.setWordWrap(True)
+        gj_main_layout.addWidget(jian_apply_hint)
+        jian_hint = QLabel("勾选后连接 /all 聚合；下方子源控制解析范围。")
         _set_widget_style(jian_hint, STYLE_HINT)
         jian_hint.setWordWrap(True)
-        gj_layout.addWidget(jian_hint)
-        self._add_source_checkbox(
-            group_jian,
-            JIAN_MASTER_KEY,
-            "Jian Project 总开关",
-            default_value=False,
-            status_key=JIAN_MASTER_KEY,
-            status_tooltip="连接状态：已启用 / 未启用",
-            status_connected_text="已启用",
-            status_disconnected_text="未启用",
+        gj_main_layout.addWidget(jian_hint)
+        self.jian_all_connect_cb = QCheckBox("Jian Project（/all）")
+        self.jian_all_connect_cb.setChecked(
+            self.config.enabled_sources.get(JIAN_MASTER_KEY, False)
         )
-        for url, label, default_on in jian_sources:
-            self._add_source_checkbox(
-                group_jian,
-                url,
-                label,
-                default_value=default_on,
-                status_key=url,
-                status_tooltip="解析状态：已启用 / 未启用",
-                status_connected_text="已启用",
-                status_disconnected_text="未启用",
-            )
+        _set_widget_style(self.jian_all_connect_cb, STYLE_CHECKBOX_SOURCE)
+        gj_main_layout.addWidget(self.jian_all_connect_cb)
 
-        def _jian_warn_cb(cfg_name: str, text: str) -> QCheckBox:
+        def _jian_cb(cfg_name: str, text: str) -> QCheckBox:
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
             _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
+            status_label = QLabel("未解析")
+            _set_widget_style(status_label, STYLE_STATUS_NEUTRAL)
+            status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            status_label.setToolTip("解析状态：本会话已解析到该源数据 / 尚未解析")
+            self.source_parse_labels[cfg_name] = status_label
+            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据 / 尚未解析")
             row = QHBoxLayout()
             row.addWidget(cb)
             row.addStretch()
-            gj_layout.addLayout(row)
+            row.addWidget(status_label)
+            gj_main_layout.addLayout(row)
             return cb
 
-        jian_warn_label = QLabel("预警解析（总开关或子源启用时生效）")
-        _set_widget_style(jian_warn_label, STYLE_HINT)
-        jian_warn_label.setWordWrap(True)
-        gj_layout.addWidget(jian_warn_label)
-        self.jian_parse_cea_cb = _jian_warn_cb("jian_parse_cea", "中国地震预警网")
-        self.jian_parse_cwa_eew_cb = _jian_warn_cb("jian_parse_cwa_eew", "台湾气象署地震预警")
-        self.jian_parse_jma_eew_cb = _jian_warn_cb("jian_parse_jma_eew", "日本气象厅紧急地震速报")
-        self.jian_parse_sa_cb = _jian_warn_cb("jian_parse_sa", "美国 ShakeAlert 地震预警")
-        self.jian_parse_early_est_cb = _jian_warn_cb("jian_parse_early_est", "Early-est 地震预警")
+        for short, label in jian_sources:
+            flag = JIAN_SHORT_TO_PARSE_FLAG.get(short)
+            if not flag:
+                continue
+            setattr(self, f"{flag}_cb", _jian_cb(flag, label))
+        jp_panel_layout.addWidget(group_jian_main)
+        scroll_layout.addWidget(self.ds_panel_jian)
 
-        # ---------- 全局辅助源：Wolfx ----------
+        # ---------- 辅助数据源（总开关 + Wolfx/EQSC/P2P 全部展开） ----------
+        group_aux_provider = QGroupBox("辅助数据源")
+        _prep_groupbox(group_aux_provider)
+        gap_layout = QVBoxLayout(group_aux_provider)
+        gap_layout.setContentsMargins(*GROUP_MARGINS)
+        gap_layout.setSpacing(GROUP_SPACING)
+        self.aux_sources_master_cb = QCheckBox(
+            "启用辅助数据源（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）"
+        )
+        self.aux_sources_master_cb.setChecked(
+            aux_sources_enabled(self.config.enabled_sources)
+        )
+        self.aux_sources_master_cb.setToolTip(
+            "关闭后隐藏下方辅助源分区，并停止连接 Wolfx、EQSC、P2PQuake、OpenQuakeAPI。"
+        )
+        _set_widget_style(self.aux_sources_master_cb, STYLE_CHECKBOX_SOURCE)
+        gap_layout.addWidget(self.aux_sources_master_cb)
+        aux_hint = QLabel("开启后各辅助源全部展示；可与任一主源并存，各自独立开关。")
+        _set_widget_style(aux_hint, STYLE_HINT)
+        aux_hint.setWordWrap(True)
+        gap_layout.addWidget(aux_hint)
+        scroll_layout.addWidget(group_aux_provider)
+        self.group_aux_provider = group_aux_provider
+
+        self.aux_panels_container = QWidget()
+        apply_light_palette(self.aux_panels_container, COLOR_PAGE_BG, COLOR_TEXT)
+        self.aux_panels_container.setAttribute(Qt.WA_StyledBackground, True)
+        aux_container_layout = QVBoxLayout(self.aux_panels_container)
+        aux_container_layout.setContentsMargins(0, 0, 0, 0)
+        aux_container_layout.setSpacing(SPACING_BLOCK)
+
+        self.aux_panel_wolfx = QWidget()
+        apply_light_palette(self.aux_panel_wolfx, COLOR_PAGE_BG, COLOR_TEXT)
+        self.aux_panel_wolfx.setAttribute(Qt.WA_StyledBackground, True)
+        aw_layout = QVBoxLayout(self.aux_panel_wolfx)
+        aw_layout.setContentsMargins(0, 0, 0, 0)
+        aw_layout.setSpacing(SPACING_BLOCK)
+
+        self.aux_panel_eqsc = QWidget()
+        apply_light_palette(self.aux_panel_eqsc, COLOR_PAGE_BG, COLOR_TEXT)
+        self.aux_panel_eqsc.setAttribute(Qt.WA_StyledBackground, True)
+        ae_layout = QVBoxLayout(self.aux_panel_eqsc)
+        ae_layout.setContentsMargins(0, 0, 0, 0)
+        ae_layout.setSpacing(SPACING_BLOCK)
+
+        self.aux_panel_p2p = QWidget()
+        apply_light_palette(self.aux_panel_p2p, COLOR_PAGE_BG, COLOR_TEXT)
+        self.aux_panel_p2p.setAttribute(Qt.WA_StyledBackground, True)
+        ap_layout = QVBoxLayout(self.aux_panel_p2p)
+        ap_layout.setContentsMargins(0, 0, 0, 0)
+        ap_layout.setSpacing(SPACING_BLOCK)
+
+        self.aux_panel_openquake = QWidget()
+        apply_light_palette(self.aux_panel_openquake, COLOR_PAGE_BG, COLOR_TEXT)
+        self.aux_panel_openquake.setAttribute(Qt.WA_StyledBackground, True)
+        ao_layout = QVBoxLayout(self.aux_panel_openquake)
+        ao_layout.setContentsMargins(0, 0, 0, 0)
+        ao_layout.setSpacing(SPACING_BLOCK)
+
+        # ---------- Wolfx 面板 ----------
         group_wolfx = QGroupBox("Wolfx")
         _prep_groupbox(group_wolfx)
         gw_layout = QVBoxLayout(group_wolfx)
         gw_layout.setContentsMargins(*GROUP_MARGINS)
         gw_layout.setSpacing(GROUP_SPACING)
-        wolfx_hint = QLabel("全局辅助源（非主数据源）：预警与列表经 all_eew；台湾走独立通道。")
+        wolfx_hint = QLabel("预警与列表经 all_eew；台湾走独立通道。")
         wolfx_hint.setToolTip("中国地震台网/JMA 地震情報经 all_eew 推送，需同时勾选对应项。")
         _set_widget_style(wolfx_hint, STYLE_HINT)
         wolfx_hint.setWordWrap(True)
@@ -3866,6 +3970,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             status_connected_text="已解析",
             status_disconnected_text="未解析",
         )
+        aw_layout.addWidget(group_wolfx)
 
         group_history = QGroupBox("P2PQuake")
         _prep_groupbox(group_history)
@@ -3911,9 +4016,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         self.p2pquake_parse_551_cb = _p2p_parse_row("p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報")
         self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")
-        # P2PQuake：固定在全局辅助区，切换主提供者时始终可见
+        self.p2pquake_parse_556_cb = _p2p_parse_row("p2pquake_parse_556", "P2PQuake 日本气象厅 緊急地震速報")
+        ap_layout.addWidget(group_history)
 
-        # CENC 烈度速报（Nowquake）：与 P2P / 台风一样固定在提供者面板下方，任意提供者均可启用
+        # CENC 烈度速报（Nowquake）
         group_cenc_ir = QGroupBox("CENC 烈度速报")
         _prep_groupbox(group_cenc_ir)
         gci_layout = QVBoxLayout(group_cenc_ir)
@@ -3935,16 +4041,16 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             status_disconnected_text="未启用",
         )
 
-        # EQSC：全局辅助源，任意主提供者下均可启用
+        # EQSC 面板
         group_eqsc = QGroupBox("EQSC")
         _prep_groupbox(group_eqsc)
         ge_layout = QVBoxLayout(group_eqsc)
         ge_layout.setContentsMargins(*GROUP_MARGINS)
         ge_layout.setSpacing(GROUP_SPACING)
         eqsc_hint = QLabel(
-            '全局辅助源（HTTP 轮询；官方称 WebSocket 不稳定故不用）。登录密钥在 '
+            'HTTP 轮询（官方称 WebSocket 不稳定故不用）。登录密钥在 '
             '<a href="https://equake.top/auth" style="color: #3B82F6;">equake.top/auth</a>'
-            ' 申请；软件自动换取 AccessToken。任意主提供者下可用。'
+            ' 申请；软件自动换取 AccessToken。'
         )
         eqsc_hint.setOpenExternalLinks(True)
         _set_widget_style(eqsc_hint, STYLE_HINT)
@@ -4049,8 +4155,103 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             )
         ]
         self._add_http_poll_interval_grid(ge_layout, eqsc_poll_sources)
+        ae_layout.addWidget(group_eqsc)
 
-        # 台风 HTTP：全局辅助源，任意主提供者下均可启用
+        # OpenQuakeAPI 面板
+        group_openquake = QGroupBox("OpenQuakeAPI")
+        _prep_groupbox(group_openquake)
+        go_layout = QVBoxLayout(group_openquake)
+        go_layout.setContentsMargins(*GROUP_MARGINS)
+        go_layout.setSpacing(GROUP_SPACING)
+        oq_hint = QLabel(
+            '经 '
+            '<a href="https://docs.aloys23.link/docs/openquake/overview" style="color: #3B82F6;">'
+            "OpenQuakeAPI</a> /ws/all 聚合推送：GlobalQuake、NMEFC 海啸/海浪/风暴潮、CMA 气象预警。"
+        )
+        oq_hint.setOpenExternalLinks(True)
+        _set_widget_style(oq_hint, STYLE_HINT)
+        oq_hint.setWordWrap(True)
+        go_layout.addWidget(oq_hint)
+        oq_status_col_w = 88
+        self.openquake_connect_cb = QCheckBox("OpenQuakeAPI")
+        self.openquake_connect_cb.setToolTip("连接 wss://api.aloys23.link/ws/all")
+        self.openquake_connect_cb.setChecked(
+            openquake_master_enabled(self.config.enabled_sources)
+        )
+        _set_widget_style(self.openquake_connect_cb, STYLE_CHECKBOX_SOURCE)
+        go_layout.addWidget(self.openquake_connect_cb)
+        if OPENQUAKE_WS_ALL_URL not in self.individual_source_urls:
+            self.individual_source_urls.append(OPENQUAKE_WS_ALL_URL)
+
+        def _oq_parse_row(parse_key: str, title: str, default: bool = True) -> QCheckBox:
+            """创建 OpenQuakeAPI 解析范围复选框行。"""
+            cb = QCheckBox(title)
+            cb.setChecked(getattr(self.config.message_config, parse_key, default))
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
+            st = QLabel("未解析")
+            st.setMinimumWidth(oq_status_col_w)
+            st.setFixedWidth(oq_status_col_w)
+            _set_widget_style(st, STYLE_STATUS_NEUTRAL)
+            st.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            st.setToolTip(
+                "解析状态：本会话已解析到该源数据（含过期未上屏） / 尚未解析"
+            )
+            self.source_parse_labels[parse_key] = st
+            self.source_status_texts[parse_key] = (
+                "已解析",
+                "未解析",
+                "解析状态：本会话已解析到该源数据（含过期未上屏） / 尚未解析",
+            )
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(cb)
+            row.addStretch()
+            row.addWidget(st)
+            go_layout.addLayout(row)
+            cb.stateChanged.connect(self._update_parse_status_labels)
+            return cb
+
+        self.openquake_parse_gq_cb = _oq_parse_row(
+            "openquake_parse_gq", "GlobalQuake 全球地震预警"
+        )
+        gq_mag_row = QHBoxLayout()
+        gq_mag_row.setContentsMargins(24, 0, 0, 0)
+        gq_mag_label = QLabel("GQ 震级阈值：")
+        _set_widget_style(gq_mag_label, STYLE_LABEL)
+        gq_mag_row.addWidget(gq_mag_label)
+        self.openquake_gq_min_magnitude_spin = QDoubleSpinBox()
+        self.openquake_gq_min_magnitude_spin.setRange(0.0, 10.0)
+        self.openquake_gq_min_magnitude_spin.setSingleStep(0.1)
+        self.openquake_gq_min_magnitude_spin.setDecimals(1)
+        self.openquake_gq_min_magnitude_spin.setValue(
+            float(getattr(self.config.message_config, "openquake_gq_min_magnitude", 4.5) or 0.0)
+        )
+        self.openquake_gq_min_magnitude_spin.setToolTip(
+            "仅作用于 GlobalQuake 地震预警；0 表示不限制。与「显示」页全局速报震级过滤相互独立。"
+        )
+        _set_widget_style(self.openquake_gq_min_magnitude_spin, STYLE_SPINBOX)
+        gq_mag_row.addWidget(self.openquake_gq_min_magnitude_spin)
+        gq_mag_hint = QLabel("（0=不限制）")
+        _set_widget_style(gq_mag_hint, STYLE_HINT)
+        gq_mag_row.addWidget(gq_mag_hint)
+        gq_mag_row.addStretch()
+        go_layout.addLayout(gq_mag_row)
+        self.openquake_parse_nmefc_cb = _oq_parse_row(
+            "openquake_parse_nmefc", "NMEFC 海啸预警"
+        )
+        self.openquake_parse_nmefc_wave_cb = _oq_parse_row(
+            "openquake_parse_nmefc_wave", "NMEFC 海浪警报"
+        )
+        self.openquake_parse_nmefc_surge_cb = _oq_parse_row(
+            "openquake_parse_nmefc_surge", "NMEFC 风暴潮警报"
+        )
+        self.openquake_parse_cma_cb = _oq_parse_row(
+            "openquake_parse_cma", "CMA 气象预警"
+        )
+        self._wire_weather_source_mutex()
+        ao_layout.addWidget(group_openquake)
+
+        # 台风 HTTP（全局）
         group_typhoon = QGroupBox("台风实时与历史数据")
         _prep_groupbox(group_typhoon)
         gt_layout = QVBoxLayout(group_typhoon)
@@ -4073,12 +4274,13 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         )
         self._add_http_poll_interval_grid(gt_layout, fanstudio_http_poll_sources)
 
-        scroll_layout.addWidget(group_jian)
-        scroll_layout.addWidget(group_wolfx)
-        scroll_layout.addWidget(group_typhoon)
+        aux_container_layout.addWidget(self.aux_panel_wolfx)
+        aux_container_layout.addWidget(self.aux_panel_eqsc)
+        aux_container_layout.addWidget(self.aux_panel_p2p)
+        aux_container_layout.addWidget(self.aux_panel_openquake)
+        scroll_layout.addWidget(self.aux_panels_container)
         scroll_layout.addWidget(group_cenc_ir)
-        scroll_layout.addWidget(group_eqsc)
-        scroll_layout.addWidget(group_history)
+        scroll_layout.addWidget(group_typhoon)
 
         provider = normalize_data_provider(
             getattr(self.config, "data_provider", DATA_PROVIDER_FANSTUDIO)
@@ -4090,8 +4292,36 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         else:
             self.radio_provider_fanstudio.setChecked(True)
 
-        self.ds_panel_fanstudio.setVisible(True)
-        self.ds_panel_whews.setVisible(True)
+        def _update_data_provider_panels_visible():
+            """切换主数据源时显示/隐藏 Fan Studio / WeJet / Jian Project 面板。"""
+            self.ds_panel_fanstudio.setVisible(self.radio_provider_fanstudio.isChecked())
+            self.ds_panel_whews.setVisible(self.radio_provider_whews.isChecked())
+            self.ds_panel_jian.setVisible(self.radio_provider_jian.isChecked())
+
+        def _update_aux_panels_visible():
+            """辅助总开关：关闭时隐藏各分区；开启时全部展示。"""
+            on = True
+            if hasattr(self, "aux_sources_master_cb"):
+                on = self.aux_sources_master_cb.isChecked()
+            if hasattr(self, "aux_panels_container"):
+                self.aux_panels_container.setVisible(on)
+            if hasattr(self, "aux_panel_wolfx"):
+                self.aux_panel_wolfx.setVisible(on)
+            if hasattr(self, "aux_panel_eqsc"):
+                self.aux_panel_eqsc.setVisible(on)
+            if hasattr(self, "aux_panel_p2p"):
+                self.aux_panel_p2p.setVisible(on)
+            if hasattr(self, "aux_panel_openquake"):
+                self.aux_panel_openquake.setVisible(on)
+
+        self._update_aux_panels_visible = _update_aux_panels_visible
+
+        self.radio_provider_fanstudio.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.radio_provider_whews.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.radio_provider_jian.toggled.connect(lambda _: _update_data_provider_panels_visible())
+        self.aux_sources_master_cb.toggled.connect(lambda _: _update_aux_panels_visible())
+        _update_data_provider_panels_visible()
+        _update_aux_panels_visible()
 
         scroll_layout.addStretch()
 
@@ -4405,6 +4635,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.fanstudio_all_connect_cb.setChecked(True)
         if hasattr(self, "whews_all_connect_cb"):
             self.whews_all_connect_cb.setChecked(True)
+        if hasattr(self, "aux_sources_master_cb"):
+            self.aux_sources_master_cb.setChecked(True)
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(True)
         if hasattr(self, "p2pquake_connect_cb"):
@@ -4439,12 +4671,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'fanstudio_parse_weatheralarm_cb',
             'fanstudio_parse_tsunami_cb',
             'whews_parse_jma_eew_cb',
+            'whews_parse_jma_cb',
             'whews_parse_jma_volcano_cb',
             'whews_parse_cwa_eew_cb',
             'whews_parse_sa_eew_cb',
             'whews_parse_kma_eew_cb',
-            'whews_parse_cea_cb',
-            'whews_parse_cea_pr_cb',
             'whews_parse_cenc_cb',
             'whews_parse_cwa_cb',
             'whews_parse_hko_cb',
@@ -4487,6 +4718,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
             'p2pquake_parse_552_cb',
+            'p2pquake_parse_556_cb',
             'eqsc_parse_jma_eew_cb',
             'eqsc_parse_jma_report_cb',
             'eqsc_parse_jma_tsunami_cb',
@@ -4498,6 +4730,12 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'eqsc_parse_emsc_cb',
             'eqsc_parse_typhoon_cb',
             'eqsc_parse_volcano_cb',
+            'openquake_parse_gq_cb',
+            'openquake_parse_nmefc_cb',
+            'openquake_parse_nmefc_wave_cb',
+            'openquake_parse_nmefc_surge_cb',
+            'openquake_parse_cma_cb',
+            'openquake_connect_cb',
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -4512,12 +4750,19 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if hasattr(self, "fanstudio_all_connect_cb"):
             self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
         if hasattr(self, "whews_all_connect_cb"):
-            urls = self.config.get_whews_endpoint_urls()
-            self.whews_all_connect_cb.setChecked(self.config.enabled_sources.get(urls.get("all", WHEWS_ALL_URL), False))
+            self.whews_all_connect_cb.setChecked(is_whews_all_enabled(self.config.enabled_sources))
+        if hasattr(self, "jian_all_connect_cb"):
+            self.jian_all_connect_cb.setChecked(self.config.enabled_sources.get(JIAN_MASTER_KEY, False))
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(
                 wolfx_master_enabled(self.config.enabled_sources)
             )
+        if hasattr(self, "aux_sources_master_cb"):
+            self.aux_sources_master_cb.setChecked(
+                aux_sources_enabled(self.config.enabled_sources)
+            )
+            if hasattr(self, "_update_aux_panels_visible"):
+                self._update_aux_panels_visible()
         if hasattr(self, "p2pquake_connect_cb"):
             self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
         # Fan Studio / 无界科技细粒度子源：恢复为配置值
@@ -4547,12 +4792,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_jma_cb', 'whews_parse_jma'),
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
-            ('whews_parse_cea_cb', 'whews_parse_cea'),
-            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
             ('whews_parse_cwa_cb', 'whews_parse_cwa'),
             ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -4595,6 +4839,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
             ('p2pquake_parse_552_cb', 'p2pquake_parse_552'),
+            ('p2pquake_parse_556_cb', 'p2pquake_parse_556'),
             ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
             ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
             ('eqsc_parse_jma_tsunami_cb', 'eqsc_parse_jma_tsunami'),
@@ -4606,16 +4851,24 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
             ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
             ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
-            ('jian_parse_cea_cb', 'jian_parse_cea'),
-            ('jian_parse_cwa_eew_cb', 'jian_parse_cwa_eew'),
-            ('jian_parse_jma_eew_cb', 'jian_parse_jma_eew'),
-            ('jian_parse_sa_cb', 'jian_parse_sa'),
-            ('jian_parse_early_est_cb', 'jian_parse_early_est'),
+            ('openquake_parse_gq_cb', 'openquake_parse_gq'),
+            ('openquake_parse_nmefc_cb', 'openquake_parse_nmefc'),
+            ('openquake_parse_nmefc_wave_cb', 'openquake_parse_nmefc_wave'),
+            ('openquake_parse_nmefc_surge_cb', 'openquake_parse_nmefc_surge'),
+            ('openquake_parse_cma_cb', 'openquake_parse_cma'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
                 default_val = getattr(self.config.message_config, cfg_name, True)
                 cb.setChecked(bool(default_val))
+        if hasattr(self, "openquake_gq_min_magnitude_spin"):
+            self.openquake_gq_min_magnitude_spin.setValue(
+                float(getattr(self.config.message_config, "openquake_gq_min_magnitude", 4.5) or 0.0)
+            )
+        if hasattr(self, "openquake_connect_cb"):
+            self.openquake_connect_cb.setChecked(
+                openquake_master_enabled(self.config.enabled_sources)
+            )
         for url, spin in self.http_poll_spinboxes.items():
             spin.setValue(self.config.get_http_poll_interval(url))
         if hasattr(self, "custom_http_poll_spinbox"):
@@ -5014,7 +5267,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         custom_source_status_label.setObjectName("custom_source_status_label")
         self.custom_source_status_label = custom_source_status_label
         custom_src_layout.addWidget(custom_source_status_label)
-        custom_hint = QLabel("HTTP 按间隔轮询；WS 需格式正确。留空关闭。")
+        custom_hint = QLabel(
+            "HTTP 按间隔轮询；WS 实时推送。按上方格式推送预警 JSON。"
+            "发震时间超过「预警有效期」（默认约 5 分钟）的报文会被丢弃。"
+            "留空关闭。"
+        )
         _set_widget_style(custom_hint, STYLE_HINT)
         custom_hint.setWordWrap(True)
         custom_src_layout.addWidget(custom_hint)
@@ -5022,18 +5279,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _set_widget_style(format_label, STYLE_LABEL + " margin-top: 4px;")
         custom_src_layout.addWidget(format_label)
         example_flat = (
-            '格式一（平铺）：\n'
+            '格式一（平铺预警，推荐）：\n'
             '{\n'
-            '  "eventID": "JMA_202512262525",\n'
-            '  "placeName": "青森县东方冲",\n'
-            '  "latitude": 41.1,\n'
-            '  "longitude": 142.6,\n'
+            '  "eventID": "00ee54c1-a2d8-8e93-064e-1c9c3cca630a",\n'
+            '  "placeName": "offshore Chiapas, Mexico",\n'
+            '  "latitude": 14.267749,\n'
+            '  "longitude": -93.034294,\n'
             '  "depth": 10,\n'
-            '  "reportTime": "2025/12/25 25:25:00",\n'
-            '  "shockTime": "2025/12/25 25:24:00",\n'
-            '  "reportNum": 5,\n'
-            '  "magnitude": "3.5",\n'
-            '  "sourceName": "JMA"\n'
+            '  "reportTime": "2026/08/24 03:39:36",\n'
+            '  "shockTime": "2026/08/24 03:33:59",\n'
+            '  "reportNum": 14,\n'
+            '  "magnitude": "4.6050143",\n'
+            '  "sourceName": "GlobalQuake地震预警"\n'
             '}'
         )
         example_flat_edit = QPlainTextEdit()
@@ -5976,12 +6233,27 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         # 按当前主机写入无界科技连接开关；仅 /ws/all，强制关闭已废弃的专用线
         if hasattr(self, "whews_all_connect_cb"):
             host = self.config.get_whews_host()
-            urls = self.config.get_whews_endpoint_urls(host)
             for u in WHEWS_WS_URLS:
                 self.config.enabled_sources[u] = False
-            self.config.enabled_sources[urls["all"]] = self.whews_all_connect_cb.isChecked()
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = self.whews_all_connect_cb.isChecked()
             if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
                 self.config._disable_whews_dedicated_endpoints()
+        if hasattr(self, "jian_all_connect_cb"):
+            self.config.enabled_sources[JIAN_MASTER_KEY] = self.jian_all_connect_cb.isChecked()
+        provider = self._current_data_provider_from_ui() if hasattr(self, "_current_data_provider_from_ui") else self.config.get_active_data_provider()
+        if provider == DATA_PROVIDER_FANSTUDIO:
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
+            self.config.enabled_sources[JIAN_MASTER_KEY] = False
+        elif provider == DATA_PROVIDER_WHEWS:
+            self.config.enabled_sources[self.all_source_url] = False
+            self.config.enabled_sources[JIAN_MASTER_KEY] = False
+        elif provider == DATA_PROVIDER_JIAN:
+            self.config.enabled_sources[self.all_source_url] = False
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
+        for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
+            cb = getattr(self, f"{flag}_cb", None)
+            if cb is not None:
+                setattr(self.config.message_config, flag, cb.isChecked())
         for attr, cfg_name in [
             ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
             ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
@@ -6008,12 +6280,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
             ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
+            ('whews_parse_jma_cb', 'whews_parse_jma'),
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
-            ('whews_parse_cea_cb', 'whews_parse_cea'),
-            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
             ('whews_parse_cwa_cb', 'whews_parse_cwa'),
             ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -6065,11 +6336,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('eqsc_parse_emsc_cb', 'eqsc_parse_emsc'),
             ('eqsc_parse_typhoon_cb', 'eqsc_parse_typhoon'),
             ('eqsc_parse_volcano_cb', 'eqsc_parse_volcano'),
-            ('jian_parse_cea_cb', 'jian_parse_cea'),
-            ('jian_parse_cwa_eew_cb', 'jian_parse_cwa_eew'),
-            ('jian_parse_jma_eew_cb', 'jian_parse_jma_eew'),
-            ('jian_parse_sa_cb', 'jian_parse_sa'),
-            ('jian_parse_early_est_cb', 'jian_parse_early_est'),
+            ('openquake_parse_gq_cb', 'openquake_parse_gq'),
+            ('openquake_parse_nmefc_cb', 'openquake_parse_nmefc'),
+            ('openquake_parse_nmefc_wave_cb', 'openquake_parse_nmefc_wave'),
+            ('openquake_parse_nmefc_surge_cb', 'openquake_parse_nmefc_surge'),
+            ('openquake_parse_cma_cb', 'openquake_parse_cma'),
         ]:
             cb = getattr(self, attr, None)
             if cb is not None:
@@ -6089,6 +6360,13 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.config.message_config.p2pquake_parse_551 = self.p2pquake_parse_551_cb.isChecked()
         if hasattr(self, 'p2pquake_parse_552_cb'):
             self.config.message_config.p2pquake_parse_552 = self.p2pquake_parse_552_cb.isChecked()
+        if hasattr(self, 'p2pquake_parse_556_cb'):
+            self.config.message_config.p2pquake_parse_556 = self.p2pquake_parse_556_cb.isChecked()
+        if hasattr(self, "openquake_gq_min_magnitude_spin"):
+            self.config.message_config.openquake_gq_min_magnitude = float(
+                self.openquake_gq_min_magnitude_spin.value()
+            )
+        enforce_weather_source_mutex(self.config.message_config)
         self._sync_data_source_connection_switches_to_config()
         self.config.message_config.use_custom_text = self.radio_custom_text.isChecked()
         for url, spin in self.http_poll_spinboxes.items():
@@ -6348,17 +6626,37 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.config.ws_config.whews_host = self._current_whews_host_from_ui()
         if hasattr(self, "whews_all_connect_cb"):
             host = self.config.get_whews_host()
-            urls = self.config.get_whews_endpoint_urls(host)
             for u in WHEWS_WS_URLS:
                 self.config.enabled_sources[u] = False
-            self.config.enabled_sources[urls["all"]] = self.whews_all_connect_cb.isChecked()
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = self.whews_all_connect_cb.isChecked()
             if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
                 self.config._disable_whews_dedicated_endpoints()
+        if hasattr(self, "aux_sources_master_cb"):
+            self.config.enabled_sources[AUX_SOURCES_MASTER_KEY] = (
+                self.aux_sources_master_cb.isChecked()
+            )
+        if hasattr(self, "jian_all_connect_cb"):
+            self.config.enabled_sources[JIAN_MASTER_KEY] = self.jian_all_connect_cb.isChecked()
+        provider = self._current_data_provider_from_ui() if hasattr(self, "_current_data_provider_from_ui") else self.config.get_active_data_provider()
+        if provider == DATA_PROVIDER_FANSTUDIO:
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
+            self.config.enabled_sources[JIAN_MASTER_KEY] = False
+        elif provider == DATA_PROVIDER_WHEWS:
+            self.config.enabled_sources[self.all_source_url] = False
+            self.config.enabled_sources[JIAN_MASTER_KEY] = False
+        elif provider == DATA_PROVIDER_JIAN:
+            self.config.enabled_sources[self.all_source_url] = False
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
+        for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
+            cb = getattr(self, f"{flag}_cb", None)
+            if cb is not None:
+                setattr(self.config.message_config, flag, cb.isChecked())
         for url, checkbox in self.source_vars.items():
             if url and url != all_url and not is_whews_url(url):
                 self.config.enabled_sources[url] = checkbox.isChecked()  # 逐项同步单项源开关
+        aux_on = aux_sources_enabled(self.config.enabled_sources)
         if hasattr(self, "p2pquake_connect_cb"):
-            p2p_master = self.p2pquake_connect_cb.isChecked()
+            p2p_master = bool(aux_on and self.p2pquake_connect_cb.isChecked())
             self.config.enabled_sources[P2PQUAKE_WSS_URL] = p2p_master  # 总开关只控制 WSS
             for http_u in P2PQUAKE_HTTP_SOURCE_KEYS:
                 # HTTP 仅启动补拉，不进入 HTTPPollingManager 持续轮询
@@ -6366,10 +6664,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if hasattr(self.config, "_sync_p2pquake_http_with_wss"):
                 self.config._sync_p2pquake_http_with_wss()
         if hasattr(self, "wolfx_all_connect_cb"):
-            wolfx_on = self.wolfx_all_connect_cb.isChecked()
+            wolfx_on = bool(aux_on and self.wolfx_all_connect_cb.isChecked())
             # 中国地震台网/JMA 列表经 all_eew，勾选时自动打开 Wolfx 聚合连接
-            if self.config.enabled_sources.get(WOLFX_CENC_EQLIST_URL, False) or self.config.enabled_sources.get(
-                WOLFX_JMA_EQLIST_URL, False
+            if aux_on and (
+                self.config.enabled_sources.get(WOLFX_CENC_EQLIST_URL, False)
+                or self.config.enabled_sources.get(WOLFX_JMA_EQLIST_URL, False)
             ):
                 wolfx_on = True
                 self.wolfx_all_connect_cb.setChecked(True)
@@ -6377,6 +6676,19 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.config.enabled_sources[WOLFX_ALL_EEW_URL] = wolfx_on
             if hasattr(self.config, "_ensure_wolfx_source_defaults"):
                 self.config._ensure_wolfx_source_defaults()
+        if hasattr(self, "openquake_connect_cb"):
+            self.config.enabled_sources[OPENQUAKE_WS_ALL_URL] = bool(
+                aux_on and self.openquake_connect_cb.isChecked()
+            )
+        if not aux_on:
+            self.config.enabled_sources[EQSC_HTTP_MASTER] = False
+            self.config.enabled_sources[WOLFX_MASTER_KEY] = False
+            self.config.enabled_sources[WOLFX_ALL_EEW_URL] = False
+            self.config.enabled_sources[WOLFX_CWA_EEW_URL] = False
+            self.config.enabled_sources[WOLFX_CENC_EQLIST_URL] = False
+            self.config.enabled_sources[WOLFX_JMA_EQLIST_URL] = False
+            self.config.enabled_sources[P2PQUAKE_WSS_URL] = False
+            self.config.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
         # EQSC：总开关 + 解析勾选 → 各 HTTP 子源；强制关闭不稳定的 WebSocket
         for attr, cfg_name in (
             ("eqsc_parse_jma_eew_cb", "eqsc_parse_jma_eew"),
@@ -6390,10 +6702,23 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ("eqsc_parse_emsc_cb", "eqsc_parse_emsc"),
             ("eqsc_parse_typhoon_cb", "eqsc_parse_typhoon"),
             ("eqsc_parse_volcano_cb", "eqsc_parse_volcano"),
+            ("openquake_parse_gq_cb", "openquake_parse_gq"),
+            ("openquake_parse_nmefc_cb", "openquake_parse_nmefc"),
+            ("openquake_parse_nmefc_wave_cb", "openquake_parse_nmefc_wave"),
+            ("openquake_parse_nmefc_surge_cb", "openquake_parse_nmefc_surge"),
+            ("openquake_parse_cma_cb", "openquake_parse_cma"),
         ):
             cb = getattr(self, attr, None)
             if cb is not None:
                 setattr(self.config.message_config, cfg_name, cb.isChecked())
+        if hasattr(self, "openquake_gq_min_magnitude_spin"):
+            self.config.message_config.openquake_gq_min_magnitude = float(
+                self.openquake_gq_min_magnitude_spin.value()
+            )
+        enforce_weather_source_mutex(self.config.message_config)
+        if hasattr(self, "eqsc_connect_cb") or EQSC_HTTP_MASTER in self.source_vars:
+            # EQSC 总开关来自 source_vars 勾选；辅源关闭时上面已强制 False
+            pass
         if hasattr(self.config, "_sync_eqsc_http_from_parse_flags"):
             self.config._sync_eqsc_http_from_parse_flags()
         if hasattr(self.config, "_ensure_whews_source_defaults"):
@@ -6711,7 +7036,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return ""
 
     def _apply_performance_preset(self) -> None:
-        """应用所选低配/标准/高配性能模式。"""
+        """应用所选低/中/高/极致性能模式。"""
         perf = getattr(self, 'performance_vars', {}) or {}
         combo = perf.get('performance_mode_combo')
         if combo is None:
@@ -6721,9 +7046,26 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             show_info(
                 self,
                 "提示",
-                "请在下拉框中选择「低配模式」「标准模式」或「高配模式」后再点击应用。",
+                "请在下拉框中选择「低性能模式」「中性能模式」「高性能模式」或「极致模式」后再点击应用。",
             )
             return
+        if mode == PERFORMANCE_MODE_EXTREME:
+            hint = performance_mode_budget_hint(PERFORMANCE_MODE_EXTREME)
+            msg = styled_message_box(self)
+            msg.setWindowTitle("开启极致模式")
+            msg.setIcon(QMessageBox.Warning)
+            msg.setText(
+                "极致模式将显著提高 CPU 与内存占用，以换取最佳渲染与数据处理能力。"
+            )
+            msg.setInformativeText(
+                f"目标资源上限：{hint}。\n\n"
+                "若本机配置较低，可能出现卡顿或内存不足。是否继续开启？"
+            )
+            confirm_btn = msg.addButton("开启极致模式", QMessageBox.AcceptRole)
+            msg.addButton("取消", QMessageBox.RejectRole)
+            msg.exec_()
+            if msg.clickedButton() != confirm_btn:
+                return
         try:
             result = self.config.apply_performance_preset(mode)
             self._reload_controls_from_config()

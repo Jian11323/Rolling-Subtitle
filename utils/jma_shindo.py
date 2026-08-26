@@ -67,6 +67,32 @@ def p2pquake_scale_to_decimal(value: Any) -> Optional[float]:
     return code / 10.0
 
 
+# P2PQuake scale → 气象厅震度表記（0 / 1–4 / 5弱…7）
+_P2P_SCALE_TO_SHINDO_TEXT: Dict[int, str] = {
+    0: "0",
+    10: "1",
+    20: "2",
+    30: "3",
+    40: "4",
+    45: "5弱",
+    50: "5強",
+    55: "6弱",
+    60: "6強",
+    70: "7",
+}
+
+
+def p2pquake_scale_to_shindo_text(value: Any) -> str:
+    """P2PQuake scale 编码 → 震度文本；无效或 -1 返回空串。"""
+    if value is None or isinstance(value, bool):
+        return ""
+    try:
+        code = int(float(value))
+    except (TypeError, ValueError):
+        return ""
+    return _P2P_SCALE_TO_SHINDO_TEXT.get(code, "")
+
+
 def instrumental_shindo_to_rank(decimal: float) -> Optional[int]:
     """
     计测震度小数 → 可比较等级。
