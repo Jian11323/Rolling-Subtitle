@@ -159,6 +159,15 @@ class MessageItem:
         if not hasattr(self, 'timestamp') or self.timestamp is None:
             self.timestamp = time.time()
     
+    def inherit_display_meta_from(self, existing: "MessageItem") -> None:
+        """更新报替换时保留首次上屏时间，避免展示计时被重置。"""
+        if (
+            existing is not None
+            and existing.first_displayed_at is not None
+            and self.first_displayed_at is None
+        ):
+            self.first_displayed_at = existing.first_displayed_at
+
     def is_same_event(self, other: 'MessageItem') -> bool:
         """
         判断是否是同一条地震事件的更新
@@ -385,6 +394,7 @@ class MessageBuffer:
                         logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
                         return False  # 内容完全一致则不重复入缓冲
                     # 找到同一条事件，替换
+                    message.inherit_display_meta_from(existing_msg)
                     old_msg_id = id(existing_msg)
                     new_msg_id = id(message)
                     # 保持原有的添加顺序
@@ -467,6 +477,7 @@ class MessageBuffer:
                             replaced = True
                             break
                         # 找到同一条事件，替换
+                        message.inherit_display_meta_from(existing_msg)
                         old_msg_id = id(existing_msg)
                         new_msg_id = id(message)
                         # 保持原有的添加顺序
@@ -544,6 +555,7 @@ class MessageBuffer:
                         logger.debug(f"忽略重复更新消息: {message.source}")
                         return False
                     # 找到相同数据源，替换
+                    message.inherit_display_meta_from(existing_msg)
                     old_msg_id = id(existing_msg)
                     new_msg_id = id(message)
                     # 保持原有的添加顺序，确保轮播顺序不变
@@ -637,6 +649,7 @@ class MessageBuffer:
                             replaced = True
                             break
                         # 找到相同数据源，替换
+                        message.inherit_display_meta_from(existing_msg)
                         old_msg_id = id(existing_msg)
                         new_msg_id = id(message)
                         # 保持原有的添加顺序

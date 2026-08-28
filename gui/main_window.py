@@ -50,7 +50,11 @@ from config import (
     any_jian_source_enabled,
 )
 from data_sources import WebSocketManager, HTTPPollingManager
-from utils.message_processor import MessageProcessor
+from utils.message_processor import (
+    MessageProcessor,
+    warning_shock_validity_max_seconds,
+    warning_shock_validity_remaining_seconds,
+)
 from utils.logger import get_logger
 from utils import timezone_utils
 from utils.geo_utils import should_accept_message
@@ -2822,16 +2826,12 @@ class MainWindow(QMainWindow):
     
     def _is_warning_still_valid(self, message: MessageItem) -> bool:
         """
-        检查预警消息是否仍然有效（展示侧：最少展示时长 + 最多展示时长）。
-        1) 若已首次展示且未满 warning_min_display_seconds（默认 5 分钟），一律视为有效。
-        2) 若已首次展示且已满 5 分钟，一律视为过期并移除（所有数据源统一，从展示到结束滚动为 5 分钟）。
-        3) 未设置首次展示时间时，按发震时间判断（入队侧逻辑不变）。
-        
-        Args:
-            message: 消息项
-            
-        Returns:
-            True表示有效，False表示已过期
+        检查预警消息是否仍然有效（展示侧）。
+
+        - 发震时间有效期为主硬上限（与入口 format / WS 丢弃一致，含分源窗口）。
+        - 「最少展示时长」仅在发震已过期时提供宽限，且宽限不超过该源发震有效期窗口，
+          避免把最少展示设成 60 分钟后，把已过期 JMA 继续滚十几分钟。
+        - 无发震时间时：已展示则按最少展示时长截止；未展示则默认有效。
         """
         try:
             if getattr(
@@ -2848,58 +2848,81 @@ class MainWindow(QMainWindow):
                     f"预警无活动超时: 距上次更新 {time.time() - message.timestamp:.0f}s"
                 )
                 return False
-            min_display = self.config.message_config.warning_min_display_seconds
-            # 保证最少展示时长：自首次显示起未满 min_display 秒则仍有效
-            if message.first_displayed_at is not None:
-                displayed_seconds = time.time() - message.first_displayed_at
-                if displayed_seconds < min_display:
-                    logger.debug(f"预警仍在最少展示期内: 已展示 {displayed_seconds:.0f}秒")
-                    return True
-                # 最多展示时长：自首次展示满 5 分钟后一律视为过期（所有数据源统一）
-                logger.debug(f"预警已展示满 {min_display} 秒，视为过期: 已展示 {displayed_seconds:.0f}秒")
-                return False
-            
-            # 优先使用保存的发震时间
-            shock_time_str = message.shock_time
+
+            msg_cfg = self.config.message_config
+            data: Dict[str, Any] = dict(message.parsed_data or {})
+            shock_time_str = message.shock_time or data.get("shock_time") or ""
             if not shock_time_str:
-                # 如果没有保存的发震时间，尝试从消息文本中提取
                 import re
-                # 匹配时间格式：2026-02-05 01:17:51 或 2026/02/05 01:17:51
-                # 支持多种格式：可能在逗号后面，也可能直接在开头
                 time_patterns = [
-                    r'，(\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})',  # 逗号后的时间
-                    r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})',  # 任意位置的时间
+                    r'，(\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})',
+                    r'(\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+\d{1,2}:\d{1,2}:\d{1,2})',
                 ]
-                
                 for pattern in time_patterns:
-                    match = re.search(pattern, message.text)
+                    match = re.search(pattern, message.text or "")
                     if match:
                         shock_time_str = match.group(1)
                         break
-                
-                if not shock_time_str:
-                    # 无法提取时间，默认有效（避免误删除）
-                    logger.debug(f"无法提取预警消息的发震时间，默认有效: {message.text}")
+            if shock_time_str:
+                data["shock_time"] = shock_time_str
+            source_type = (
+                str(data.get("source_type") or message.source or "").strip()
+            )
+            if source_type:
+                data["source_type"] = source_type
+
+            rem = warning_shock_validity_remaining_seconds(data, msg_cfg)
+            min_display = float(getattr(msg_cfg, "warning_min_display_seconds", 300) or 300)
+            validity_window = warning_shock_validity_max_seconds(source_type, msg_cfg)
+            # 宽限不超过发震有效期窗口（默认 300s），防止「最少展示」被设成 1 小时拖死滚动
+            grace = min(min_display, validity_window)
+
+            if message.first_displayed_at is not None:
+                displayed_seconds = time.time() - message.first_displayed_at
+                if rem is None:
+                    # 无发震时间：仅按最少展示时长截止
+                    if displayed_seconds < min_display:
+                        logger.debug(
+                            f"预警无发震时间，仍在最少展示期内: 已展示 {displayed_seconds:.0f}秒"
+                        )
+                        return True
+                    logger.debug(
+                        f"预警无发震时间且已展示满 {min_display:.0f} 秒，视为过期"
+                    )
+                    return False
+                if rem > 0:
+                    logger.debug(
+                        f"预警发震窗口内仍有效: 剩余 {rem:.0f}秒, 已展示 {displayed_seconds:.0f}秒"
+                    )
                     return True
-            
-            # 解析发震时间（显示时区下的时间）
-            shock_time = timezone_utils.parse_display_time(shock_time_str)
-            if shock_time is None:
-                logger.debug(f"预警消息时间格式不匹配，默认有效: {shock_time_str}")
+                # 发震已过期：仅宽限期内保留
+                if displayed_seconds < grace:
+                    logger.debug(
+                        f"预警发震已过期，仍在最少展示宽限期: "
+                        f"已展示 {displayed_seconds:.0f}/{grace:.0f}秒"
+                    )
+                    return True
+                logger.info(
+                    f"预警消息已过期: shock_time={shock_time_str}, "
+                    f"发震窗口剩余={rem:.0f}s, 已展示={displayed_seconds:.0f}s"
+                )
+                return False
+
+            # 未首次展示：只看发震窗口（与入口一致）
+            if rem is None:
+                logger.debug(
+                    f"无法提取预警消息的发震时间，默认有效: {message.text}"
+                )
                 return True
-            
-            # 计算时间差（秒），与显示时区当前时间比较
-            time_diff = (timezone_utils.now_in_display_tz() - shock_time).total_seconds()
-            
-            msg_cfg = self.config.message_config
-            max_seconds = msg_cfg.warning_shock_validity_seconds
-            is_valid = time_diff <= max_seconds
-            if not is_valid:
-                logger.info(f"预警消息已过期: {shock_time_str}, 时间差: {time_diff:.0f}秒 ({time_diff/60:.1f}分钟)")
-            else:
-                logger.debug(f"预警消息仍然有效: {shock_time_str}, 剩余时间: {max_seconds - time_diff:.0f}秒")
-            
-            return is_valid
+            if rem > 0:
+                logger.debug(
+                    f"预警消息仍然有效: {shock_time_str}, 剩余时间: {rem:.0f}秒"
+                )
+                return True
+            logger.info(
+                f"预警消息已过期: {shock_time_str}, 发震窗口剩余: {rem:.0f}秒"
+            )
+            return False
         except Exception as e:
             logger.error(f"检查预警有效性失败: {e}")
             # 出错时默认有效，避免误删除

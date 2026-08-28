@@ -629,21 +629,19 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.4"  # 当前程序版本
+APP_VERSION = "2.8.5"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.4
+CHANGELOG_TEXT = """版本 2.8.5
 
-1、优化占用：精简预警/气象缓冲；优化内存占用；启动与关闭设置窗后压缩工作集
-2、适配副屏：主窗/设置窗按所在屏定位；启用 High DPI；按当前屏刷新率同步滚动定时器
-3、主数据源三选一控制连接：去掉 Fan Studio / WeJet / Jian 单独连接开关；保存后按所选主源启用
-4、Jian Project：修复 JMA 预警时间解析；适配 KMA 韩国气象厅预警；默认主数据源改为 Jian Project
-5、P2PQuake 地震情报与主数据源 JMA 情报互斥，避免重复
-6、WeJet：恢复 CEA/CEA-PR（国内站 /ws/cea_all + 内置 App 鉴权）；WAuth 令牌首帧鉴权"""
+1、修复预警「最少展示时长」过大时盖掉发震有效期，导致已过期预警仍长时间滚动
+2、展示侧过期判定与入口一致：以发震时间窗口为主（含分源），最少展示仅作过期后短宽限
+3、同事件更新报替换时保留首次上屏时间，避免展示计时被重置
+4、设置页「预警最少展示」上限改为 15 分钟，并澄清与发震有效期的关系"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -799,7 +797,8 @@ class MessageConfig:
     warning_shock_validity_seconds_nied: int = 300
     # Wolfx 四川地震局预警的发震时间有效期（秒），默认 10 分钟
     warning_shock_validity_seconds_early_est: int = 600
-    # 预警最少展示时长（秒）：一旦展示则在此时间内不因发震时间过期被移除，默认 5 分钟
+    # 预警最少展示宽限（秒）：发震已过期后，已上屏预警最多再保留此时长；
+    # 实际宽限还会被发震有效期窗口夹紧，默认 5 分钟
     warning_min_display_seconds: int = 300
     # 测试用：为 True 时跳过发震时间窗口与「展示满最少时长即移除」等过期判定（勿在生产长期开启）
     disable_warning_expiry_for_test: bool = False
@@ -993,6 +992,9 @@ class MessageConfig:
                     self.warning_shock_validity_seconds_nied,
                 )
             assert self.warning_min_display_seconds > 0, "预警最少展示时长必须大于0"
+            # 历史配置可能被设到 60 分钟；夹紧到 15 分钟，避免拖死过期预警
+            if self.warning_min_display_seconds > 900:
+                self.warning_min_display_seconds = 900
             assert self.max_report_inactivity_time > 0, "速报无活动时长必须大于0"
             assert self.max_other_inactivity_time > 0, "其他消息无活动时长必须大于0"
             assert 1 <= self.custom_text_return_seconds <= 3600, "custom_text_return_seconds 必须在 1–3600 之间"

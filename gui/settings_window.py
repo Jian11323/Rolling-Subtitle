@@ -1227,10 +1227,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 if 'font_italic' in self.display_vars:
                     self.display_vars['font_italic'].setChecked(g.font_italic)
                 if 'warning_min_display_seconds' in self.display_vars:
-                    # 配置存秒，控件单位为分钟（1–60）；切勿把秒数直接 setValue（会钳到 60）
+                    # 配置存秒，控件单位为分钟（1–15）；切勿把秒数直接 setValue
                     wm_sec = int(getattr(mc, 'warning_min_display_seconds', 300) or 300)
                     self.display_vars['warning_min_display_seconds'].setValue(
-                        max(1, min(60, wm_sec // 60))
+                        max(1, min(15, wm_sec // 60))
                     )
                 if 'custom_text_return_seconds' in self.display_vars:
                     ct_sec = int(getattr(mc, 'custom_text_return_seconds', 300) or 300)
@@ -2541,11 +2541,14 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         min_display_label = QLabel("预警最少展示时长（分钟）:")
         _set_widget_style(min_display_label, STYLE_LABEL)
         warning_min_display_spin = QSpinBox()
-        warning_min_display_spin.setRange(1, 60)
+        warning_min_display_spin.setRange(1, 15)
         current_min = max(1, int(getattr(mc, 'warning_min_display_seconds', 300)) // 60)
-        warning_min_display_spin.setValue(current_min)
+        warning_min_display_spin.setValue(min(15, current_min))
         _set_widget_style(warning_min_display_spin, STYLE_SPINBOX)
-        warning_min_display_spin.setToolTip("一旦展示则在此时间内不因发震时间过期被移除。单位：分钟，默认 5 分钟。")
+        warning_min_display_spin.setToolTip(
+            "发震有效期已过后的短宽限（分钟），且实际宽限不会超过该源的发震有效期窗口。"
+            "不会单独把预警拖到超过发震有效期很久。默认 5 分钟。"
+        )
         warning_min_display_row.addWidget(min_display_label)
         warning_min_display_row.addWidget(warning_min_display_spin)
         warning_min_display_row.addStretch()
@@ -2555,7 +2558,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             bool(getattr(mc, "disable_warning_expiry_for_test", False))
         )
         self.disable_warning_expiry_test_cb.setToolTip(
-            "开启后：不按发震时间丢弃入队预警；缓冲区也不按发震时间或「展示满最少展示时长」移出预警。"
+            "开启后：不按发震时间丢弃入队预警；缓冲区也不按发震时间或展示宽限移出预警。"
             "便于用历史报文测试告警条与分阶段文案。"
         )
         _set_widget_style(self.disable_warning_expiry_test_cb, STYLE_CHECKBOX)

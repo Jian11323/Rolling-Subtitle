@@ -1,6 +1,6 @@
 # 地震情报实况栏
 
-当前版本：**v2.8.4**
+当前版本：**v2.8.5**
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,9 +18,9 @@
 
 - 介绍页（安装包 / 便携版）：[sismotide.top/rolling-subtitle](https://sismotide.top/rolling-subtitle)
 - 安装包：https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe
-- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.8.4.zip
-- GitHub Release：[v2.8.4](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.8.4)
-- Gitee Release：[v2.8.4](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.8.4)
+- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.8.5.zip
+- GitHub Release：[v2.8.5](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.8.5)
+- Gitee Release：[v2.8.5](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.8.5)
 
 ## 功能
 
