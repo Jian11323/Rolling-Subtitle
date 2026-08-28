@@ -69,9 +69,9 @@ def warning_shock_validity_remaining_seconds(
     return max_seconds - time_diff
 from utils.epi_intensity_estimate import (
     SOURCE_NO_CHINA_EPI_ESTIMATE,
-    estimate_epi_intensity,
-    parsed_declares_epi_intensity,
+    SOURCE_JP_TW_REPORT_MAX_SHINDO,
 )
+from utils.jma_shindo import format_jma_intensity_areas_detail
 
 logger = get_logger()
 
@@ -211,15 +211,20 @@ class MessageProcessor:
             # 无论是initial_all还是update类型的消息，都需要检查有效性
             # 避免显示明显过期的历史预警数据
             if message_type == 'warning':
-                # JMA数据特殊处理：检查cancel字段，如果为true，应撤销该事件的预警
                 source_type = parsed_data.get('source_type', '')
-                if source_type == 'jma':
-                    is_cancel = parsed_data.get('cancel', False)
-                    if is_cancel:
-                        event_id = parsed_data.get('event_id', '')
-                        logger.info(f"JMA预警消息被取消（cancel=true），忽略: event_id={event_id}")
-                        return None
-                
+                # 统一取消报：不进入字幕格式化（由主窗口按 event_id 撤回）
+                if (
+                    parsed_data.get("cancel")
+                    or parsed_data.get("isCancel")
+                    or parsed_data.get("is_cancel")
+                ):
+                    event_id = parsed_data.get("event_id", "")
+                    logger.info(
+                        f"预警取消报（cancel=true），跳过格式化: "
+                        f"source_type={source_type}, event_id={event_id}"
+                    )
+                    return None
+
                 # 检查有效性（发震时间在配置的有效期内）
                 # 对 Wolfx 的 JMA / 四川预警使用单独有效期窗口：
                 # - wolfx_jma_eew: warning_shock_validity_seconds_nied（默认 5 分钟）
@@ -321,8 +326,15 @@ class MessageProcessor:
 
     @staticmethod
     def _raw_or_data_has_epi_intensity_key(data: Dict[str, Any]) -> bool:
-        """是否存在报文自带的强度字段（日台/Wolfx 常见 MaxIntensity，解析后多为 epiIntensity）。"""
-        keys = ("epiIntensity", "epi_intensity", "MaxIntensity", "maxIntensity")
+        """是否存在报文自带的强度字段（含 Jian/CWA/JMA 的 intensity）。"""
+        keys = (
+            "intensity",
+            "max_intensity",
+            "epiIntensity",
+            "epi_intensity",
+            "MaxIntensity",
+            "maxIntensity",
+        )
         raw = data.get("raw_data")
         if isinstance(raw, dict) and any(k in raw for k in keys):
             return True
@@ -331,38 +343,25 @@ class MessageProcessor:
     @staticmethod
     def _resolve_epi_intensity_value(data: Dict[str, Any]) -> Any:
         """从解析结果或 raw_data 中提取震中烈度/震度数值。"""
+        keys = (
+            "intensity",
+            "max_intensity",
+            "epi_intensity",
+            "epiIntensity",
+            "MaxIntensity",
+            "maxIntensity",
+        )
         raw = data.get("raw_data")
-        for k in ("epi_intensity", "epiIntensity", "MaxIntensity", "maxIntensity"):
+        for k in keys:
             v = data.get(k)
-            if v is not None:
+            if v is not None and str(v).strip() != "":
                 return v
         if isinstance(raw, dict):
-            for k in ("epiIntensity", "epi_intensity", "MaxIntensity", "maxIntensity"):
+            for k in keys:
                 rv = raw.get(k)
-                if rv is not None:
+                if rv is not None and str(rv).strip() != "":
                     return rv
         return None
-
-    def _maybe_inject_estimated_epi_intensity(
-        self, data: Dict[str, Any], source_type_lower: str
-    ) -> None:
-        """无震中烈度字段时对非日台源写入经验估算值（台湾、日本源不估算）。"""
-        if source_type_lower in SOURCE_NO_CHINA_EPI_ESTIMATE:
-            return
-        if parsed_declares_epi_intensity(data):
-            return
-        mag = self._safe_float(data.get("magnitude"), 0.0)
-        if mag <= 0:
-            return
-        depth_raw = data.get("depth")
-        h = None
-        if depth_raw is not None:
-            d = self._safe_float(depth_raw, 0.0)
-            if d > 0:
-                h = d
-        est = estimate_epi_intensity(mag, h)
-        if est is not None and est > 0:
-            data["epi_intensity"] = round(est, 1)
 
     def _append_epi_intensity_after_depth(
         self,
@@ -371,40 +370,59 @@ class MessageProcessor:
         source_type: str,
     ) -> None:
         """
-        深度之后：
-        - 日本气象厅、台湾气象署及 Wolfx 的 JMA/CWA 等（SOURCE_NO_CHINA_EPI_ESTIMATE）：
-          仅当报文含强度字段时追加「预估最大震度」（Wolfx 的 MaxIntensity 在适配层映射为 epiIntensity）。
-        - 其它预警/速报：有报文震中烈度则用报文值；否则对非日台源用浅源经验式估算后追加「预估最大烈度」。
+        深度之后：仅当报文自带强度字段时追加；官方未提供则不写。
+        - 日台情报（jma_eq/cwa/p2pquake 等）：「最大震度」
+        - 日台 EEW：「预估最大震度」
+        - 其它源：「最大烈度」
         """
         st = (source_type or "").strip().lower()
-        self._maybe_inject_estimated_epi_intensity(data, st)
+        if not self._raw_or_data_has_epi_intensity_key(data):
+            return
         epi_intensity = self._resolve_epi_intensity_value(data)
-        if epi_intensity is not None:
-            es = str(epi_intensity).strip()
-            # P2PQuake 551：观测最大震度（非预估）
-            if es and st == "p2pquake" and self._raw_or_data_has_epi_intensity_key(data):
-                message_parts.append(f"，最大震度{es}")
-                return
-            if (
-                es
-                and ("弱" in es or "強" in es)
-                and st in SOURCE_NO_CHINA_EPI_ESTIMATE
-                and self._raw_or_data_has_epi_intensity_key(data)
-            ):
-                message_parts.append(f"，预估最大震度{es}")
-                return
+        if epi_intensity is None:
+            return
+        es = str(epi_intensity).strip()
+        if not es:
+            return
+
+        # 情报观测最大震度：沿用原文（避免 2 → 2.0）
+        if st in SOURCE_JP_TW_REPORT_MAX_SHINDO:
+            message_parts.append(f"，最大震度{es}")
+            return
+
+        if st in SOURCE_NO_CHINA_EPI_ESTIMATE:
+            # EEW 预估震度（含 5弱/5強 等）
+            message_parts.append(f"，预估最大震度{es}")
+            return
+
         try:
-            intensity_val = self._safe_float(epi_intensity, 0) if epi_intensity is not None else 0.0
+            intensity_val = self._safe_float(epi_intensity, 0)
         except (ValueError, TypeError):
             intensity_val = 0.0
-        if intensity_val <= 0:
+        if intensity_val > 0:
+            message_parts.append(f"，最大烈度{intensity_val:.1f}")
             return
-        if st in SOURCE_NO_CHINA_EPI_ESTIMATE:
-            if not self._raw_or_data_has_epi_intensity_key(data):
-                return
-            message_parts.append(f"，预估最大震度{intensity_val:.1f}")
-        else:
-            message_parts.append(f"，预估最大烈度{intensity_val:.1f}")
+        # 非数值烈度（如 GlobalQuake MMI 罗马数字 I–XII）按原文展示
+        message_parts.append(f"，最大烈度{es}")
+
+    @staticmethod
+    def _append_jma_intensity_areas_detail(
+        message_parts: list,
+        data: Dict[str, Any],
+        source_type: str,
+    ) -> None:
+        """JMA 情报：最大震度后追加 intensityAreas 分区详情。"""
+        st = (source_type or "").strip().lower()
+        if st not in ("jma_eq", "wolfx_jma_eqlist", "eqsc_jma_report"):
+            return
+        areas = data.get("intensity_areas")
+        if not isinstance(areas, list) or not areas:
+            raw = data.get("raw_data")
+            if isinstance(raw, dict):
+                areas = raw.get("intensityAreas")
+        detail = format_jma_intensity_areas_detail(areas)
+        if detail:
+            message_parts.append(f"。{detail}")
 
     @staticmethod
     def _append_wolfx_jma_accuracy_line(
@@ -566,7 +584,7 @@ class MessageProcessor:
         日本气象厅最终报格式：【日本气象厅 紧急地震速报 infoTypeName】 最终报，shocktime地点发生X.X级地震，震源深度X公里
         
         注意：
-        - cancel字段为true时，消息会被忽略（不显示）
+        - cancel / isCancel 为真时，format_message 直接返回 None（由主窗口统一撤回）
         - final字段为true时，显示"最终报"而不是"第x报"
         - 预警地名：百度翻译模式下对非中文数据源翻译；地名修正模式下保持适配器处理结果
         """
@@ -576,7 +594,8 @@ class MessageProcessor:
             province = data.get('province', '')  # 获取省份（用于省级预警）
             info_type = data.get('info_type', '')  # 获取infoTypeName字段（用于日本气象厅，保持日语原文）
             magnitude = self._safe_float(data.get('magnitude', 0), 0.0)
-            place_name = data.get('place_name', '')
+            # KMA 等：优先使用适配器写入的中文地名
+            place_name = (data.get('placename_zh') or '').strip() or data.get('place_name', '')
         except Exception as e:
             logger.error(f"【消息处理器】获取预警消息字段时出错: {e}")
             organization = ''
@@ -584,7 +603,7 @@ class MessageProcessor:
             province = ''
             info_type = ''
             magnitude = self._safe_float(data.get('magnitude', 0), 0.0)
-            place_name = data.get('place_name', '')
+            place_name = (data.get('placename_zh') or '').strip() or data.get('place_name', '')
 
         place_name = self._localize_place_name(
             place_name,
@@ -975,7 +994,8 @@ class MessageProcessor:
         """
         organization = data.get('organization', '')
         magnitude = data.get('magnitude', 0)
-        place_name = data.get('place_name', '')
+        # KMA 等：优先使用适配器写入的中文地名
+        place_name = (data.get('placename_zh') or '').strip() or data.get('place_name', '')
         shock_time = data.get('shock_time', '')
         depth = self._safe_float(data.get('depth', 0), 10.0)  # 无深度时默认为10km
         info_type = data.get('info_type', '')  # 获取infoTypeName字段（用于CENC）
@@ -1264,6 +1284,7 @@ class MessageProcessor:
         message_parts.append(f"，震源深度{depth_int}公里")
         st_rep = data.get("source_type") or ""
         self._append_epi_intensity_after_depth(message_parts, data, st_rep)
+        self._append_jma_intensity_areas_detail(message_parts, data, st_rep)
         
         return "".join(message_parts)
     

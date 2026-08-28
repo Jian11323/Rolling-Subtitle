@@ -26,6 +26,7 @@ _ENC_PREFIX = "enc:v1:"
 SECRET_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("WS_CONFIG", "fanstudio_api_key"),
     ("WS_CONFIG", "whews_token"),
+    ("WS_CONFIG", "whews_cea_app_secret"),
     ("WS_CONFIG", "eqsc_login_token"),
     ("TRANSLATION_CONFIG", "baidu_secret"),
 )

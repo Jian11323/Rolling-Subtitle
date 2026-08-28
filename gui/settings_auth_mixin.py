@@ -307,3 +307,67 @@ class SettingsAuthMixin:
     def _sync_eqsc_auth_status_label(self, force: bool = False) -> None:
         """兼容调用：转交到 EQSC 状态刷新。"""
         self._refresh_eqsc_auth_status_label(force=force)
+
+    def _set_whews_cea_auth_status_text(self, text: str, color: str = "#888888") -> None:
+        """设置 CEA App 鉴权状态行。"""
+        if not hasattr(self, "whews_cea_auth_status_label") or self.whews_cea_auth_status_label is None:
+            return
+        msg = (text or "").strip() or "CEA App 鉴权：未配置"
+        self.whews_cea_auth_status_label.setText(msg)
+        self._auth_set_widget_style(
+            self.whews_cea_auth_status_label, f"color: {color}; font-size: 14px;"
+        )
+
+    def _refresh_whews_cea_auth_status_label(self, force: bool = False) -> None:
+        """刷新 CEA App 鉴权状态（内置凭证 + 连接结果）。"""
+        if not hasattr(self, "whews_cea_auth_status_label") or self.whews_cea_auth_status_label is None:
+            return
+        try:
+            from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+            apply_builtin_whews_cea_credentials(self.config.ws_config)
+        except Exception:
+            pass
+        app_id = (getattr(self.config.ws_config, "whews_cea_app_id", "") or "").strip()
+        app_secret = (getattr(self.config.ws_config, "whews_cea_app_secret", "") or "").strip()
+        if not app_id or not app_secret:
+            self._set_whews_cea_auth_status_text(
+                "CEA App 鉴权：内置凭证不可用", "#C62828"
+            )
+            return
+
+        parent = self.parent()
+        getter = getattr(parent, "get_whews_cea_auth_status", None) if parent is not None else None
+        if not callable(getter) and parent is not None:
+            ws_manager = getattr(parent, "ws_manager", None)
+            getter = getattr(ws_manager, "get_whews_cea_auth_status", None) if ws_manager else None
+        state, message = "none", ""
+        if callable(getter):
+            try:
+                state, message = getter()
+            except Exception:
+                state, message = "none", ""
+        state = str(state or "none").strip().lower()
+        message = str(message or "").strip()
+        if state == "ok":
+            self._set_whews_cea_auth_status_text(
+                message or "CEA App 鉴权成功（cea_all）", "#2E7D32"
+            )
+            return
+        if state == "pending":
+            self._set_whews_cea_auth_status_text(
+                message or "CEA App 鉴权进行中…", "#666666"
+            )
+            return
+        if state == "failed":
+            self._set_whews_cea_auth_status_text(
+                message or "CEA App 鉴权失败", "#C62828"
+            )
+            return
+        self._set_whews_cea_auth_status_text(
+            "CEA 内置鉴权就绪；连接 WeJet 后自动走国内站 /ws/cea_all", "#666666"
+        )
+
+    def _sync_whews_cea_auth_status_label(self, force: bool = False) -> None:
+        """兼容调用：刷新 CEA 鉴权状态。"""
+        self._refresh_whews_cea_auth_status_label(force=force)

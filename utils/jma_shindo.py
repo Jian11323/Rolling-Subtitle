@@ -237,6 +237,82 @@ def jma_shindo_meets_nhk_bell_threshold(parsed_data: Dict[str, Any]) -> bool:
     return rank is not None and rank >= _NHK_BELL_THRESHOLD_RANK
 
 
+def _shindo_group_label(value: Any) -> str:
+    """intensityAreas 的 intensity 字段 → 分组展示用标签（如 1 / 5弱）。"""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        f = float(value)
+        if f == int(f) and 0 <= int(f) <= 7:
+            return str(int(f))
+        p2p = p2pquake_scale_to_shindo_text(value)
+        if p2p:
+            return p2p
+    text = str(value).strip().replace("震度", "").replace("度", "").strip()
+    if not text:
+        return ""
+    text = text.replace("－", "-").replace("−", "-").replace("＋", "+")
+    if text in _SHINDO_RANK:
+        # 统一 5-/5+ → 5弱/5強
+        if text.endswith("-") and text[0].isdigit():
+            return f"{text[0]}弱"
+        if text.endswith("+") and text[0].isdigit():
+            return f"{text[0]}強"
+        return text
+    m = _SHINDO_TEXT_RE.match(text)
+    if not m:
+        return text
+    num = m.group("num")
+    qual = (m.group("qual") or "").strip()
+    if not qual:
+        return num
+    if qual in ("弱", "-"):
+        return f"{num}弱"
+    if qual in ("強", "+"):
+        return f"{num}強"
+    if qual == "超":
+        return "7超"
+    return text
+
+
+def format_jma_intensity_areas_detail(areas: Any) -> str:
+    """
+    Jian / JMA ``intensityAreas`` → 滚动字幕用分区震度摘要。
+
+    例：各地震度详情：震度2：日高地方中部、渡島地方東部；震度1：十勝地方中部、…
+    按震度从高到低分组；同级地名保持报文顺序；跳过震度 0 / 无名区域。
+    """
+    if not isinstance(areas, list) or not areas:
+        return ""
+    groups: Dict[str, list] = {}
+    order: list = []
+    for item in areas:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        label = _shindo_group_label(item.get("intensity"))
+        if not label or label == "0":
+            continue
+        if label not in groups:
+            groups[label] = []
+            order.append(label)
+        if name not in groups[label]:
+            groups[label].append(name)
+    if not groups:
+        return ""
+
+    def _sort_key(lab: str) -> tuple:
+        r = shindo_rank(lab)
+        return (-(r if r is not None else -1), lab)
+
+    chunks: list = []
+    for lab in sorted(order, key=_sort_key):
+        names = "、".join(groups[lab])
+        chunks.append(f"震度{lab}：{names}")
+    return "各地震度详情：" + "；".join(chunks)
+
 def _normalize_jma_eew_warn_token(value: Any) -> str:
     """将发报类型规范为「予報」或「警報」；无法识别时返回空串。"""
     text = str(value or "").strip()

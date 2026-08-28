@@ -28,6 +28,9 @@ from config import (
     WHEWS_WS_URLS,
     is_whews_url,
     is_whews_dedicated_endpoint,
+    is_whews_cea_endpoint,
+    is_whews_cea_split_endpoint,
+    whews_cea_app_configured,
     is_jian_project_url,
     JIAN_PROJECT_ALL_URL,
     WOLFX_ALL_EEW_URL,
@@ -220,6 +223,11 @@ class WebSocketManager:
         self._fanstudio_auth_status: Dict[str, Tuple[str, str]] = {}
         # EQSC 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
         self._eqsc_auth_status: Dict[str, Tuple[str, str]] = {}
+        # WeJet CEA App 鉴权：url -> 状态；accessToken；续票任务
+        self._whews_cea_auth_status: Dict[str, Tuple[str, str]] = {}
+        self._whews_cea_access_token: Dict[str, str] = {}
+        self._whews_cea_refresh_tasks: Dict[str, asyncio.Task] = {}
+        self._whews_cea_awaiting_auth: Dict[str, bool] = {}
         config = Config()
         self.max_reconnect_attempts = config.ws_config.max_reconnect_attempts  # 最大重连次数
         self.reconnect_interval = config.ws_config.reconnect_interval  # 基础重连间隔
@@ -553,6 +561,20 @@ class WebSocketManager:
                 if msg_type == 'pong':
                     self._mark_pong_received(url, source_name)
                     logger.debug(f"[{source_name}] 收到 pong 消息")
+                    return
+                # WeJet CEA App 控制帧（hello / auth_ok / auth_fail / error）
+                if is_whews_url(url or "") and msg_type in (
+                    "hello",
+                    "auth_ok",
+                    "auth_fail",
+                    "error",
+                ):
+                    # hello 仅在 CEA 端点或 needAuth 时进入鉴权流程；其它端点忽略
+                    if msg_type == "hello" and not is_whews_cea_endpoint(url or ""):
+                        payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+                        if not bool(payload.get("needAuth", False)):
+                            return
+                    await self._handle_whews_cea_control(url=url, source_name=source_name, data=data)
                     return
                 if int(data.get("code") or 0) == 555:
                     self._mark_heartbeat_received(url, source_name)
@@ -975,7 +997,7 @@ class WebSocketManager:
                             from utils.memory_policy import should_fetch_jian_alllist
 
                             perf = getattr(
-                                Config().gui_config, "performance_mode", "standard"
+                                Config().gui_config, "performance_mode", "medium"
                             )
                             if should_fetch_jian_alllist(perf):
                                 await websocket.send("alllist")
@@ -1135,6 +1157,11 @@ class WebSocketManager:
             self._fanstudio_auth_status[url] = ("none", "连接已断开")
         if self._is_eqsc_url(url):
             self._eqsc_auth_status[url] = ("none", "连接已断开")
+        self._cancel_whews_cea_refresh(url)
+        self._whews_cea_awaiting_auth.pop(url, None)
+        self._whews_cea_access_token.pop(url, None)
+        if is_whews_cea_endpoint(url or ""):
+            self._whews_cea_auth_status[url] = ("none", "连接已断开")
         self.connection_states[url] = "disconnected"
         entry = self._ensure_health_entry(url, source_name)
         entry["heartbeat_state"] = "disconnected"
@@ -1376,6 +1403,7 @@ class WebSocketManager:
         WeJet 建连后立即发送纯文本令牌（首帧）。
 
         若 5 秒内未发送，服务端以关闭码 4401 断开。
+        CEA 端点在令牌鉴权后还会收到 hello，需再发 App auth（见 _handle_whews_cea_control）。
         """
         if not is_whews_url(url or ""):
             return
@@ -1386,8 +1414,176 @@ class WebSocketManager:
         try:
             await websocket.send(token)
             logger.info(f"[{source_name}] 已发送 WeJet 纯文本令牌鉴权")
+            if is_whews_cea_endpoint(url or ""):
+                if whews_cea_app_configured():
+                    self._whews_cea_auth_status[url] = ("pending", "等待服务端 hello…")
+                else:
+                    self._whews_cea_auth_status[url] = (
+                        "failed",
+                        "未配置 CEA AppId/AppSecret，无法接收预警",
+                    )
         except Exception as e:
             logger.warning(f"[{source_name}] 发送 WeJet 令牌失败: {e}")
+
+    def _cancel_whews_cea_refresh(self, url: str) -> None:
+        """取消指定连接的 CEA AccessToken 续票任务。"""
+        task = self._whews_cea_refresh_tasks.pop(url, None)
+        if task and not task.done():
+            task.cancel()
+
+    async def _send_whews_cea_app_auth(self, url: str, source_name: str) -> bool:
+        """向 CEA 端点发送 appId/appSecret 鉴权帧。"""
+        websocket = self.connections.get(url)
+        if websocket is None:
+            return False
+        cfg = Config().ws_config
+        try:
+            from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+            apply_builtin_whews_cea_credentials(cfg)
+        except Exception:
+            pass
+        app_id = (getattr(cfg, "whews_cea_app_id", "") or "").strip()
+        app_secret = (getattr(cfg, "whews_cea_app_secret", "") or "").strip()
+        if not app_id or not app_secret:
+            self._whews_cea_auth_status[url] = (
+                "failed",
+                "未配置 CEA AppId/AppSecret",
+            )
+            logger.warning(f"[{source_name}] CEA 需要 App 鉴权但未配置凭证")
+            return False
+        payload = {
+            "type": "auth",
+            "data": {"appId": app_id, "appSecret": app_secret},
+        }
+        try:
+            self._whews_cea_awaiting_auth[url] = True
+            self._whews_cea_auth_status[url] = ("pending", "正在进行 CEA App 鉴权…")
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+            logger.info(f"[{source_name}] 已发送 CEA App 鉴权 (cea_all)")
+            return True
+        except Exception as e:
+            self._whews_cea_awaiting_auth.pop(url, None)
+            self._whews_cea_auth_status[url] = ("failed", f"发送 App 鉴权失败: {e}")
+            logger.warning(f"[{source_name}] 发送 CEA App 鉴权失败: {e}")
+            return False
+
+    async def _send_whews_cea_refresh(self, url: str, source_name: str) -> bool:
+        """到期前用当前 accessToken 续票。"""
+        websocket = self.connections.get(url)
+        token = (self._whews_cea_access_token.get(url) or "").strip()
+        if websocket is None or not token:
+            return False
+        payload = {"type": "refresh", "data": {"accessToken": token}}
+        try:
+            await websocket.send(json.dumps(payload, ensure_ascii=False))
+            logger.info(f"[{source_name}] 已发送 CEA AccessToken 续票")
+            return True
+        except Exception as e:
+            logger.warning(f"[{source_name}] CEA 续票发送失败: {e}")
+            return False
+
+    def _schedule_whews_cea_refresh(
+        self, url: str, source_name: str, expires_in: int
+    ) -> None:
+        """约在到期前 60 秒续票；expires_in 过短则立即续。"""
+        self._cancel_whews_cea_refresh(url)
+        try:
+            ttl = max(1, int(expires_in or 600))
+        except (TypeError, ValueError):
+            ttl = 600
+        delay = max(5.0, float(ttl) - 60.0)
+
+        async def _runner() -> None:
+            try:
+                await asyncio.sleep(delay)
+                if url not in self.connections:
+                    return
+                await self._send_whews_cea_refresh(url, source_name)
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.warning(f"[{source_name}] CEA 续票任务异常: {e}")
+
+        self._whews_cea_refresh_tasks[url] = asyncio.create_task(_runner())
+
+    async def _handle_whews_cea_control(
+        self, url: str, source_name: str, data: Dict[str, Any]
+    ) -> None:
+        """处理 WeJet CEA 的 hello / auth_ok / auth_fail / error。"""
+        msg_type = str(data.get("type", "")).strip().lower()
+        payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+
+        if msg_type == "hello":
+            need_auth = bool(payload.get("needAuth", False))
+            # 非 CEA 端点且未声明 needAuth：忽略
+            if not is_whews_cea_endpoint(url or "") and not need_auth:
+                return
+            if not need_auth:
+                self._whews_cea_auth_status[url] = ("ok", "无需 App 鉴权")
+                return
+            await self._send_whews_cea_app_auth(url, source_name)
+            return
+
+        if msg_type == "auth_ok":
+            self._whews_cea_awaiting_auth.pop(url, None)
+            access_token = str(payload.get("accessToken") or "").strip()
+            if access_token:
+                self._whews_cea_access_token[url] = access_token
+            expires_in = payload.get("expiresIn", 600)
+            try:
+                expires_in_i = int(expires_in)
+            except (TypeError, ValueError):
+                expires_in_i = 600
+            self._whews_cea_auth_status[url] = (
+                "ok",
+                f"CEA App 鉴权成功（约 {expires_in_i}s 有效）",
+            )
+            logger.info(f"[{source_name}] CEA App 鉴权成功, expiresIn={expires_in_i}")
+            self._schedule_whews_cea_refresh(url, source_name, expires_in_i)
+            return
+
+        if msg_type == "auth_fail":
+            self._whews_cea_awaiting_auth.pop(url, None)
+            self._cancel_whews_cea_refresh(url)
+            self._whews_cea_access_token.pop(url, None)
+            code = str(payload.get("code") or "").strip()
+            message = str(payload.get("message") or "鉴权失败").strip()
+            detail = f"{code}: {message}" if code else message
+            self._whews_cea_auth_status[url] = ("failed", detail)
+            logger.warning(f"[{source_name}] CEA App 鉴权失败: {detail}")
+            return
+
+        if msg_type == "error":
+            # 鉴权相关错误（如 auth_timeout）反映到状态行
+            code = str(payload.get("code") or data.get("code") or "").strip()
+            message = str(
+                payload.get("message") or data.get("message") or "服务端错误"
+            ).strip()
+            detail = f"{code}: {message}" if code else message
+            if self._whews_cea_awaiting_auth.get(url) or is_whews_cea_endpoint(url or ""):
+                self._whews_cea_awaiting_auth.pop(url, None)
+                self._cancel_whews_cea_refresh(url)
+                self._whews_cea_auth_status[url] = ("failed", detail)
+                logger.warning(f"[{source_name}] CEA 控制错误: {detail}")
+            else:
+                logger.warning(f"[{source_name}] WeJet 错误: {detail}")
+            return
+
+    def get_whews_cea_auth_status(self) -> Tuple[str, str]:
+        """
+        返回 WeJet CEA App 鉴权状态（优先已连接的 CEA 端点）。
+
+        Returns:
+            (state, message)：state 为 none/pending/ok/failed
+        """
+        for url in list(self.connections.keys()):
+            if is_whews_cea_endpoint(url):
+                return self._whews_cea_auth_status.get(url, ("none", ""))
+        for url, status in self._whews_cea_auth_status.items():
+            if is_whews_cea_endpoint(url):
+                return status
+        return ("none", "")
 
     async def _maybe_send_fanstudio_auth(self, websocket: Any, url: str, source_name: str) -> None:
         """
@@ -1465,7 +1661,7 @@ class WebSocketManager:
 
     def _collect_desired_ws_urls(self, config: Config) -> list:
         """按当前配置收集应连接的 WebSocket URL 列表。"""
-        # 强制关闭无界 cea_all/cenc 专用线，避免旧配置残留导致同时多连
+        # 关闭废弃 cenc / 拆分 cea 线；保留国内站 /ws/cea_all
         if hasattr(config, "_disable_whews_dedicated_endpoints"):
             config._disable_whews_dedicated_endpoints()
         enabled_urls = []
@@ -1473,7 +1669,7 @@ class WebSocketManager:
             if "fanstudio" in (url or "").lower() and not (url or "").rstrip("/").lower().endswith("/all"):
                 logger.warning(f"跳过已移除的 Fan Studio 路径: {url}")
                 continue
-            if is_whews_dedicated_endpoint(url):
+            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
                 logger.debug(f"跳过已废弃的 WeJet 专用端点: {url}")
                 continue
             if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(url):

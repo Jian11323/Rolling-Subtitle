@@ -97,6 +97,16 @@ class _ScrollingTextMixin:
         self.current_text_image = None
         self._watermark_45_pixmap: Optional[QPixmap] = None
         self._watermark_45_cache_key: Optional[Tuple] = None
+        self._watermark_pending_key: Optional[Tuple] = None
+        self._watermark_pending_build: Optional[Tuple] = None
+        self._watermark_debounce_timer = QTimer(self)
+        self._watermark_debounce_timer.setSingleShot(True)
+        self._watermark_debounce_timer.setInterval(120)
+        self._watermark_debounce_timer.timeout.connect(self._rebuild_watermark_deferred)
+        self._screen_change_bound_handle = None
+        self._last_screen_name: Optional[str] = None
+        self._last_screen_hz: float = 0.0
+        self._last_dpr_q: int = 100
         font_family = getattr(config.gui_config, 'font_family', None) or "SimSun"
         resolved_family = _resolve_font_family(font_family, config.gui_config.font_size)
         self.font = QFont(resolved_family, config.gui_config.font_size)
@@ -138,7 +148,8 @@ class _ScrollingTextMixin:
         self._bg_loading_key: Optional[Tuple] = None
         self._bg_debounce_timer = QTimer(self)
         self._bg_debounce_timer.setSingleShot(True)
-        self._bg_debounce_timer.setInterval(60)
+        # 略加长防抖：跨屏 DPI/尺寸抖动时合并多次 resize，避免后台线程堆积
+        self._bg_debounce_timer.setInterval(150)
         self._bg_debounce_timer.timeout.connect(self._start_pending_background_load)
 
         # 跨线程栅格投递（图片 / 背景）
@@ -169,14 +180,194 @@ class _ScrollingTextMixin:
         # 滚动流畅优先：PreciseTimer 保证帧间隔稳定；占用由性能档的 target_fps/缓存等控制
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self._scroll)
-        target_fps = max(1, int(config.gui_config.target_fps or 30))
-        timer_interval = max(16, int(1000 / target_fps))  # 约 60fps 上限（16ms）
-        self.timer.start(timer_interval)
-        logger.info(f"定时器间隔设置为: {timer_interval}ms (PreciseTimer, 目标帧率: {target_fps}fps, VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})")
-        self._timer_interval = timer_interval
+        self._timer_interval = self._compute_timer_interval()
+        self.timer.start(self._timer_interval)
+        logger.info(
+            f"定时器间隔设置为: {self._timer_interval}ms (PreciseTimer, "
+            f"目标帧率: {max(1, int(config.gui_config.target_fps or 30))}fps, "
+            f"VSync: {'开启' if config.gui_config.vsync_enabled else '关闭'})"
+        )
         self.setStyleSheet(f"background-color: {config.gui_config.bg_color};")
         # 启动后尽快预取背景，避免首帧才开始防抖等待
         QTimer.singleShot(0, self._prefetch_background_if_needed)
+        QTimer.singleShot(0, self._bind_screen_change_handler)
+
+    @staticmethod
+    def _quantize_dim(value: int, step: int = 8) -> int:
+        """将宽/高量化到 step 的倍数，吸收主副屏 DPI 切换时的 ±1~数 px 抖动。"""
+        v = max(1, int(value))
+        s = max(1, int(step))
+        return max(s, ((v + s // 2) // s) * s)
+
+    def _device_pixel_ratio_q(self) -> int:
+        """设备像素比 ×100（整数，便于作缓存键）。"""
+        try:
+            dpr = float(self.devicePixelRatioF()) if hasattr(self, "devicePixelRatioF") else float(self.devicePixelRatio())
+            if dpr <= 0:
+                dpr = 1.0
+            return max(50, min(400, int(round(dpr * 100))))
+        except Exception:
+            return 100
+
+    def _cache_wh(self) -> Tuple[int, int]:
+        """背景/水印缓存用的量化宽高。"""
+        return self._quantize_dim(self.width()), self._quantize_dim(self.height())
+
+    def _image_cache_height(self) -> int:
+        """图标缓存用高度（量化，减轻跨屏高度抖动产生多份解码）。"""
+        h = self.height() if self.height() > 10 else int(getattr(self.config.gui_config, "window_height", 100) or 100)
+        return self._quantize_dim(h, step=8)
+
+    def _screen_refresh_hz(self) -> float:
+        """
+        读取窗口所在屏刷新率；Windows/部分驱动上 refreshRate() 可能为 0，
+        依次回退到 windowHandle → 控件中心命中屏 → primaryScreen → 任意有效屏。
+        """
+        candidates = []
+        try:
+            handle = self.windowHandle()
+            if handle is not None and handle.screen() is not None:
+                candidates.append(handle.screen())
+        except Exception:
+            pass
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                try:
+                    center = self.mapToGlobal(self.rect().center())
+                    hit = app.screenAt(center)
+                    if hit is not None:
+                        candidates.append(hit)
+                except Exception:
+                    pass
+                try:
+                    primary = app.primaryScreen()
+                    if primary is not None:
+                        candidates.append(primary)
+                except Exception:
+                    pass
+                try:
+                    for s in app.screens() or []:
+                        if s is not None:
+                            candidates.append(s)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        seen = set()
+        for screen in candidates:
+            try:
+                sid = id(screen)
+                if sid in seen:
+                    continue
+                seen.add(sid)
+                hz = float(screen.refreshRate() or 0.0)
+                if hz >= 20.0:
+                    return hz
+            except Exception:
+                continue
+        return 0.0
+
+    def _compute_timer_interval(self) -> int:
+        """
+        按配置目标帧率与当前屏刷新率取较低者，避免副屏高刷时定时器仍按主屏/过高 FPS 空转。
+        下限约 60fps（16ms），与既有逻辑一致。
+        """
+        target_fps = max(1, int(getattr(self.config.gui_config, "target_fps", 30) or 30))
+        screen_hz = self._screen_refresh_hz()
+        if screen_hz >= 20.0:
+            # 不超过显示器刷新；仍尊重用户目标 fps
+            effective = min(target_fps, int(round(screen_hz)))
+        else:
+            effective = target_fps
+        effective = max(1, effective)
+        return max(16, int(1000 / effective))
+
+    def _sync_timer_to_screen(self, *, force_log: bool = False) -> None:
+        """根据当前屏刷新率与目标 fps 更新定时器间隔。"""
+        new_interval = self._compute_timer_interval()
+        old = getattr(self, "_timer_interval", None)
+        self._timer_interval = new_interval
+        try:
+            if self.timer.isActive() and self.timer.interval() != new_interval:
+                self.timer.setInterval(new_interval)
+            elif not self.timer.isActive():
+                pass
+            if force_log or old != new_interval:
+                hz = self._screen_refresh_hz()
+                logger.info(
+                    f"滚动定时器已按当前屏同步: interval={new_interval}ms "
+                    f"(target_fps={getattr(self.config.gui_config, 'target_fps', 30)}, screen_hz≈{hz:.1f})"
+                )
+        except RuntimeError:
+            pass
+
+    def _bind_screen_change_handler(self) -> None:
+        """监听窗口所在屏变化（分辨率/刷新率/DPI），只重建一次缓存而非每帧抖动。"""
+        try:
+            handle = self.windowHandle()
+            if handle is None:
+                # 尚未有原生窗口时稍后再试
+                QTimer.singleShot(200, self._bind_screen_change_handler)
+                return
+            if getattr(self, "_screen_change_bound_handle", None) is handle:
+                return
+            old = getattr(self, "_screen_change_bound_handle", None)
+            if old is not None:
+                try:
+                    old.screenChanged.disconnect(self._on_window_screen_changed)
+                except Exception:
+                    pass
+            handle.screenChanged.connect(self._on_window_screen_changed)
+            self._screen_change_bound_handle = handle
+            self._on_window_screen_changed(handle.screen())
+        except Exception as e:
+            logger.debug(f"绑定 screenChanged 失败（可忽略）: {e}")
+
+    def _on_window_screen_changed(self, screen) -> None:
+        """切换主/副屏：同步刷新率定时器，作废尺寸敏感缓存（保留旧图拉伸过渡）。"""
+        try:
+            name = ""
+            hz = 0.0
+            if screen is not None:
+                try:
+                    name = str(screen.name() or "")
+                except Exception:
+                    name = ""
+                try:
+                    hz = float(screen.refreshRate() or 0.0)
+                except Exception:
+                    hz = 0.0
+            if hz < 20.0:
+                hz = self._screen_refresh_hz()
+            dpr_q = self._device_pixel_ratio_q()
+            changed = (
+                name != getattr(self, "_last_screen_name", None)
+                or abs(hz - getattr(self, "_last_screen_hz", 0.0)) >= 0.5
+                or dpr_q != getattr(self, "_last_dpr_q", 100)
+            )
+            self._last_screen_name = name
+            self._last_screen_hz = hz
+            self._last_dpr_q = dpr_q
+            self._sync_timer_to_screen(force_log=changed)
+            if not changed:
+                return
+            logger.info(
+                f"窗口已切换显示器: name={name or '?'}, refresh≈{hz:.1f}Hz, dpr={dpr_q / 100.0:.2f}"
+            )
+            # 作废背景加载队列，但保留旧 pixmap 拉伸，避免闪纯色与反复堆线程
+            self._invalidate_background_cache(clear_pixmap=False)
+            self._watermark_45_cache_key = None
+            self._watermark_pending_key = None
+            self._watermark_pending_build = None
+            path = self._resolve_background_image_file()
+            if path:
+                wq, hq = self._cache_wh()
+                blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
+                self._schedule_background_load((path, wq, hq, blur, dpr_q))
+            self.update()
+        except Exception as e:
+            logger.debug(f"处理 screenChanged 失败: {e}")
 
     def _prefetch_background_if_needed(self) -> None:
         """主线程：若配置了背景图则尽早排队异步构建。"""
@@ -184,10 +375,13 @@ class _ScrollingTextMixin:
             path = self._resolve_background_image_file()
             if not path:
                 return
-            w = self.width() if self.width() > 1 else int(getattr(self.config.gui_config, "window_width", 800) or 800)
-            h = self.height() if self.height() > 1 else int(getattr(self.config.gui_config, "window_height", 100) or 100)
+            wq, hq = self._cache_wh()
+            if self.width() <= 1:
+                wq = self._quantize_dim(int(getattr(self.config.gui_config, "window_width", 800) or 800))
+            if self.height() <= 1:
+                hq = self._quantize_dim(int(getattr(self.config.gui_config, "window_height", 100) or 100))
             blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
-            self._bg_pending_key = (path, w, h, blur)
+            self._bg_pending_key = (path, wq, hq, blur, self._device_pixel_ratio_q())
             self._start_pending_background_load()
         except Exception as e:
             logger.debug(f"预取背景图失败（可忽略）: {e}")
@@ -349,7 +543,7 @@ class _ScrollingTextMixin:
             return None
 
     def _schedule_background_load(self, key: Tuple) -> None:
-        """防抖后异步构建背景（避免拖拽改尺寸时连续同步模糊卡顿）。"""
+        """防抖后异步构建背景（避免拖拽改尺寸/跨屏 DPI 抖动时连续同步模糊卡顿）。"""
         if self._bg_loading_key == key:
             return
         if self._bg_pending_key == key and self._bg_debounce_timer.isActive():
@@ -361,7 +555,7 @@ class _ScrollingTextMixin:
             self._start_pending_background_load()
 
     def _start_pending_background_load(self) -> None:
-        """主线程：启动后台线程构建当前待加载背景 key。"""
+        """主线程：启动后台线程构建当前待加载背景 key（同时仅允许一路加载）。"""
         key = self._bg_pending_key
         if not key:
             return
@@ -370,31 +564,56 @@ class _ScrollingTextMixin:
             return
         if self._bg_loading_key == key:
             return
-        path, w, h, blur = key
+        # 已有一路加载在跑：只保留最新 pending，等当前完成后在 commit 里再排
+        if self._bg_loading_key is not None:
+            return
+        path, w, h, blur = key[0], key[1], key[2], key[3]
         if w <= 0 or h <= 0 or not path:
             self._bg_pending_key = None
             return
         gen = self._bg_load_generation
         self._bg_loading_key = key
         self._bg_pending_key = None
-        logger.debug(f"异步加载背景图: {path}, {w}x{h}, blur={blur}")
+        logger.debug(
+            f"异步加载背景图: {path}, {w}x{h}, blur={blur}, "
+            f"dpr_q={key[4] if len(key) > 4 else '?'}"
+        )
         threading.Thread(
             target=self._load_background_async,
-            args=(gen, path, int(w), int(h), int(blur)),
+            args=(gen, key),
             daemon=True,
             name="BackgroundLoader",
         ).start()
 
-    def _load_background_async(self, generation: int, path: str, w: int, h: int, blur: int) -> None:
+    def _load_background_async(self, generation: int, key: Tuple) -> None:
         """工作线程：解码/缩放/模糊背景，经信号回主线程提交。"""
-        key = (path, w, h, blur)
         try:
+            path, w, h, blur = key[0], int(key[1]), int(key[2]), int(key[3])
             image = self._build_background_qimage(w, h, path, blur)
             img_copy = image.copy() if image is not None and not image.isNull() else None
             self._raster_bridge.commit_bg.emit(generation, key, img_copy)
         except Exception as e:
             logger.warning(f"异步加载背景图失败: {e}")
             self._raster_bridge.commit_bg.emit(generation, key, None)
+
+    def _current_background_key(self) -> Optional[Tuple]:
+        path = self._resolve_background_image_file()
+        wq, hq = self._cache_wh()
+        if not path or wq <= 0 or hq <= 0:
+            return None
+        blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
+        return (path, wq, hq, blur, self._device_pixel_ratio_q())
+
+    @staticmethod
+    def _bg_keys_compatible(a: Optional[Tuple], b: Optional[Tuple]) -> bool:
+        """量化键相同或仅差极小尺寸时视为可复用（拉伸绘制即可）。"""
+        if not a or not b or len(a) < 4 or len(b) < 4:
+            return False
+        if a[0] != b[0] or int(a[3]) != int(b[3]):
+            return False
+        if len(a) > 4 and len(b) > 4 and a[4] != b[4]:
+            return False
+        return abs(int(a[1]) - int(b[1])) <= 8 and abs(int(a[2]) - int(b[2])) <= 8
 
     def _commit_background_qimage(
         self,
@@ -406,31 +625,38 @@ class _ScrollingTextMixin:
         if generation != self._bg_load_generation:
             if self._bg_loading_key == key:
                 self._bg_loading_key = None
+            if self._bg_pending_key and self._bg_loading_key is None:
+                self._start_pending_background_load()
             return
         if self._bg_loading_key == key:
             self._bg_loading_key = None
 
-        path = self._resolve_background_image_file()
-        w, h = self.width(), self.height()
-        blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
-        current_key: Optional[Tuple] = (path, w, h, blur) if path and w > 0 and h > 0 else None
-        if current_key != key:
-            # 尺寸/配置已变：丢弃本结果，按最新 key 再排一次
-            if current_key:
+        current_key = self._current_background_key()
+        if current_key != key and not self._bg_keys_compatible(current_key, key):
+            if self._bg_pending_key is None and current_key:
                 self._schedule_background_load(current_key)
+            elif self._bg_pending_key is not None:
+                self._start_pending_background_load()
             return
         if image is None or image.isNull():
+            if self._bg_pending_key is not None:
+                self._start_pending_background_load()
             return
         try:
             pix = QPixmap.fromImage(image)
             if pix.isNull():
                 return
             self._bg_pixmap_cache = pix
-            self._bg_pixmap_cache_key = key
+            self._bg_pixmap_cache_key = current_key or key
             self.update()
-            logger.debug(f"背景图异步就绪: {key[0]}, {key[1]}x{key[2]}")
+            logger.debug(
+                f"背景图异步就绪: {self._bg_pixmap_cache_key[0]}, "
+                f"{self._bg_pixmap_cache_key[1]}x{self._bg_pixmap_cache_key[2]}"
+            )
         except Exception as e:
             logger.warning(f"提交背景图到主线程失败: {e}")
+        if self._bg_pending_key is not None and self._bg_loading_key is None:
+            self._start_pending_background_load()
 
     def _get_cached_background_pixmap(self) -> Optional[QPixmap]:
         """
@@ -442,15 +668,15 @@ class _ScrollingTextMixin:
             if self._bg_pixmap_cache is not None or self._bg_pixmap_cache_key is not None:
                 self._invalidate_background_cache(clear_pixmap=True)
             return None
-        w, h = self.width(), self.height()
-        if w <= 0 or h <= 0:
+        key = self._current_background_key()
+        if key is None:
             return self._bg_pixmap_cache
-        blur = int(getattr(self.config.gui_config, "background_blur_radius", 0) or 0)
-        key = (path, w, h, blur)
-        if self._bg_pixmap_cache is not None and self._bg_pixmap_cache_key == key:
+        if self._bg_pixmap_cache is not None and (
+            self._bg_pixmap_cache_key == key
+            or self._bg_keys_compatible(self._bg_pixmap_cache_key, key)
+        ):
             return self._bg_pixmap_cache
         self._schedule_background_load(key)
-        # 同路径的旧图可临时拉伸使用
         if (
             self._bg_pixmap_cache is not None
             and self._bg_pixmap_cache_key is not None
@@ -586,7 +812,7 @@ class _ScrollingTextMixin:
         """
         绘制背景水印：支持横向与斜向 45 度，以及四角单行水印。
         横向/四角：每帧一次 drawText；
-        斜向 45 度：预渲染整面平铺到 QPixmap 并缓存，帧内仅 drawPixmap 一次。
+        斜向 45 度：预渲染整面平铺到 QPixmap 并缓存；尺寸变化时防抖重建，绘制路径不分配大图。
         """
         try:
             watermark_text = (getattr(self.config.gui_config, 'watermark_text', '') or '').strip()
@@ -616,9 +842,18 @@ class _ScrollingTextMixin:
 
             w = max(1, self.width())
             h = max(1, self.height())
+            wq, hq = self._cache_wh()
 
             if position == "diagonal":
-                key = (w, h, watermark_text, watermark_color.name(), font.family(), font.pointSize())
+                key = (
+                    wq,
+                    hq,
+                    watermark_text,
+                    watermark_color.name(),
+                    font.family(),
+                    font.pointSize(),
+                    self._device_pixel_ratio_q(),
+                )
                 pix = None
                 if (
                     self._watermark_45_cache_key == key
@@ -627,13 +862,32 @@ class _ScrollingTextMixin:
                 ):
                     pix = self._watermark_45_pixmap
                 else:
-                    pix = self._build_watermark_45_pixmap(w, h, watermark_text, font, watermark_color)
-                    self._watermark_45_pixmap = pix
-                    self._watermark_45_cache_key = key
+                    # 不在 paint 路径同步重建整屏 pixmap（副屏 DPI 抖动会瞬间打满内存）
+                    self._watermark_pending_key = key
+                    self._watermark_pending_build = (
+                        watermark_text,
+                        QFont(font),
+                        QColor(watermark_color),
+                        wq,
+                        hq,
+                    )
+                    try:
+                        if not self._watermark_debounce_timer.isActive():
+                            self._watermark_debounce_timer.start()
+                    except RuntimeError:
+                        self._rebuild_watermark_deferred()
+                    if (
+                        self._watermark_45_pixmap is not None
+                        and not self._watermark_45_pixmap.isNull()
+                    ):
+                        pix = self._watermark_45_pixmap
                 if pix is None or pix.isNull():
                     return
                 painter.save()
-                painter.drawPixmap(0, 0, pix)
+                if pix.width() == w and pix.height() == h:
+                    painter.drawPixmap(0, 0, pix)
+                else:
+                    painter.drawPixmap(self.rect(), pix)
                 painter.restore()
                 return
 
@@ -660,6 +914,27 @@ class _ScrollingTextMixin:
             painter.restore()
         except Exception as e:
             logger.debug(f"绘制背景水印失败: {e}")
+
+    def _rebuild_watermark_deferred(self) -> None:
+        """防抖后重建斜向水印（主线程，避开 paint 热路径）。"""
+        try:
+            key = getattr(self, "_watermark_pending_key", None)
+            build = getattr(self, "_watermark_pending_build", None)
+            if not key or not build:
+                return
+            watermark_text, font, watermark_color, wq, hq = build
+            # 若等待期间又变了目标键，丢弃本次（定时器会再次触发或下帧重排）
+            if key != self._watermark_pending_key:
+                return
+            pix = self._build_watermark_45_pixmap(
+                int(wq), int(hq), watermark_text, font, watermark_color
+            )
+            self._watermark_45_pixmap = pix
+            self._watermark_45_cache_key = key
+            self._watermark_pending_build = None
+            self.update()
+        except Exception as e:
+            logger.debug(f"延迟重建水印失败: {e}")
 
     def _render_text_to_image(self, text: str, color: QColor) -> Optional[QPixmap]:
         """
@@ -765,6 +1040,8 @@ class _ScrollingTextMixin:
     def showEvent(self, event):
         """窗口显示时恢复定时器（供 ScrollingText / ScrollingTextCPU 共用）"""
         QWidget.showEvent(self, event)
+        self._bind_screen_change_handler()
+        self._sync_timer_to_screen()
         self.update()  # 确保显示时至少重绘一次（解决 CPU 渲染窗口不显示）
         if self.current_text:
             self._ensure_timer_running()
@@ -1039,20 +1316,16 @@ class _ScrollingTextMixin:
                         logger.info(f"VSync已更新: {'开启' if new_vsync == 1 else '关闭'}")
                 except Exception as e:
                     logger.debug(f"更新 VSync 失败（非 OpenGL 控件可忽略）: {e}")
-            new_target_fps = max(1, int(self.config.gui_config.target_fps or 30))
-            new_timer_interval = max(16, int(1000 / new_target_fps))
-            self._timer_interval = new_timer_interval
+            self._sync_timer_to_screen(force_log=True)
             gc = self.config.gui_config
             self._image_cache_max = max(4, int(getattr(gc, "image_cache_max", 16) or 16))
             self._text_texture_cache_max = max(
                 4, int(getattr(gc, "text_texture_cache_max", 10) or 10)
             )
-            try:
-                if self.timer.interval() != new_timer_interval:
-                    self.timer.setInterval(new_timer_interval)
-                    logger.info(f"定时器间隔已更新 -> {new_timer_interval}ms (目标帧率: {new_target_fps}fps)")
-            except RuntimeError:
-                pass
+            # 水印相关配置变更：作废缓存，由绘制路径防抖重建
+            self._watermark_45_cache_key = None
+            self._watermark_pending_key = None
+            self._watermark_pending_build = None
             new_bg_color = self.config.gui_config.bg_color
             self.setStyleSheet(f"background-color: {new_bg_color};")
             # 背景变更：作废进行中加载；有新路径时保留旧图作过渡，避免闪纯色
@@ -1227,12 +1500,12 @@ class _ScrollingTextMixin:
 
         def start():
             """在主线程安全启动图片预加载后台线程。"""
-            window_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
+            window_height = self._image_cache_height()
             cache_key = f"{url}_{window_height}"
             with self._image_cache_lock:
                 if cache_key in self._image_cache:
                     return
-                for offset in range(-20, 21, 5):
+                for offset in (-16, -8, 8, 16):
                     h = window_height + offset
                     if h > 0 and f"{url}_{h}" in self._image_cache:
                         return
@@ -1490,12 +1763,12 @@ class _ScrollingTextMixin:
                         logger.debug(f"解析图片路径时出错（非阻塞）: {e}")
                         img_path_resolved = str(image_path)
 
-                # 与预加载一致：高度不足时用 config，确保能命中预加载写入的 key
-                current_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
+                # 与预加载一致：高度量化，避免主副屏高度抖动产生多份缓存
+                current_height = self._image_cache_height()
                 cache_key = f"{img_path_resolved}_{current_height}"
                 
                 # 尝试多个可能的高度（因为窗口高度可能变化）
-                # 检查当前高度，以及附近的高度（±20px范围内）
+                # 检查当前高度，以及附近的量化高度
                 found_pixmap = None
                 found_key = None
                 with self._image_cache_lock:
@@ -1504,8 +1777,7 @@ class _ScrollingTextMixin:
                         found_pixmap = self._image_cache[cache_key]
                         found_key = cache_key
                     else:
-                        # 尝试查找附近高度的缓存（±20px范围内）
-                        for offset in range(-20, 21, 5):  # 每5px检查一次
+                        for offset in (-16, -8, 8, 16):
                             test_height = current_height + offset
                             if test_height > 0:
                                 test_key = f"{img_path_resolved}_{test_height}"
@@ -1531,7 +1803,7 @@ class _ScrollingTextMixin:
                 logger.warning(f"检查图片缓存时出错: {e}")
             
             # 本地与远程统一异步加载（工作线程 QImage，主线程经信号转 QPixmap）
-            load_height = self.height() if self.height() > 10 else self.config.gui_config.window_height
+            load_height = self._image_cache_height()
             logger.info(f"启动异步图片加载线程: {image_path}, task_id: {current_task_id}")
             thread = threading.Thread(
                 target=self._load_image_async,

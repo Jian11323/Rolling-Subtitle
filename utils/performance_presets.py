@@ -255,6 +255,8 @@ def _message_fields_low() -> Dict[str, Any]:
         "whews_parse_cwa_eew": True,
         "whews_parse_sa_eew": True,
         "whews_parse_kma_eew": True,
+        "whews_parse_cea": True,
+        "whews_parse_cea_pr": True,
         "whews_parse_cenc": True,
         "whews_parse_cwa": False,
         "whews_parse_hko": False,
@@ -301,13 +303,16 @@ def _message_fields_low() -> Dict[str, Any]:
         "ali_all_parse_jma_volcano": False,
         "ali_all_parse_bmkg": True,
         "ali_all_parse_cq_eew": True,
-        "p2pquake_parse_551": True,
+        # 与主源 JMA 情报互斥；低配仍开 fanstudio/jian JMA 时须关 551，避免 apply 后被 mutex 改写导致与 payload 不一致
+        "p2pquake_parse_551": False,
         "p2pquake_parse_552": False,
         "p2pquake_parse_556": True,
         **_jian_parse_fields(
+            jian_parse_cea=True,
             jian_parse_cwa_eew=True,
             jian_parse_jma_eew=True,
             jian_parse_sa=True,
+            jian_parse_kma_eew=True,
             jian_parse_early_est=True,
             jian_parse_cenc=True,
             jian_parse_cwa=False,
@@ -368,6 +373,8 @@ def _message_fields_high() -> Dict[str, Any]:
         "whews_parse_cwa_eew": True,
         "whews_parse_sa_eew": True,
         "whews_parse_kma_eew": True,
+        "whews_parse_cea": True,
+        "whews_parse_cea_pr": True,
         "whews_parse_cenc": True,
         "whews_parse_cwa": True,
         "whews_parse_hko": True,
@@ -396,7 +403,9 @@ def _message_fields_high() -> Dict[str, Any]:
         "whews_parse_sgc": True,
         "whews_parse_ga": True,
         "whews_parse_cenais": True,
-        "whews_parse_weatheralarm": True,
+        # 气象三选一：高配默认 Fan Studio，避免 apply 后被 weather mutex 改写
+        "whews_parse_weatheralarm": False,
+        "openquake_parse_cma": False,
         "whews_parse_gsras": True,
         "whews_parse_bgs": True,
         "whews_parse_ipma": True,
@@ -414,7 +423,7 @@ def _message_fields_high() -> Dict[str, Any]:
         "ali_all_parse_jma_volcano": True,
         "ali_all_parse_bmkg": True,
         "ali_all_parse_cq_eew": True,
-        "p2pquake_parse_551": True,
+        "p2pquake_parse_551": False,
         "p2pquake_parse_552": True,
         "p2pquake_parse_556": True,
         **_jian_parse_fields(),
@@ -644,6 +653,8 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "whews_parse_cwa_eew", True),
         getattr(mc, "whews_parse_sa_eew", True),
         getattr(mc, "whews_parse_kma_eew", True),
+        getattr(mc, "whews_parse_cea", True),
+        getattr(mc, "whews_parse_cea_pr", True),
         getattr(mc, "whews_parse_cenc", True),
         getattr(mc, "whews_parse_cwa", True),
         getattr(mc, "whews_parse_hko", True),
@@ -778,6 +789,8 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
             "whews_parse_cwa_eew",
             "whews_parse_sa_eew",
             "whews_parse_kma_eew",
+            "whews_parse_cea",
+            "whews_parse_cea_pr",
             "whews_parse_cenc",
             "whews_parse_cwa",
             "whews_parse_hko",
@@ -847,6 +860,12 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
     config._sync_p2pquake_http_with_wss()
     config._ensure_jian_source_defaults()
     config._ensure_wolfx_source_defaults()
+
+    from config import enforce_weather_source_mutex, enforce_jma_report_mutex
+
+    enforce_weather_source_mutex(config.message_config)
+    # 高配等预设可能同时打开主源 JMA 与 P2P 551：收敛为优先主源
+    enforce_jma_report_mutex(config.message_config, prefer="main")
 
     poll_overrides = payload.get("http_poll_intervals") or {}
     for url, interval in poll_overrides.items():

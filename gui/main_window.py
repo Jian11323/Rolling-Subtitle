@@ -44,6 +44,8 @@ from config import (
     openquake_master_enabled,
     active_weather_source,
     weather_provider_for_parsed,
+    main_jma_report_enabled,
+    p2p_jma_report_enabled,
     jian_internal_enabled,
     any_jian_source_enabled,
 )
@@ -144,7 +146,7 @@ def _log_expired_warning_ignored(source_name: str, parsed_data: Dict[str, Any]) 
 
 
 class MainWindow(QMainWindow):
-    """地震预警及情报实况栏主窗口"""
+    """地震情报实况栏主窗口"""
     
     # 定义信号：用于在主线程中更新设置窗口的气象预警图片
     weather_image_update = pyqtSignal(dict)
@@ -270,14 +272,25 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(800, self._show_changelog_if_needed)
             self._setup_system_tray()
             set_tray_icon_provider(lambda: self._tray_icon)
+            # 启动峰值过后压缩工作集，降低任务管理器常驻读数
+            QTimer.singleShot(5000, self._trim_working_set_idle)
         except Exception as e:
             logger.error(f"延迟启动后台任务失败: {e}")
+
+    def _trim_working_set_idle(self):
+        """空闲时尝试压缩进程工作集（Windows）。"""
+        try:
+            from utils.memory_policy import trim_process_working_set
+            if trim_process_working_set():
+                logger.debug("已压缩进程工作集")
+        except Exception as e:
+            logger.debug(f"压缩工作集失败（可忽略）: {e}")
 
     def _setup_ui(self):
         """设置用户界面"""
         try:
             # 窗口基本属性
-            self.setWindowTitle(f"地震预警及情报实况栏 V{APP_VERSION}")
+            self.setWindowTitle(f"地震情报实况栏 V{APP_VERSION}")
             
             # 设置窗口图标（用于窗口标题栏）
             try:
@@ -352,12 +365,14 @@ class MainWindow(QMainWindow):
             self._drag_offset = None  # 无边框模式下拖拽偏移
             self._apply_window_chrome()
             
-            # 窗口位置：已保存则恢复，否则居中
+            # 窗口位置：已保存且仍落在某块屏上则恢复，否则在当前屏居中（支持副屏负坐标）
             g = self.config.gui_config
             wx, wy = getattr(g, "window_x", -1), getattr(g, "window_y", -1)
-            if wx != -1 and wy != -1:
-                self.move(wx, wy)
-            else:
+            try:
+                from utils.screen_geometry import place_window
+                place_window(self, wx, wy)
+            except Exception as e_pos:
+                logger.warning(f"恢复窗口位置失败，回退居中: {e_pos}")
                 self._center_window()
             
             # 创建右键菜单（绑定到主窗口和滚动文本组件）
@@ -477,13 +492,10 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _center_window(self):
-        """窗口居中"""
+        """在主窗口当前所属屏（或主屏）内居中。"""
         try:
-            screen = QApplication.desktop().screenGeometry()
-            window = self.geometry()
-            x = (screen.width() - window.width()) // 2
-            y = (screen.height() - window.height()) // 2
-            self.move(x, y)
+            from utils.screen_geometry import place_window
+            place_window(self, -1, -1)
         except Exception as e:
             logger.error(f"窗口居中失败: {e}")
     
@@ -774,11 +786,13 @@ class MainWindow(QMainWindow):
             from utils.performance_presets import _data_source_snapshot
 
             snapshot = _data_source_snapshot(self.config)
-            # 附带鉴权相关字段，令牌/Key 变更也触发重载或热鉴权
+            # 附带鉴权相关字段，令牌/Key/CEA App 变更也触发重载或热鉴权
             auth_part = (
                 (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
+                (getattr(self.config.ws_config, "whews_cea_app_id", "") or "").strip(),
+                (getattr(self.config.ws_config, "whews_cea_app_secret", "") or "").strip(),
                 tuple(sorted((self.config.http_poll_intervals or {}).items())),
             )
             full_snapshot = (snapshot, auth_part)
@@ -1117,8 +1131,9 @@ class MainWindow(QMainWindow):
             btn_layout.addWidget(ok_btn)
             btn_layout.addStretch()
             layout.addLayout(btn_layout)
-            # 按 CHANGELOG 正文与屏幕可用区域动态决定宽度与滚动区高度（避免短文大块空白、长文撑爆屏幕）
-            geo = QApplication.desktop().availableGeometry(dlg)
+            # 按 CHANGELOG 正文与主窗所在屏可用区域动态决定宽度与滚动区高度
+            from utils.screen_geometry import available_geometry_for
+            geo = available_geometry_for(widget=self)
             dialog_w = min(560, max(360, geo.width() - 48))
             m = layout.contentsMargins()
             inner_w = max(280, dialog_w - m.left() - m.right())
@@ -1143,6 +1158,13 @@ class MainWindow(QMainWindow):
                 scroll_h = max(100, scroll_h - shrink)
                 scroll.setFixedHeight(scroll_h)
                 dlg.adjustSize()
+
+            try:
+                from utils.screen_geometry import center_top_left_on_screen
+                nx, ny = center_top_left_on_screen(dlg.width(), dlg.height(), geo)
+                dlg.move(nx, ny)
+            except Exception:
+                pass
 
             dlg.exec_()
             self.config.gui_config.last_seen_changelog_version = APP_VERSION
@@ -1185,6 +1207,8 @@ class MainWindow(QMainWindow):
     def _on_settings_window_destroyed(self, *args):
         """设置窗关闭销毁后清空引用，便于回收大块 Qt 控件树。"""
         self.settings_window = None
+        # 设置窗释放后压缩工作集，避免关闭后 Working Set 长期偏高
+        QTimer.singleShot(800, self._trim_working_set_idle)
     def _warning_display_segments(
         self, message: MessageItem
     ) -> Optional[List[Tuple[str, str]]]:
@@ -1798,7 +1822,11 @@ class MainWindow(QMainWindow):
                 if '】' in text:
                     prefix = text.split('】', 1)[0] + '】'
             if not prefix:
-                prefix = f"【{source_name}预警】"
+                org = str(source_name or "").strip()
+                if org.endswith("预警") or org.endswith("速报") or org.startswith("【"):
+                    prefix = org if org.startswith("【") else f"【{org}】"
+                else:
+                    prefix = f"【{org}预警】" if org else "【地震预警】"
             
             notice_text = f"{prefix}收到取消报，撤回当前预警信息"
             notice_color = self.config.message_config.warning_color
@@ -1850,7 +1878,7 @@ class MainWindow(QMainWindow):
                 "shock_time": timezone_utils.now_display_str(),
                 "_simulate": True,
             }
-            text = f"【模拟】{place_name}附近发生{magnitude:.1f}级地震（预估最大烈度 {lv}）"
+            text = f"【模拟】{place_name}附近发生{magnitude:.1f}级地震（最大烈度 {lv}）"
             color = self.config.message_config.warning_color
 
             ac = self.config.alert_config
@@ -1919,6 +1947,20 @@ class MainWindow(QMainWindow):
                     weather_provider,
                     active_weather or "无",
                 )
+                return False
+
+        # JMA 地震情报：P2PQuake 551 与主源 jma_eq 互斥（冲突时优先主源）
+        msg_type = str(parsed_data.get("type") or "").strip().lower()
+        if msg_type == "report":
+            is_p2p_jma = st == "p2pquake" or sn == "p2pquake"
+            is_main_jma = st == "jma_eq"
+            main_on = main_jma_report_enabled(mc)
+            p2p_on = p2p_jma_report_enabled(mc)
+            if is_p2p_jma and main_on:
+                logger.debug("已忽略消息：主源 JMA 情报已启用，互斥丢弃 P2PQuake 551")
+                return False
+            if is_main_jma and p2p_on and not main_on:
+                logger.debug("已忽略消息：P2PQuake 551 已启用，互斥丢弃主源 JMA 情报")
                 return False
 
         # 主提供者门控：隐藏面板勾选残留不得继续投递/保留缓冲
@@ -2142,65 +2184,73 @@ class MainWindow(QMainWindow):
                 )
                 return
             
-            # JMA数据特殊处理：检查cancel字段，如果为true，从预警缓冲区移除对应事件
-            if message_type == 'warning' and source_name == 'jma':
-                is_cancel = parsed_data.get('cancel', False)
-                if is_cancel:
-                    event_id = parsed_data.get('event_id', '')
-                    if event_id:
-                        # 检查当前显示的消息是否会被移除
-                        current_msg_will_be_removed = (
-                            self._current_displaying_message and 
-                            self._current_displaying_message.source == 'jma' and 
-                            self._current_displaying_message.event_id == event_id
+            # 统一取消报：cancel / isCancel → 按 event_id 撤回缓冲与告警序列（JMA/GQ/Wolfx/P2P/EQSC 等）
+            if message_type == "warning" and (
+                parsed_data.get("cancel")
+                or parsed_data.get("isCancel")
+                or parsed_data.get("is_cancel")
+            ):
+                event_id = str(parsed_data.get("event_id") or "").strip()
+                st_cancel = str(parsed_data.get("source_type") or "").strip()
+                if event_id:
+                    current_msg = self._current_displaying_message
+                    current_msg_will_be_removed = bool(
+                        current_msg and current_msg.event_id == event_id
+                    )
+
+                    with self.warning_buffer._lock:
+                        original_size = len(self.warning_buffer.buffer)
+                        self.warning_buffer.buffer = [
+                            msg
+                            for msg in self.warning_buffer.buffer
+                            if msg.event_id != event_id
+                        ]
+                        removed_count = original_size - len(self.warning_buffer.buffer)
+                        if removed_count > 0:
+                            logger.info(
+                                f"取消报：已从预警缓冲区移除 {removed_count} 条"
+                                f"（source={source_name}, source_type={st_cancel}, event_id={event_id}）"
+                            )
+                        else:
+                            logger.debug(
+                                f"取消报：缓冲中未找到对应消息"
+                                f"（source={source_name}, source_type={st_cancel}, event_id={event_id}）"
+                            )
+                        if self.warning_buffer.current_index >= len(self.warning_buffer.buffer):
+                            self.warning_buffer.current_index = 0
+
+                    if current_msg_will_be_removed:
+                        logger.info(
+                            f"取消报：当前显示消息已撤回"
+                            f"（source={source_name}, event_id={event_id}）"
                         )
-                        
-                        # 从预警缓冲区移除对应event_id的JMA消息
-                        with self.warning_buffer._lock:
-                            original_size = len(self.warning_buffer.buffer)
-                            # 移除所有匹配event_id和source的JMA消息
-                            self.warning_buffer.buffer = [
-                                msg for msg in self.warning_buffer.buffer
-                                if not (msg.source == 'jma' and msg.event_id == event_id)
-                            ]
-                            removed_count = original_size - len(self.warning_buffer.buffer)
-                            
-                            if removed_count > 0:
-                                logger.info(f"JMA取消报：已从预警缓冲区移除 {removed_count} 条消息（event_id={event_id}）")
-                            else:
-                                logger.debug(f"JMA取消报：未找到对应消息（event_id={event_id}）")
-                            
-                            # 重置索引，避免索引越界
-                            if self.warning_buffer.current_index >= len(self.warning_buffer.buffer):
-                                self.warning_buffer.current_index = 0
-                        
-                        # 如果当前显示的消息被移除，需要立即切换显示
-                        if current_msg_will_be_removed:
-                            logger.info(f"JMA取消报：当前显示的消息已被移除")
-                            self._show_cancellation_notice(source_name, self._current_displaying_message)
-                            
-                            # 如果预警缓冲区为空，切换到速报模式
-                            if self.warning_buffer.size() == 0:
-                                if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                    self._switch_to_report_mode()
-                                    logger.info("JMA取消报：预警缓冲区已空，切换到速报轮播模式")
-                            elif self.warning_buffer.size() > 0:
-                                # 如果还有预警消息，切换到下一条
-                                next_msg = self.warning_buffer.get_next()
-                                if next_msg:
-                                    if self.scrolling_text and not self.scrolling_text.is_scrolling():
-                                        self._switch_to_warning_mode(next_msg)
-                                    else:
-                                        logger.info("JMA取消报：已有内容正在滚动，新预警将在当前滚动结束后显示")
-                    
-                    try:
-                        if self.alert_controller is not None:
-                            self.alert_controller.cancel(event_id)
-                    except Exception:
-                        pass
-                    # cancel消息不进入队列，直接返回
-                    return
-            
+                        notice_source = (
+                            str(parsed_data.get("organization") or "").strip()
+                            or st_cancel
+                            or source_name
+                        )
+                        self._show_cancellation_notice(notice_source, current_msg)
+                        if self.warning_buffer.size() == 0:
+                            if self.report_buffer.size() > 0 and not self._switching_to_report:
+                                self._switch_to_report_mode()
+                                logger.info("取消报：预警缓冲区已空，切换到速报轮播模式")
+                        elif self.warning_buffer.size() > 0:
+                            next_msg = self.warning_buffer.get_next()
+                            if next_msg:
+                                if self.scrolling_text and not self.scrolling_text.is_scrolling():
+                                    self._switch_to_warning_mode(next_msg)
+                                else:
+                                    logger.info(
+                                        "取消报：已有内容正在滚动，新预警将在当前滚动结束后显示"
+                                    )
+
+                try:
+                    if self.alert_controller is not None:
+                        self.alert_controller.cancel(event_id or None)
+                except Exception:
+                    pass
+                return
+
             # 对于预警消息，先检查是否过期，避免将过期消息误报为格式化失败
             if message_type == 'warning':
                 logger.info(f"收到预警消息: source={source_name}, place_name={parsed_data.get('place_name')}, magnitude={parsed_data.get('magnitude')}, source_type={parsed_data.get('source_type')}")
@@ -2324,8 +2374,21 @@ class MainWindow(QMainWindow):
                     if k in parsed_data
                 }
                 if message_type in ("weather", "warning"):
-                    # 浅拷贝：预警轮播/切屏需 source_type、epiIntensity、wolfx_warn_areas 等以复现白字提示
-                    pd_store = dict(parsed_data)
+                    # 精简入库：剔除 raw_data 等大字段，保留轮播/白字提示所需键
+                    try:
+                        from utils.memory_policy import slim_parsed_for_storage
+                        slim = slim_parsed_for_storage(parsed_data, message_type)
+                        if slim:
+                            pd_store = dict(slim)
+                            for k in _MSG_PROVENANCE_KEYS:
+                                if k in parsed_data:
+                                    pd_store[k] = parsed_data[k]
+                        else:
+                            pd_store = dict(parsed_data)
+                            pd_store.pop("raw_data", None)
+                    except Exception:
+                        pd_store = dict(parsed_data)
+                        pd_store.pop("raw_data", None)
                 elif message_type == 'report' and (
                     parsed_data.get('source_type') == 'fssn-cmt'
                     or parsed_data.get('source_type') == 'cenc-ir'
@@ -2971,6 +3034,15 @@ class MainWindow(QMainWindow):
                 return self.ws_manager.get_fanstudio_auth_status()
         except Exception as e:
             logger.debug(f"获取 Fan Studio 鉴权状态失败: {e}")
+        return ("none", "")
+
+    def get_whews_cea_auth_status(self) -> Tuple[str, str]:
+        """返回 WeJet CEA App 鉴权状态：(none|pending|ok|failed, message)。"""
+        try:
+            if self.ws_manager and hasattr(self.ws_manager, "get_whews_cea_auth_status"):
+                return self.ws_manager.get_whews_cea_auth_status()
+        except Exception as e:
+            logger.debug(f"获取 CEA App 鉴权状态失败: {e}")
         return ("none", "")
 
     @staticmethod

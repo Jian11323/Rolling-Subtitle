@@ -45,7 +45,6 @@ from config import (
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_JIAN,
     normalize_data_provider,
-    is_whews_all_enabled,
     wolfx_master_enabled,
     aux_sources_enabled,
     normalize_whews_host,
@@ -62,6 +61,9 @@ from config import (
     OPENQUAKE_WS_ALL_URL,
     openquake_master_enabled,
     enforce_weather_source_mutex,
+    enforce_jma_report_mutex,
+    MAIN_JMA_REPORT_PARSE_FLAGS,
+    P2P_JMA_REPORT_PARSE_FLAG,
     WEATHER_SOURCE_FLAGS,
     DEFAULT_HTTP_POLL_INTERVALS,
 )
@@ -714,9 +716,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         # 设置窗口属性
         self.setWindowTitle("设置")
         
-        # 获取屏幕尺寸，确保窗口不超出屏幕
-        from PyQt5.QtWidgets import QApplication
-        screen = QApplication.desktop().screenGeometry()
+        # 按父窗口（主字幕条）所在屏约束尺寸，避免副屏被主屏分辨率错误限制
+        from utils.screen_geometry import available_geometry_for
+        anchor = self.parent() if isinstance(self.parent(), QWidget) else self
+        screen = available_geometry_for(widget=anchor)
         max_width = min(SETTINGS_MAX_WIDTH, screen.width() - 40)
         init_width = min(SETTINGS_DEFAULT_WIDTH, max_width)
         max_height = min(800, screen.height() - 100)
@@ -826,6 +829,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if index == self._data_source_tab_index:
                 self._update_parse_status_labels()
                 self._sync_fanstudio_auth_status_label()
+                self._sync_whews_cea_auth_status_label()
                 self._sync_eqsc_auth_status_label()
             else:
                 self._update_data_source_health_table()
@@ -847,6 +851,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if current_index == self._data_source_tab_index:
             self._update_parse_status_labels()
             self._sync_fanstudio_auth_status_label()
+            self._sync_whews_cea_auth_status_label()
             self._sync_eqsc_auth_status_label()
         elif current_index == self._data_source_status_tab_index:
             self._update_data_source_health_table()
@@ -960,6 +965,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self._status_refresh_timer.start()
             self._update_parse_status_labels()
             self._sync_fanstudio_auth_status_label()
+            self._sync_whews_cea_auth_status_label()
             self._sync_eqsc_auth_status_label()
         elif self.notebook.currentIndex() == self._data_source_status_tab_index:
             if not self._status_refresh_timer.isActive():
@@ -1085,6 +1091,70 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                     active, s
                 )
             )
+
+    def _wire_jma_report_mutex(self) -> None:
+        """P2PQuake 551 与主源 JMA 情报互斥。"""
+        self._jma_report_mutex_sync = False
+        main_cbs = [f"{flag}_cb" for flag in MAIN_JMA_REPORT_PARSE_FLAGS]
+        p2p_cb = f"{P2P_JMA_REPORT_PARSE_FLAG}_cb"
+        tip = (
+            "P2PQuake 地震情报（551）与主数据源 JMA 情报互斥，"
+            "同时只能启用一侧，避免重复轮播。"
+        )
+        for attr in main_cbs + [p2p_cb]:
+            cb = getattr(self, attr, None)
+            if cb is None:
+                continue
+            prev = cb.toolTip() or ""
+            cb.setToolTip(f"{prev}\n{tip}".strip() if prev else tip)
+            cb.stateChanged.connect(
+                lambda _state, active=attr: self._on_jma_report_mutex_changed(active)
+            )
+
+    def _on_jma_report_mutex_changed(self, active_attr: str) -> None:
+        """勾选主源 JMA 或 P2P 551 时，关闭另一侧。"""
+        if getattr(self, "_jma_report_mutex_sync", False):
+            return
+        cb = getattr(self, active_attr, None)
+        if cb is None or not cb.isChecked():
+            return
+        self._jma_report_mutex_sync = True
+        try:
+            p2p_attr = f"{P2P_JMA_REPORT_PARSE_FLAG}_cb"
+            main_attrs = [f"{flag}_cb" for flag in MAIN_JMA_REPORT_PARSE_FLAGS]
+            if active_attr == p2p_attr:
+                for other_attr in main_attrs:
+                    other = getattr(self, other_attr, None)
+                    if other is not None and other.isChecked():
+                        other.setChecked(False)
+            elif active_attr in main_attrs:
+                other = getattr(self, p2p_attr, None)
+                if other is not None and other.isChecked():
+                    other.setChecked(False)
+        finally:
+            self._jma_report_mutex_sync = False
+
+    def _apply_jma_report_mutex_to_ui(self, prefer: str = "main") -> None:
+        """全选/恢复等批量勾选后，按 prefer 收敛 JMA 情报互斥。"""
+        self._jma_report_mutex_sync = True
+        try:
+            p2p = getattr(self, f"{P2P_JMA_REPORT_PARSE_FLAG}_cb", None)
+            main_any = any(
+                (cb := getattr(self, f"{flag}_cb", None)) is not None and cb.isChecked()
+                for flag in MAIN_JMA_REPORT_PARSE_FLAGS
+            )
+            p2p_on = p2p is not None and p2p.isChecked()
+            if not (main_any and p2p_on):
+                return
+            if prefer == "p2p":
+                for flag in MAIN_JMA_REPORT_PARSE_FLAGS:
+                    other = getattr(self, f"{flag}_cb", None)
+                    if other is not None and other.isChecked():
+                        other.setChecked(False)
+            elif p2p is not None:
+                p2p.setChecked(False)
+        finally:
+            self._jma_report_mutex_sync = False
 
     def _on_weather_source_mutex_changed(
         self, active_attr: str, specs: List[Tuple[str, str]]
@@ -1289,10 +1359,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if hasattr(self, 'source_vars'):
                 for url, cb in self.source_vars.items():
                     cb.setChecked(self.config.enabled_sources.get(url, True))
-            if hasattr(self, 'fanstudio_all_connect_cb'):
-                self.fanstudio_all_connect_cb.setChecked(
-                    self.config.enabled_sources.get(self.all_source_url, True)
-                )
             if hasattr(self, 'fanstudio_api_key_entry'):
                 self.fanstudio_api_key_entry.setText(
                     getattr(self.config.ws_config, 'fanstudio_api_key', '') or ''
@@ -1333,6 +1399,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
                 ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
                 ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
+                ('whews_parse_cea_cb', 'whews_parse_cea'),
+                ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
                 ('whews_parse_cenc_cb', 'whews_parse_cenc'),
                 ('whews_parse_cwa_cb', 'whews_parse_cwa'),
                 ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -1490,9 +1558,15 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             area.setMinimumWidth(0)
 
     def _adjust_window_to_screen(self):
-        """调整窗口大小和位置，确保不超出屏幕，并限制最大宽度。"""
-        from PyQt5.QtWidgets import QApplication
-        screen = QApplication.desktop().screenGeometry()
+        """调整窗口大小和位置，确保不超出当前所属屏（跟随主窗/父窗所在副屏）。"""
+        from utils.screen_geometry import (
+            available_geometry_for,
+            clamp_top_left_to_screen,
+            center_top_left_on_screen,
+        )
+
+        parent = self.parent() if isinstance(self.parent(), QWidget) else None
+        screen = available_geometry_for(widget=parent or self)
 
         max_width = min(SETTINGS_MAX_WIDTH, screen.width() - 40)
         max_height = screen.height() - 40
@@ -1515,26 +1589,18 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         window_width = self.width()
         window_height = self.height()
-        
-        # 计算理想位置（居中或相对于父窗口）
-        if self.parent():
-            parent_geometry = self.parent().geometry()
+
+        # 相对父窗口居中；无父则在当前屏居中（坐标含副屏偏移）
+        if parent is not None:
+            parent_geometry = parent.frameGeometry()
             x = parent_geometry.x() + (parent_geometry.width() - window_width) // 2
             y = parent_geometry.y() + (parent_geometry.height() - window_height) // 2
+            x, y = clamp_top_left_to_screen(
+                x, y, window_width, window_height, screen, margin=10
+            )
         else:
-            x = (screen.width() - window_width) // 2
-            y = (screen.height() - window_height) // 2
-        
-        # 确保窗口不超出屏幕边界
-        x = max(10, min(x, screen.width() - window_width - 10))
-        
-        if y + window_height > screen.height() - 10:
-            y = screen.height() - window_height - 10
-        if y < 10:
-            y = 10
-        if y + window_height > screen.height() - 10:
-            y = screen.height() - window_height - 10
-        
+            x, y = center_top_left_on_screen(window_width, window_height, screen)
+
         self.move(x, y)
     
     def _center_window(self):
@@ -3059,12 +3125,12 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return path_btn, repeat_spin, test_btn
 
         felt_path_btn, felt_repeat_spin, _ = _build_sound_row(
-            0, "有感预警", "震级低于 4.8 且预估烈度低于 7 时播放。",
+            0, "有感预警", "震级低于 4.8 且报文烈度低于 7（或无报文烈度）时播放。",
             getattr(ac, 'felt_sound_path', '') or '', "media/eewalert.wav",
             int(getattr(ac, 'felt_sound_repeat', 1) or 1), "felt",
         )
         critical_path_btn, critical_repeat_spin, _ = _build_sound_row(
-            1, "强震预警", "震级不低于 4.8 或预估烈度不低于 7 时播放。",
+            1, "强震预警", "震级不低于 4.8 或报文烈度不低于 7 时播放。",
             getattr(ac, 'critical_sound_path', '') or '', "media/eewcritical.wav",
             int(getattr(ac, 'critical_sound_repeat', 1) or 1), "critical",
         )
@@ -3505,7 +3571,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.data_provider_group.addButton(self.radio_provider_jian, 2)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel("三者择一；切换后清空缓冲并重连。")
+        provider_hint = QLabel("三者择一；选中并保存后启用该主源连接，并清空缓冲重连。")
         provider_hint.setToolTip(
             "保存后仅连接当前主提供者。"
             "Wolfx / EQSC / P2PQuake / OpenQuakeAPI 为辅助源；可用总开关整体启停，开启后各分区全部展示。"
@@ -3537,8 +3603,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _set_widget_style(fs_apply_hint, STYLE_HINT)
         fs_apply_hint.setWordWrap(True)
         gw_layout.addWidget(fs_apply_hint)
-        fs_hint = QLabel("勾选后连接；鉴权后接入完整数据流。")
-        fs_hint.setToolTip("未鉴权仅返回公开精简数据（如 FSSN）。下方子源决定解析范围，无需重启。")
+        fs_hint = QLabel("鉴权后接入完整数据流；下方子源决定解析范围。")
+        fs_hint.setToolTip("未鉴权仅返回公开精简数据。主数据源选中 Fan Studio 并保存后即连接。")
         _set_widget_style(fs_hint, STYLE_HINT)
         fs_hint.setWordWrap(True)
         gw_layout.addWidget(fs_hint)
@@ -3573,11 +3639,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.fanstudio_auth_status_label.setWordWrap(True)
         gw_layout.addWidget(self.fanstudio_auth_status_label)
         self._refresh_fanstudio_auth_status_label(force=True)
-
-        self.fanstudio_all_connect_cb = QCheckBox("Fan Studio")  # /all 聚合 WebSocket 总开关
-        self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
-        _set_widget_style(self.fanstudio_all_connect_cb, STYLE_CHECKBOX_SOURCE)
-        gw_layout.addWidget(self.fanstudio_all_connect_cb)
 
         def _fs_cb(cfg_name: str, text: str) -> QCheckBox:
             """创建 Fan Studio 子源复选框行（含解析状态标签）。"""
@@ -3647,8 +3708,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _set_widget_style(wh_apply_hint, STYLE_HINT)
         wh_apply_hint.setWordWrap(True)
         wh_layout.addWidget(wh_apply_hint)
-        wh_hint = QLabel("填写令牌后勾选连接；子源由下方勾选控制。")
-        wh_hint.setToolTip("建连后 5 秒内以纯文本发送令牌。JMA 预警/情报请用下方 P2PQuake。")
+        wh_hint = QLabel("填写令牌后保存生效；子源由下方勾选控制。")
+        wh_hint.setToolTip("主数据源选中 WeJet 并保存后建连；建连后 5 秒内以纯文本发送令牌。JMA 预警/情报请用下方 P2PQuake。")
         _set_widget_style(wh_hint, STYLE_HINT)
         wh_hint.setWordWrap(True)
         wh_layout.addWidget(wh_hint)
@@ -3660,7 +3721,13 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         host_row.addWidget(host_label)
         self.whews_host_group = QButtonGroup(self)
         self.radio_whews_host_primary = QRadioButton("主站")
-        self.radio_whews_host_backup = QRadioButton("备站")
+        self.radio_whews_host_backup = QRadioButton("国内站")
+        self.radio_whews_host_primary.setToolTip(
+            f"{WHEWS_HOST_PRIMARY}：/ws/all 走主站；CEA 仍固定连国内站 /ws/cea_all"
+        )
+        self.radio_whews_host_backup.setToolTip(
+            f"{WHEWS_HOST_BACKUP}：/ws/all 与 CEA（/ws/cea_all）均走国内站"
+        )
         for rb in (self.radio_whews_host_primary, self.radio_whews_host_backup):
             _set_widget_style(rb, STYLE_RADIO)
             host_row.addWidget(rb)
@@ -3701,13 +3768,19 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         login_row.addWidget(self.whews_login_status, 1)
         wh_layout.addLayout(login_row)
 
-        whews_urls = self.config.get_whews_endpoint_urls(cur_host)
-        self.whews_all_connect_cb = QCheckBox("WeJet（/ws/all）")
-        self.whews_all_connect_cb.setChecked(
-            is_whews_all_enabled(self.config.enabled_sources)
+        cea_hint = QLabel(
+            "CEA / CEA-PR 固定经国内站 /ws/cea_all 自动鉴权（软件内置 App，一次完成两源），"
+            "与上方主站/国内站选择无关；/ws/all 仍跟随所选主机。"
         )
-        _set_widget_style(self.whews_all_connect_cb, STYLE_CHECKBOX_SOURCE)
-        wh_layout.addWidget(self.whews_all_connect_cb)
+        cea_hint.setWordWrap(True)
+        _set_widget_style(cea_hint, STYLE_HINT)
+        wh_layout.addWidget(cea_hint)
+
+        self.whews_cea_auth_status_label = QLabel("CEA App 鉴权：未连接")
+        _set_widget_style(self.whews_cea_auth_status_label, STYLE_HINT)
+        self.whews_cea_auth_status_label.setWordWrap(True)
+        wh_layout.addWidget(self.whews_cea_auth_status_label)
+        self._refresh_whews_cea_auth_status_label(force=True)
 
         def _wh_cb(cfg_name: str, text: str) -> QCheckBox:
             """创建 WeJet 子源复选框行。"""
@@ -3733,6 +3806,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.whews_parse_cwa_eew_cb = _wh_cb("whews_parse_cwa_eew", "台湾气象署地震预警")
         self.whews_parse_sa_eew_cb = _wh_cb("whews_parse_sa_eew", "美国 ShakeAlert 地震预警")
         self.whews_parse_kma_eew_cb = _wh_cb("whews_parse_kma_eew", "韩国气象厅地震预警")
+        self.whews_parse_cea_cb = _wh_cb("whews_parse_cea", "中国地震预警网（CEA）")
+        self.whews_parse_cea_pr_cb = _wh_cb("whews_parse_cea_pr", "中国地震预警省网（CEA-PR）")
         self.whews_parse_weatheralarm_cb = _wh_cb("whews_parse_weatheralarm", "中国气象局气象预警")
         self.whews_parse_tsunami_cb = _wh_cb("whews_parse_tsunami", "自然资源部海啸预警中心")
         self.whews_parse_ntwc_cb = _wh_cb("whews_parse_ntwc", "美国国家海啸预警中心 (NTWC)")
@@ -3800,16 +3875,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _set_widget_style(jian_apply_hint, STYLE_HINT)
         jian_apply_hint.setWordWrap(True)
         gj_main_layout.addWidget(jian_apply_hint)
-        jian_hint = QLabel("勾选后连接 /all 聚合；下方子源控制解析范围。")
-        _set_widget_style(jian_hint, STYLE_HINT)
-        jian_hint.setWordWrap(True)
-        gj_main_layout.addWidget(jian_hint)
-        self.jian_all_connect_cb = QCheckBox("Jian Project（/all）")
-        self.jian_all_connect_cb.setChecked(
-            self.config.enabled_sources.get(JIAN_MASTER_KEY, False)
-        )
-        _set_widget_style(self.jian_all_connect_cb, STYLE_CHECKBOX_SOURCE)
-        gj_main_layout.addWidget(self.jian_all_connect_cb)
 
         def _jian_cb(cfg_name: str, text: str) -> QCheckBox:
             cb = QCheckBox(text)
@@ -4249,6 +4314,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             "openquake_parse_cma", "CMA 气象预警"
         )
         self._wire_weather_source_mutex()
+        self._wire_jma_report_mutex()
         ao_layout.addWidget(group_openquake)
 
         # 台风 HTTP（全局）
@@ -4413,7 +4479,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                         show_info(
                             self,
                             "成功",
-                            f"{message}\n令牌已写入并保存，勾选 WeJet 连接后即可生效。",
+                            f"{message}\n令牌已写入并保存；将主数据源选为 WeJet 并保存后即可生效。",
                         )
                     else:
                         self._mark_settings_dirty()
@@ -4450,6 +4516,29 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if hasattr(self, "radio_provider_whews") and self.radio_provider_whews.isChecked():
             return DATA_PROVIDER_WHEWS
         return DATA_PROVIDER_FANSTUDIO
+
+    def _apply_main_provider_connection_flags(self) -> None:
+        """
+        按顶部主数据源三选一写入连接开关：选中者启用，另两者关闭。
+        不再依赖面板内单独的 /all 勾选框。
+        """
+        self._update_base_urls()
+        provider = self._current_data_provider_from_ui()
+        self.config.data_provider = provider
+        all_url = self.all_source_url
+        self.config.enabled_sources[all_url] = False
+        self.config.enabled_sources[WHEWS_MASTER_KEY] = False
+        self.config.enabled_sources[JIAN_MASTER_KEY] = False
+        for u in WHEWS_WS_URLS:
+            self.config.enabled_sources[u] = False
+        if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
+            self.config._disable_whews_dedicated_endpoints()
+        if provider == DATA_PROVIDER_FANSTUDIO:
+            self.config.enabled_sources[all_url] = True
+        elif provider == DATA_PROVIDER_WHEWS:
+            self.config.enabled_sources[WHEWS_MASTER_KEY] = True
+        elif provider == DATA_PROVIDER_JIAN:
+            self.config.enabled_sources[JIAN_MASTER_KEY] = True
 
     def _make_http_poll_spinbox(self, url: str) -> QSpinBox:
         """为 HTTP 数据源创建 Get 间隔 SpinBox（最低 1 秒）。"""
@@ -4631,10 +4720,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
     
     def _select_all_sources(self):
         """全选所有数据源"""
-        if hasattr(self, "fanstudio_all_connect_cb"):
-            self.fanstudio_all_connect_cb.setChecked(True)
-        if hasattr(self, "whews_all_connect_cb"):
-            self.whews_all_connect_cb.setChecked(True)
         if hasattr(self, "aux_sources_master_cb"):
             self.aux_sources_master_cb.setChecked(True)
         if hasattr(self, "wolfx_all_connect_cb"):
@@ -4676,6 +4761,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'whews_parse_cwa_eew_cb',
             'whews_parse_sa_eew_cb',
             'whews_parse_kma_eew_cb',
+            'whews_parse_cea_cb',
+            'whews_parse_cea_pr_cb',
             'whews_parse_cenc_cb',
             'whews_parse_cwa_cb',
             'whews_parse_hko_cb',
@@ -4740,19 +4827,20 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             cb = getattr(self, attr, None)
             if cb is not None:
                 cb.setChecked(True)
+        for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
+            cb = getattr(self, f"{flag}_cb", None)
+            if cb is not None:
+                cb.setChecked(True)
+        self._apply_jma_report_mutex_to_ui(prefer="main")
         self._update_parse_status_labels()
     
     def _restore_default_selection(self):
-        """恢复默认选中状态"""
+        """恢复默认选中状态（主数据源默认 Jian Project）。"""
+        if hasattr(self, "radio_provider_jian"):
+            self.radio_provider_jian.setChecked(True)
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:
                 checkbox.setChecked(bool(self.config.enabled_sources.get(url, False)))
-        if hasattr(self, "fanstudio_all_connect_cb"):
-            self.fanstudio_all_connect_cb.setChecked(self.config.enabled_sources.get(self.all_source_url, True))
-        if hasattr(self, "whews_all_connect_cb"):
-            self.whews_all_connect_cb.setChecked(is_whews_all_enabled(self.config.enabled_sources))
-        if hasattr(self, "jian_all_connect_cb"):
-            self.jian_all_connect_cb.setChecked(self.config.enabled_sources.get(JIAN_MASTER_KEY, False))
         if hasattr(self, "wolfx_all_connect_cb"):
             self.wolfx_all_connect_cb.setChecked(
                 wolfx_master_enabled(self.config.enabled_sources)
@@ -4797,6 +4885,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
+            ('whews_parse_cea_cb', 'whews_parse_cea'),
+            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
             ('whews_parse_cwa_cb', 'whews_parse_cwa'),
             ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -4861,6 +4951,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if cb is not None:
                 default_val = getattr(self.config.message_config, cfg_name, True)
                 cb.setChecked(bool(default_val))
+        for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
+            cb = getattr(self, f"{flag}_cb", None)
+            if cb is not None:
+                cb.setChecked(bool(getattr(self.config.message_config, flag, True)))
+        self._apply_jma_report_mutex_to_ui(prefer="main")
         if hasattr(self, "openquake_gq_min_magnitude_spin"):
             self.openquake_gq_min_magnitude_spin.setValue(
                 float(getattr(self.config.message_config, "openquake_gq_min_magnitude", 4.5) or 0.0)
@@ -4965,7 +5060,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _update_baidu_api_visible()
         main_layout.addWidget(group_place)
 
-        # ---------- 2. 预估烈度与告警闪烁（卡片布局，与「外观/显示」QGroupBox 风格一致） ----------
+        # ---------- 2. 预警闪烁与有感提示（卡片布局，与「外观/显示」QGroupBox 风格一致） ----------
         ac = self.config.alert_config
         group_alert = QGroupBox("预警闪烁与有感提示")
         _prep_groupbox(group_alert)
@@ -5491,7 +5586,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         # 标题与版本（上方留白，避免贴顶）
         layout.addSpacing(12)
-        title_label = QLabel("地震预警及速报滚动实况")
+        title_label = QLabel("地震情报实况栏")
         _set_widget_style(title_label, f"font-size: 22px; font-weight: bold; color: {COLOR_TEXT}; padding-bottom: 2px;")
         layout.addWidget(title_label)
         version_label = QLabel(f"版本 v{APP_VERSION}")
@@ -6165,7 +6260,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             msg = styled_message_box(self)
             msg.setWindowTitle("提示")
             msg.setIcon(QMessageBox.Information)
-            msg.setText("数据源已恢复为默认选中（日本气象厅地震情报、日本气象厅海啸预报）。点击「保存」将保存并立即生效。")
+            msg.setText(
+                "数据源已恢复为默认选中（主数据源：Jian Project）。"
+                "点击「保存」将保存并立即生效。"
+            )
             save_btn = msg.addButton("保存", QMessageBox.AcceptRole)
             msg.addButton("取消", QMessageBox.RejectRole)
             msg.exec_()
@@ -6217,39 +6315,22 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
     def _apply_data_source_settings_to_config(self) -> None:
         """将数据源页控件写入内存 Config（不写盘、不重启）。"""
         self._update_base_urls()
-        if hasattr(self, "_current_data_provider_from_ui"):
-            self.config.data_provider = self._current_data_provider_from_ui()
-        all_url = self.all_source_url
-        if hasattr(self, "fanstudio_all_connect_cb"):
-            self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
+        self._apply_main_provider_connection_flags()
         if hasattr(self, "fanstudio_api_key_entry"):
             self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
         if hasattr(self, "eqsc_login_token_entry"):
             self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "whews_token_entry"):
             self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
+        # CEA App 凭证内置，不从界面读写
+        try:
+            from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+            apply_builtin_whews_cea_credentials(self.config.ws_config)
+        except Exception:
+            pass
         if hasattr(self, "_current_whews_host_from_ui"):
             self.config.ws_config.whews_host = self._current_whews_host_from_ui()
-        # 按当前主机写入无界科技连接开关；仅 /ws/all，强制关闭已废弃的专用线
-        if hasattr(self, "whews_all_connect_cb"):
-            host = self.config.get_whews_host()
-            for u in WHEWS_WS_URLS:
-                self.config.enabled_sources[u] = False
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = self.whews_all_connect_cb.isChecked()
-            if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
-                self.config._disable_whews_dedicated_endpoints()
-        if hasattr(self, "jian_all_connect_cb"):
-            self.config.enabled_sources[JIAN_MASTER_KEY] = self.jian_all_connect_cb.isChecked()
-        provider = self._current_data_provider_from_ui() if hasattr(self, "_current_data_provider_from_ui") else self.config.get_active_data_provider()
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
-            self.config.enabled_sources[JIAN_MASTER_KEY] = False
-        elif provider == DATA_PROVIDER_WHEWS:
-            self.config.enabled_sources[self.all_source_url] = False
-            self.config.enabled_sources[JIAN_MASTER_KEY] = False
-        elif provider == DATA_PROVIDER_JIAN:
-            self.config.enabled_sources[self.all_source_url] = False
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
         for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
             cb = getattr(self, f"{flag}_cb", None)
             if cb is not None:
@@ -6285,6 +6366,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_cwa_eew_cb', 'whews_parse_cwa_eew'),
             ('whews_parse_sa_eew_cb', 'whews_parse_sa_eew'),
             ('whews_parse_kma_eew_cb', 'whews_parse_kma_eew'),
+            ('whews_parse_cea_cb', 'whews_parse_cea'),
+            ('whews_parse_cea_pr_cb', 'whews_parse_cea_pr'),
             ('whews_parse_cenc_cb', 'whews_parse_cenc'),
             ('whews_parse_cwa_cb', 'whews_parse_cwa'),
             ('whews_parse_hko_cb', 'whews_parse_hko'),
@@ -6367,6 +6450,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self.openquake_gq_min_magnitude_spin.value()
             )
         enforce_weather_source_mutex(self.config.message_config)
+        enforce_jma_report_mutex(self.config.message_config, prefer="main")
         self._sync_data_source_connection_switches_to_config()
         self.config.message_config.use_custom_text = self.radio_custom_text.isChecked()
         for url, spin in self.http_poll_spinboxes.items():
@@ -6611,46 +6695,30 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if not hasattr(self, "source_vars"):
             return
         self._update_base_urls()  # 确保 all_source_url 与当前域名一致
-        if hasattr(self, "_current_data_provider_from_ui"):
-            self.config.data_provider = self._current_data_provider_from_ui()
-        all_url = self.all_source_url
-        if hasattr(self, "fanstudio_all_connect_cb"):
-            self.config.enabled_sources[all_url] = self.fanstudio_all_connect_cb.isChecked()
+        self._apply_main_provider_connection_flags()
         if hasattr(self, "fanstudio_api_key_entry"):
             self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
         if hasattr(self, "eqsc_login_token_entry"):
             self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "whews_token_entry"):
             self.config.ws_config.whews_token = self.whews_token_entry.text().strip()
+        try:
+            from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+            apply_builtin_whews_cea_credentials(self.config.ws_config)
+        except Exception:
+            pass
         if hasattr(self, "_current_whews_host_from_ui"):
             self.config.ws_config.whews_host = self._current_whews_host_from_ui()
-        if hasattr(self, "whews_all_connect_cb"):
-            host = self.config.get_whews_host()
-            for u in WHEWS_WS_URLS:
-                self.config.enabled_sources[u] = False
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = self.whews_all_connect_cb.isChecked()
-            if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
-                self.config._disable_whews_dedicated_endpoints()
         if hasattr(self, "aux_sources_master_cb"):
             self.config.enabled_sources[AUX_SOURCES_MASTER_KEY] = (
                 self.aux_sources_master_cb.isChecked()
             )
-        if hasattr(self, "jian_all_connect_cb"):
-            self.config.enabled_sources[JIAN_MASTER_KEY] = self.jian_all_connect_cb.isChecked()
-        provider = self._current_data_provider_from_ui() if hasattr(self, "_current_data_provider_from_ui") else self.config.get_active_data_provider()
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
-            self.config.enabled_sources[JIAN_MASTER_KEY] = False
-        elif provider == DATA_PROVIDER_WHEWS:
-            self.config.enabled_sources[self.all_source_url] = False
-            self.config.enabled_sources[JIAN_MASTER_KEY] = False
-        elif provider == DATA_PROVIDER_JIAN:
-            self.config.enabled_sources[self.all_source_url] = False
-            self.config.enabled_sources[WHEWS_MASTER_KEY] = False
         for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
             cb = getattr(self, f"{flag}_cb", None)
             if cb is not None:
                 setattr(self.config.message_config, flag, cb.isChecked())
+        all_url = self.all_source_url
         for url, checkbox in self.source_vars.items():
             if url and url != all_url and not is_whews_url(url):
                 self.config.enabled_sources[url] = checkbox.isChecked()  # 逐项同步单项源开关
@@ -6716,6 +6784,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self.openquake_gq_min_magnitude_spin.value()
             )
         enforce_weather_source_mutex(self.config.message_config)
+        enforce_jma_report_mutex(self.config.message_config, prefer="main")
         if hasattr(self, "eqsc_connect_cb") or EQSC_HTTP_MASTER in self.source_vars:
             # EQSC 总开关来自 source_vars 勾选；辅源关闭时上面已强制 False
             pass

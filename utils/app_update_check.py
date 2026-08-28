@@ -30,12 +30,12 @@ USER_AGENT = f"EarthquakeScroller/{APP_VERSION}"
 # 与 build_lite.spec 中 onedir 名称一致（空格 + V + 版本号）
 def portable_dist_folder_name(version: str) -> str:
     """便携版解压后的文件夹名称。"""
-    return f"地震预警及情报实况栏 V{version.strip()}"
+    return f"地震情报实况栏 V{version.strip()}"
 
 
 def portable_exe_basename(version: str) -> str:
     """便携版主程序 exe 文件名。"""
-    return f"地震预警及情报实况栏 V{version.strip()}.exe"
+    return f"地震情报实况栏 V{version.strip()}.exe"
 
 
 def _sha256_file(path: str) -> str:

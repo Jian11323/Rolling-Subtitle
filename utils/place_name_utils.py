@@ -32,8 +32,8 @@ JMA_ORIGINAL_PLACE_SOURCES = frozenset({
 
 KEEP_ORIGINAL_PLACE_NAME_SOURCES = CHINESE_SOURCE_TYPES | JMA_ORIGINAL_PLACE_SOURCES
 
-# 预警走专用区域库（SA / KMA），不走通用 FE
-_FE_PLACE_FIX_EXCLUDED = frozenset({"sa", "kma-eew"})
+# 预警/速报走专用韩国区域库（KMA），不走通用 FE
+_FE_PLACE_FIX_EXCLUDED = frozenset({"sa", "kma", "kma-eew"})
 
 
 def _normalize_source_type(source_type: str) -> str:

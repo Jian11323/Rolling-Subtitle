@@ -32,7 +32,7 @@ _play_lock = threading.Lock()
 def _warning_feedback_policy(alert_config: Any) -> str:
     return getattr(alert_config, "warning_feedback_policy", "first_received") or "first_received"
 
-# 强震判定阈值：震级 ≥4.8 或预估烈度 ≥7 为 critical 档
+# 强震判定阈值：震级 ≥4.8 或报文烈度 ≥7 为 critical 档
 _EEW_MAG_CRITICAL = 4.8
 _EEW_INTENSITY_CRITICAL = 7.0
 
@@ -53,7 +53,7 @@ def classify_eew_audio_tier(
     alert_config: Any,
 ) -> Optional[str]:
     """
-    按震级 4.8 与预估烈度 7 判定音频档位。
+    按震级 4.8 与报文烈度 7 判定音频档位（无报文烈度时仅按震级）。
     返回 ``felt`` / ``critical`` / ``None``（不满足最低震级时不播放）。
     """
     pd = parsed_data or {}

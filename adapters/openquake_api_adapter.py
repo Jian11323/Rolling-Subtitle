@@ -138,12 +138,48 @@ class OpenQuakeApiAdapter(BaseAdapter):
         """获取消息类型。"""
         return data.get("type", "report")
 
+    @staticmethod
+    def _gq_shock_time(payload: Dict[str, Any], raw: Dict[str, Any]) -> str:
+        """GQ 发震/事件时间 → 显示时区（originTimeIso / originTimeMs / timestampMs）。"""
+        iso = payload.get("originTimeIso")
+        if iso:
+            # ISO 8601（含 Z）统一走 flexible，与其它 OpenQuake 子源一致
+            shock = timezone_utils.flexible_time_to_display(str(iso))
+            if shock:
+                return shock
+            shock = timezone_utils.utc_to_display(str(iso))
+            if shock:
+                return shock
+        shock = _ms_to_display(payload.get("originTimeMs"))
+        if shock:
+            return shock
+        return _ms_to_display(raw.get("timestampMs"))
+
     def _parse_gq(
         self, payload: Dict[str, Any], action: str, raw: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """GlobalQuake 地震事件；cancelled 忽略，update/archived 出速报。"""
-        if action == "cancelled":
+        """GlobalQuake：update/archived 出预警；cancelled 出取消报（cancel=True）。"""
+        event_id = str(payload.get("id") or "").strip()
+        if not event_id:
             return None
+
+        if action == "cancelled":
+            return {
+                "type": "warning",
+                "source_type": "openquake_gq",
+                "openquake": True,
+                "cancel": True,
+                "magnitude": 0.0,
+                "latitude": 0.0,
+                "longitude": 0.0,
+                "depth": 0.0,
+                "place_name": "GlobalQuake地震取消",
+                "shock_time": self._gq_shock_time(payload, raw),
+                "organization": "GlobalQuake地震预警",
+                "event_id": f"openquake_gq:{event_id}",
+                "raw_data": raw,
+            }
+
         if action not in ("update", "archived", ""):
             return None
 
@@ -155,17 +191,7 @@ class OpenQuakeApiAdapter(BaseAdapter):
 
         place = str(payload.get("region") or "").strip() or "未知区域"
         intensity = str(payload.get("intensity") or "").strip()
-        shock_time = ""
-        if payload.get("originTimeIso"):
-            shock_time = timezone_utils.utc_to_display(str(payload.get("originTimeIso")))
-        if not shock_time:
-            shock_time = _ms_to_display(payload.get("originTimeMs"))
-        if not shock_time:
-            shock_time = _ms_to_display(raw.get("timestampMs"))
-
-        event_id = str(payload.get("id") or "").strip()
-        if not event_id:
-            return None
+        shock_time = self._gq_shock_time(payload, raw)
 
         result: Dict[str, Any] = {
             "type": "warning",

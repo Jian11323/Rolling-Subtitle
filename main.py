@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-地震预警及情报实况栏程序 - 主程序入口
+地震情报实况栏程序 - 主程序入口
 采用模块化架构，职责清晰
 使用PyQt5 GUI框架，解决窗口静止时卡顿问题
 """
@@ -93,6 +93,21 @@ def main():
         logger.info(f"数据源: {len(config.ws_urls)}个")  # 记录启动时启用的数据源数量
 
         render_backend = getattr(config.gui_config, 'render_backend', None) or ("opengl" if config.gui_config.use_gpu_rendering else "cpu")
+        # High DPI / 多屏：须在 QApplication 之前启用，避免主副屏 DPI 不同时尺寸抖动与 FBO 反复重建
+        try:
+            from PyQt5.QtCore import Qt
+            QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+            QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+            try:
+                # Qt 5.14+：按真实 DPR，减少跨屏时 1px 级来回取整
+                QApplication.setHighDpiScaleFactorRoundingPolicy(
+                    Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"启用 High DPI 属性失败（可忽略）: {e}")
+
         # 在创建 QApplication 之前设置 OpenGL（仅当选择 OpenGL 时）
         if render_backend == "opengl":
             try:

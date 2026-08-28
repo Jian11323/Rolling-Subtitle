@@ -65,7 +65,7 @@ _HINT_FLASH = (
 
 def _hint_text_for_warning(parsed_data: Dict[str, Any]) -> str:
     """
-    尾部白字提示：基于报文或经验估算的震中烈度标量（日台类源不拼接）。
+    尾部白字提示：仅基于报文震中烈度（日台类源不拼接；无报文烈度则不提示）。
     有感：烈度 < 5；强有感：烈度 ≥ 6。
     """
     st = (parsed_data.get("source_type") or "").strip().lower()

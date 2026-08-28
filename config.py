@@ -38,11 +38,12 @@ def fanstudio_http_canonical_key(url: str) -> str:
 FANSTUDIO_ALL_URL = fanstudio_ws_url("all")
 FANSTUDIO_ALL_URLS = (FANSTUDIO_ALL_URL,)
 
-# WeJet（WHEWS）：主站 api.beecld.com；备用 api.2v8.cn（含 CEA 专用线）
+# WeJet（WHEWS）：默认 api.beecld.com；国内站 api.2v8.cn（含 CEA，需 App 鉴权）
 WHEWS_HOST_PRIMARY = "api.beecld.com"
 WHEWS_HOST_BACKUP = "api.2v8.cn"
 WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
-WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主站域名
+WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主机域名
+WHEWS_CEA_APPLY_URL = "https://api.2v8.cn/apply"  # CEA App 申请页
 DATA_PROVIDER_FANSTUDIO = "fanstudio"
 DATA_PROVIDER_WHEWS = "whews"
 DATA_PROVIDER_JIAN = "jian"
@@ -86,12 +87,13 @@ def is_whews_url(url: str) -> bool:
 
 
 def all_whews_ws_urls() -> List[str]:
-    """主站+备用全部已知端点（含已废弃的 cea_all/cenc 专用线，便于强制关闭）。"""
+    """主站+备用全部已知端点（含 cenc/cea 专用线，便于强制启停）。"""
     urls: List[str] = []
     for host in WHEWS_HOSTS:
         urls.append(whews_ws_url("all", host))
         urls.append(whews_ws_url("cenc", host))
-        # 历史 cea_all 端点：纳入列表以便旧配置被强制关闭
+        urls.append(whews_ws_url("cea", host))
+        urls.append(whews_ws_url("cea-pr", host))
         urls.append(whews_ws_url("cea_all", host))
     return urls
 
@@ -108,11 +110,60 @@ def is_whews_all_url(url: str) -> bool:
 
 
 def is_whews_dedicated_endpoint(url: str) -> bool:
-    """cea_all / cenc 专用线：已废弃，CEA/CENC 数据统一走 /ws/all。"""
+    """已废弃的专用线（仅强制关闭 cenc；cea/cea-pr/cea_all 由 App 鉴权路径单独管理）。"""
     path = _whews_url_path(url)
     if not is_whews_url(path):
         return False
-    return path.endswith("/ws/cenc") or path.endswith("/ws/cea_all") or "/ws/cea/" in (path + "/")
+    return path.endswith("/ws/cenc")
+
+
+def is_whews_cea_endpoint(url: str) -> bool:
+    """是否为 WeJet CEA 专用端点（/ws/cea、/ws/cea-pr、/ws/cea_all）。"""
+    path = _whews_url_path(url)
+    if not is_whews_url(path):
+        return False
+    return (
+        path.endswith("/ws/cea")
+        or path.endswith("/ws/cea-pr")
+        or path.endswith("/ws/cea_pr")
+        or path.endswith("/ws/cea_all")
+    )
+
+
+def is_whews_cea_all_endpoint(url: str) -> bool:
+    """是否为 CEA 合并通道 /ws/cea_all（一次鉴权覆盖 CEA + CEA-PR）。"""
+    path = _whews_url_path(url)
+    return is_whews_url(path) and path.endswith("/ws/cea_all")
+
+
+def is_whews_cea_split_endpoint(url: str) -> bool:
+    """是否为拆分专用线 /ws/cea 或 /ws/cea-pr（公开版强制关闭，改走 cea_all）。"""
+    path = _whews_url_path(url)
+    if not is_whews_url(path):
+        return False
+    if path.endswith("/ws/cea_all"):
+        return False
+    return (
+        path.endswith("/ws/cea")
+        or path.endswith("/ws/cea-pr")
+        or path.endswith("/ws/cea_pr")
+    )
+
+
+def whews_cea_app_configured(ws_config: Any = None) -> bool:
+    """是否已具备 CEA App 凭证（内置或配置；公开版始终注入内置）。"""
+    try:
+        from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+        cfg = ws_config
+        if cfg is None:
+            cfg = Config().ws_config
+        apply_builtin_whews_cea_credentials(cfg)
+        app_id = (getattr(cfg, "whews_cea_app_id", "") or "").strip()
+        app_secret = (getattr(cfg, "whews_cea_app_secret", "") or "").strip()
+        return bool(app_id and app_secret)
+    except Exception:
+        return False
 
 
 def normalize_data_provider(value: Any) -> str:
@@ -141,7 +192,7 @@ def is_whews_all_enabled(enabled_sources: Dict[str, Any]) -> bool:
 
 # 兼容旧代码：默认指向主站
 WHEWS_ALL_URL = whews_ws_url("all", WHEWS_HOST_PRIMARY)
-WHEWS_CEA_ALL_URL = whews_ws_url("cea_all", WHEWS_HOST_PRIMARY)
+WHEWS_CEA_ALL_URL = whews_ws_url("cea_all", WHEWS_HOST_BACKUP)
 WHEWS_CENC_URL = whews_ws_url("cenc", WHEWS_HOST_PRIMARY)
 WHEWS_WS_URLS: List[str] = all_whews_ws_urls()
 
@@ -191,6 +242,57 @@ def enforce_weather_source_mutex(message_config: Any) -> str:
         flag = WEATHER_SOURCE_FLAGS[key]
         if hasattr(message_config, flag):
             setattr(message_config, flag, False)
+    return keep
+
+
+# 主数据源 JMA 地震情报（不含 EEW）与 P2PQuake 551 互斥
+MAIN_JMA_REPORT_PARSE_FLAGS: Tuple[str, ...] = (
+    "jian_parse_jma",   # Jian Project /jma → jma_eq
+    "whews_parse_jma",  # WeJet /ws/jma → jma_eq
+)
+P2P_JMA_REPORT_PARSE_FLAG = "p2pquake_parse_551"
+
+
+def main_jma_report_enabled(message_config: Any) -> bool:
+    """主数据源是否启用了 JMA 地震情报解析。"""
+    return any(
+        bool(getattr(message_config, flag, False))
+        for flag in MAIN_JMA_REPORT_PARSE_FLAGS
+    )
+
+
+def p2p_jma_report_enabled(message_config: Any) -> bool:
+    """P2PQuake 是否启用了 551 地震情报解析。"""
+    return bool(getattr(message_config, P2P_JMA_REPORT_PARSE_FLAG, False))
+
+
+def enforce_jma_report_mutex(
+    message_config: Any,
+    *,
+    prefer: str = "main",
+) -> str:
+    """
+    P2PQuake 551 与主源 JMA 情报互斥。
+    冲突时 prefer='main' 保留主源并关闭 P2P 551；prefer='p2p' 则相反。
+    返回当前保留侧：'main' / 'p2p' / ''。
+    """
+    p2p_on = p2p_jma_report_enabled(message_config)
+    main_on = main_jma_report_enabled(message_config)
+    if not p2p_on and not main_on:
+        return ""
+    if p2p_on and not main_on:
+        return "p2p"
+    if main_on and not p2p_on:
+        return "main"
+    # 双边皆开：按 prefer 收敛
+    keep = "p2p" if prefer == "p2p" else "main"
+    if keep == "main":
+        if hasattr(message_config, P2P_JMA_REPORT_PARSE_FLAG):
+            setattr(message_config, P2P_JMA_REPORT_PARSE_FLAG, False)
+    else:
+        for flag in MAIN_JMA_REPORT_PARSE_FLAGS:
+            if hasattr(message_config, flag):
+                setattr(message_config, flag, False)
     return keep
 
 
@@ -316,9 +418,11 @@ JIAN_MASTER_KEY = f"{JIAN_LOGICAL_PREFIX}master"
 
 # (短名, 展示用标签) — 对应 message_config.jian_parse_* 解析开关
 JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = [
+    ("cea", "中国地震预警网"),
     ("cwa-eew", "台湾中央气象署地震预警"),
     ("jma-eew", "日本气象厅紧急地震速报"),
     ("sa", "美国 ShakeAlert 地震预警"),
+    ("kma-eew", "韩国气象厅地震预警"),
     ("early-est", "INGV Early-est 快速定位"),
     ("cenc", "CENC 中国地震台网中心"),
     ("cwa", "CWA 台湾中央气象署速报"),
@@ -366,13 +470,15 @@ JIAN_INTERNAL_TO_LOGICAL_KEY: Dict[str, str] = {
 }
 JIAN_SUB_SOURCE_KEYS: List[str] = list(JIAN_LOGICAL_TO_INTERNAL.keys())
 
-JIAN_WARNING_INTERNALS = frozenset({"cwa-eew", "jma", "sa", "early_est"})
+JIAN_WARNING_INTERNALS = frozenset({"cea", "cwa-eew", "jma", "sa", "kma-eew", "early_est"})
 
 # Jian 短名 → message_config.jian_parse_* 字段名
 JIAN_SHORT_TO_PARSE_FLAG: Dict[str, str] = {
+    "cea": "jian_parse_cea",
     "cwa-eew": "jian_parse_cwa_eew",
     "jma-eew": "jian_parse_jma_eew",
     "sa": "jian_parse_sa",
+    "kma-eew": "jian_parse_kma_eew",
     "early-est": "jian_parse_early_est",
     "cenc": "jian_parse_cenc",
     "cwa": "jian_parse_cwa",
@@ -523,16 +629,21 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.3"  # 当前程序版本
+APP_VERSION = "2.8.4"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.3
+CHANGELOG_TEXT = """版本 2.8.4
 
-1、修复 WeJet 配置令牌后聚合 URL 被误判为非 /ws/all，导致主源无法建连的问题"""
+1、优化占用：精简预警/气象缓冲；优化内存占用；启动与关闭设置窗后压缩工作集
+2、适配副屏：主窗/设置窗按所在屏定位；启用 High DPI；按当前屏刷新率同步滚动定时器
+3、主数据源三选一控制连接：去掉 Fan Studio / WeJet / Jian 单独连接开关；保存后按所选主源启用
+4、Jian Project：修复 JMA 预警时间解析；适配 KMA 韩国气象厅预警；默认主数据源改为 Jian Project
+5、P2PQuake 地震情报与主数据源 JMA 情报互斥，避免重复
+6、WeJet：恢复 CEA/CEA-PR（国内站 /ws/cea_all + 内置 App 鉴权）；WAuth 令牌首帧鉴权"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -774,6 +885,8 @@ class MessageConfig:
     whews_parse_jma: bool = True  # WeJet /ws/jma 地震情报（与紧急地震速报分开）
     whews_parse_cwa_eew: bool = True
     whews_parse_sa_eew: bool = True
+    whews_parse_cea: bool = True  # WeJet CEA 国家级预警（需 App 鉴权）
+    whews_parse_cea_pr: bool = True  # WeJet CEA 省级预警（需 App 鉴权）
     whews_parse_cenc: bool = True
     whews_parse_cwa: bool = True
     whews_parse_hko: bool = True
@@ -817,9 +930,11 @@ class MessageConfig:
     whews_parse_nepal: bool = True
     whews_parse_typhoon: bool = False
     # Jian Project 子源解析开关（主提供者 api.sismotide.top/all）
+    jian_parse_cea: bool = True
     jian_parse_cwa_eew: bool = True
     jian_parse_jma_eew: bool = True
     jian_parse_sa: bool = True
+    jian_parse_kma_eew: bool = True
     jian_parse_early_est: bool = True
     jian_parse_cenc: bool = True
     jian_parse_cwa: bool = True
@@ -839,7 +954,7 @@ class MessageConfig:
     jian_parse_afad: bool = True
     jian_parse_kma: bool = True
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報 / 556 緊急地震速報）
-    p2pquake_parse_551: bool = True
+    p2pquake_parse_551: bool = False  # 与主源 JMA 情报互斥；默认关，优先主源
     p2pquake_parse_552: bool = True
     p2pquake_parse_556: bool = True
     # OpenQuakeAPI（/ws/all）：按子源分别控制是否解析
@@ -1074,9 +1189,12 @@ class WebSocketConfig:
     fanstudio_api_key: str = ""
     # 无界科技 WAuth 令牌（wat_…）；建连后以纯文本首帧发送，须在 5 秒内
     whews_token: str = ""
+    # CEA App 凭证由内置模块注入（公开版不对外暴露设置项；连接 /ws/cea_all）
+    whews_cea_app_id: str = ""
+    whews_cea_app_secret: str = ""
     # EQSC 登录密钥（https://equake.top/auth）；软件内自动换取 Refresh/Access Token
     eqsc_login_token: str = ""
-    # 无界科技主机：api.2v8.cn（主站，含 CEA）/ api.beecld.com（备用，无 CEA）
+    # WeJet 主机：api.beecld.com（默认）/ api.2v8.cn（国内，CEA）
     whews_host: str = WHEWS_HOST_PRIMARY
 
     def validate(self) -> bool:
@@ -1162,7 +1280,7 @@ class Config:
 
         # 数据源配置
         # 当前选用的数据源提供者：fanstudio / whews（二选一，设置页顶部切换）
-        self.data_provider: str = DATA_PROVIDER_FANSTUDIO
+        self.data_provider: str = DATA_PROVIDER_JIAN
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
         self.custom_data_source_url: str = ""  # 自定义数据源 URL（http/https/ws/wss），空为关闭
@@ -1224,6 +1342,12 @@ class Config:
     
     def _get_full_config_dict(self) -> Dict[str, Any]:
         """根据当前内存中的各 config 对象生成完整配置 dict（与 save 结构一致）"""
+        try:
+            from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+            apply_builtin_whews_cea_credentials(self.ws_config)
+        except Exception:
+            pass
         return {
             'config_version': APP_VERSION,
             'GUI_CONFIG': {
@@ -1388,6 +1512,8 @@ class Config:
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
                 'whews_parse_cwa_eew': getattr(self.message_config, 'whews_parse_cwa_eew', True),
                 'whews_parse_sa_eew': getattr(self.message_config, 'whews_parse_sa_eew', True),
+                'whews_parse_cea': getattr(self.message_config, 'whews_parse_cea', True),
+                'whews_parse_cea_pr': getattr(self.message_config, 'whews_parse_cea_pr', True),
                 'whews_parse_cenc': getattr(self.message_config, 'whews_parse_cenc', True),
                 'whews_parse_cwa': getattr(self.message_config, 'whews_parse_cwa', True),
                 'whews_parse_hko': getattr(self.message_config, 'whews_parse_hko', True),
@@ -1430,9 +1556,11 @@ class Config:
                 'whews_parse_igp': getattr(self.message_config, 'whews_parse_igp', True),
                 'whews_parse_nepal': getattr(self.message_config, 'whews_parse_nepal', True),
                 'whews_parse_typhoon': getattr(self.message_config, 'whews_parse_typhoon', False),
+                'jian_parse_cea': getattr(self.message_config, 'jian_parse_cea', True),
                 'jian_parse_cwa_eew': getattr(self.message_config, 'jian_parse_cwa_eew', True),
                 'jian_parse_jma_eew': getattr(self.message_config, 'jian_parse_jma_eew', True),
                 'jian_parse_sa': getattr(self.message_config, 'jian_parse_sa', True),
+                'jian_parse_kma_eew': getattr(self.message_config, 'jian_parse_kma_eew', True),
                 'jian_parse_early_est': getattr(self.message_config, 'jian_parse_early_est', True),
                 'jian_parse_cenc': getattr(self.message_config, 'jian_parse_cenc', True),
                 'jian_parse_cwa': getattr(self.message_config, 'jian_parse_cwa', True),
@@ -1520,6 +1648,8 @@ class Config:
                 'startup_stagger_seconds': self.ws_config.startup_stagger_seconds,
                 'fanstudio_api_key': getattr(self.ws_config, 'fanstudio_api_key', '') or '',
                 'whews_token': getattr(self.ws_config, 'whews_token', '') or '',
+                'whews_cea_app_id': getattr(self.ws_config, 'whews_cea_app_id', '') or '',
+                'whews_cea_app_secret': getattr(self.ws_config, 'whews_cea_app_secret', '') or '',
                 'eqsc_login_token': getattr(self.ws_config, 'eqsc_login_token', '') or '',
                 'whews_host': normalize_whews_host(
                     getattr(self.ws_config, 'whews_host', WHEWS_HOST_PRIMARY)
@@ -1675,11 +1805,25 @@ class Config:
         for url in list(self.enabled_sources.keys()):
             if url in allowed_logical or is_jian_logical_key(url):
                 continue
-            if self._is_websocket_url(url) and url not in allowed_ws:
+            if self._is_websocket_url(url):
+                # WeJet URL 常带 ?token=，与无 query 的白名单做路径级匹配
+                if url in allowed_ws:
+                    continue
+                if is_whews_all_url(url) or is_whews_cea_all_endpoint(url):
+                    continue
+                if is_whews_url(url) and (
+                    is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url)
+                ):
+                    # 废弃/拆分线：删除键
+                    removed.append(url)
+                    del self.enabled_sources[url]
+                    continue
+                if is_whews_url(url):
+                    continue
                 removed.append(url)
                 del self.enabled_sources[url]
                 continue
-            if (not self._is_websocket_url(url)) and url not in allowed_http:
+            if url not in allowed_http:
                 removed.append(url)
                 del self.enabled_sources[url]
         return removed
@@ -1717,25 +1861,43 @@ class Config:
                 del self.enabled_sources[key]
 
     def _disable_whews_dedicated_endpoints(self) -> None:
-        """CEA/CENC 只走 /ws/all，强制关闭专用 WebSocket 端点。"""
+        """强制关闭 cenc 与拆分 CEA 线；公开版仅允许 /ws/cea_all。"""
         for url in list(self.enabled_sources.keys()):
-            if is_whews_dedicated_endpoint(url):
+            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
                 if self.enabled_sources.get(url):
-                    logger.info(f"已关闭 WeJet 专用端点（改走 /ws/all）: {url}")
+                    logger.info(f"已关闭 WeJet 专用端点（改走聚合通道）: {url}")
                 self.enabled_sources[url] = False
         for url in all_whews_ws_urls():
-            if is_whews_dedicated_endpoint(url):
+            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
                 self.enabled_sources[url] = False
+        # 注入内置 CEA 凭证；失败时关闭全部 cea_all
+        if not whews_cea_app_configured(self.ws_config):
+            for url in list(self.enabled_sources.keys()):
+                if is_whews_cea_endpoint(url):
+                    self.enabled_sources[url] = False
+            for host in WHEWS_HOSTS:
+                self.enabled_sources[whews_ws_url("cea_all", host)] = False
+        else:
+            # CEA 固定国内站：关掉主站上的 cea_all，避免双连
+            primary_cea = whews_ws_url("cea_all", WHEWS_HOST_PRIMARY)
+            self.enabled_sources[primary_cea] = False
+            for url in list(self.enabled_sources.keys()):
+                if is_whews_cea_all_endpoint(url) and WHEWS_HOST_BACKUP not in (url or "").lower():
+                    self.enabled_sources[url] = False
 
     def get_whews_host(self) -> str:
         """返回当前无界科技主机。"""
         return normalize_whews_host(getattr(self.ws_config, "whews_host", WHEWS_HOST_PRIMARY))
 
     def get_whews_endpoint_urls(self, host: Any = None) -> Dict[str, str]:
-        """当前主机下的无界科技可连接端点（仅 /ws/all；CEA/CENC 经 all 解析）。"""
+        """WeJet 端点：/ws/all 跟所选主机；/ws/cea_all 始终走国内站。"""
         h = normalize_whews_host(host if host is not None else self.get_whews_host())
         token = (getattr(self.ws_config, "whews_token", "") or "").strip()
-        return {"all": whews_ws_url("all", h, token=token)}
+        urls = {"all": whews_ws_url("all", h, token=token)}
+        if whews_cea_app_configured(self.ws_config):
+            # CEA 仅国内站提供；与主站/国内站选择无关
+            urls["cea_all"] = whews_ws_url("cea_all", WHEWS_HOST_BACKUP, token=token)
+        return urls
 
     def get_active_data_provider(self) -> str:
         """返回当前规范化后的数据源提供者。"""
@@ -1777,7 +1939,12 @@ class Config:
         if provider == DATA_PROVIDER_FANSTUDIO:
             return u == FANSTUDIO_ALL_URL or "fanstudio" in low
         if provider == DATA_PROVIDER_WHEWS:
-            return u == WHEWS_MASTER_KEY or is_whews_all_url(u)
+            # /ws/all 跟所选主机；/ws/cea_all 固定国内站，二者均属 WeJet
+            return (
+                u == WHEWS_MASTER_KEY
+                or is_whews_all_url(u)
+                or is_whews_cea_all_endpoint(u)
+            )
         if provider == DATA_PROVIDER_JIAN:
             return u == JIAN_MASTER_KEY or u == JIAN_PROJECT_ALL_URL or is_jian_project_url(u)
         if "fanstudio" in low or is_whews_url(u) or is_jian_project_url(u):
@@ -2017,8 +2184,6 @@ class Config:
                 deprecated_msg_keys = (
                     "ali_all_parse_geonet",
                     "ali_all_parse_ptwc",
-                    "whews_parse_cea",
-                    "whews_parse_cea_pr",
                 )
                 for key in deprecated_msg_keys:
                     if key in msg_cfg:
@@ -2143,6 +2308,7 @@ class Config:
                 if not self.message_config.validate():
                     success = False
                 enforce_weather_source_mutex(self.message_config)
+                enforce_jma_report_mutex(self.message_config, prefer="main")
                 # 迁移逻辑：当老配置仅有 fanstudio_parse_warning / fanstudio_parse_report 时，
                 # 按这两个总开关初始化各 Fan Studio 子源细粒度开关，避免升级后行为变化。
                 try:
@@ -2213,6 +2379,13 @@ class Config:
                         setattr(self.ws_config, key, value)
                 if not self.ws_config.validate():
                     success = False
+            # 公开版：CEA App 凭证始终用内置值（不对外开放设置）
+            try:
+                from utils.whews_cea_builtin import apply_builtin_whews_cea_credentials
+
+                apply_builtin_whews_cea_credentials(self.ws_config)
+            except Exception as e:
+                logger.debug(f"注入内置 CEA 凭证失败(可忽略): {e}")
             
             if 'TRANSLATION_CONFIG' in config_data:
                 raw_trans = config_data['TRANSLATION_CONFIG']
@@ -2398,12 +2571,6 @@ class Config:
             else:
                 config_data = our_config
 
-            # 写盘前剔除已删除的 WeJet CEA 配置键，避免旧 settings.json 残留
-            msg_cfg = config_data.get("MESSAGE_CONFIG")
-            if isinstance(msg_cfg, dict):
-                for dead in ("whews_parse_cea", "whews_parse_cea_pr"):
-                    msg_cfg.pop(dead, None)
-            
             if self.config_file:
                 if self._write_config_dict(config_data):
                     logger.info("配置保存成功")
@@ -2482,7 +2649,7 @@ class Config:
         # 默认数据源：仅聚合/独立源，不加入 Fan Studio 单项 wss URL（实际只连 /all）
         all_url = FANSTUDIO_ALL_URL
 
-        self.enabled_sources = {all_url: True}
+        self.enabled_sources = {all_url: False}
         # P2PQuake 仅 WSS + 启动时 HTTP 拉取，不启用 HTTP 轮询
         self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
         self.enabled_sources[FANSTUDIO_TYPHOON_HTTP] = True
@@ -2495,7 +2662,9 @@ class Config:
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
         self.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
         self.enabled_sources[AUX_SOURCES_MASTER_KEY] = True
-        self.data_provider = DATA_PROVIDER_FANSTUDIO
+        self.enabled_sources[JIAN_MASTER_KEY] = True
+        self.enabled_sources[WHEWS_MASTER_KEY] = False
+        self.data_provider = DATA_PROVIDER_JIAN
         self._ensure_jian_source_defaults()
         self._ensure_wolfx_source_defaults()
         self._ensure_whews_source_defaults()
@@ -2524,6 +2693,12 @@ class Config:
                 all_url = self.get_whews_endpoint_urls().get("all")
                 if all_url:
                     ws_urls.append(all_url)
+                cea_all = self.get_whews_endpoint_urls().get("cea_all")
+                if cea_all:
+                    # CEA App 鉴权专用合并通道（与 /ws/all 并存）
+                    self.enabled_sources[cea_all] = True
+                    if cea_all not in ws_urls:
+                        ws_urls.append(cea_all)
         elif provider == DATA_PROVIDER_JIAN:
             if any_jian_source_enabled(self):
                 ws_urls.append(JIAN_PROJECT_ALL_URL)

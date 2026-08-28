@@ -28,14 +28,14 @@ from utils import timezone_utils
 
 logger = get_logger()
 
-# WeJet 已删除 CEA / CEA-PR：收到相关 source 直接丢弃
-WHEWS_SKIP_SOURCES = frozenset({"cea", "cea-pr", "cea_pr", "cea_all"})
+# WeJet CEA 已恢复：需 WAuth + App 鉴权；不再整源丢弃
+WHEWS_SKIP_SOURCES = frozenset()
 
 
 def _is_whews_cea_source(short: str) -> bool:
-    """判断是否为已下线的 WeJet CEA / CEA-PR 源名。"""
+    """判断是否为 WeJet CEA / CEA-PR 源名。"""
     s = (short or "").strip().lower().replace("_", "-")
-    return s in WHEWS_SKIP_SOURCES or s.startswith("cea-") or s == "cea"
+    return s in ("cea", "cea-pr", "cea_pr", "cea_all") or s.startswith("cea-")
 
 # 省级地震局情报（api.beecld.com：仅北京 / 云南 / 宁夏；福建/四川/陕西/湖北已下架）
 WHEWS_PROVINCIAL_SOURCES = (
@@ -52,6 +52,9 @@ WHEWS_SOURCE_TO_INTERNAL = {
     "cwa_eew": "cwa-eew",
     "sa_eew": "sa",
     "kma_eew": "kma-eew",
+    "cea": "cea",
+    "cea-pr": "cea-pr",
+    "cea_pr": "cea-pr",
     "cenc": "cenc",
     "cwa": "cwa",
     "hko": "hko",
@@ -130,6 +133,8 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "cwa-eew": "whews_parse_cwa_eew",
     "sa": "whews_parse_sa_eew",
     "kma-eew": "whews_parse_kma_eew",
+    "cea": "whews_parse_cea",
+    "cea-pr": "whews_parse_cea_pr",
     "cenc": "whews_parse_cenc",
     "cwa": "whews_parse_cwa",
     "hko": "whews_parse_hko",
@@ -172,7 +177,7 @@ WHEWS_SOURCE_FLAG_FIELD = {
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_FLAG_FIELD[_prov] = f"whews_parse_{_prov}"
 
-WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "kma-eew"})
+WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "kma-eew", "cea", "cea-pr"})
 
 # 发震时间为 UTC+9（JST/KST）的预警源
 WHEWS_UTC9_WARNING = frozenset({"jma", "kma-eew"})
@@ -441,6 +446,11 @@ class WhewsAdapter(BaseAdapter):
                 result["affected_areas"] = areas
             if data.get("infoType"):
                 result["info_type"] = data.get("infoType")
+
+        if source_type == "cea-pr":
+            province = str(data.get("province") or "").strip()
+            if province:
+                result["province"] = province
 
         return result
 
@@ -1102,7 +1112,17 @@ class WhewsAdapter(BaseAdapter):
         if not isinstance(frame, dict):
             return None
         msg_type = normalize_whews_source(self._dict_get_ci(frame, "type") or "")
-        if msg_type in ("heartbeat", "ping", "pong"):
+        if msg_type in (
+            "heartbeat",
+            "ping",
+            "pong",
+            "hello",
+            "auth_ok",
+            "auth_fail",
+            "auth",
+            "refresh",
+            "error",
+        ):
             return None
         data_obj = self._dict_get_ci(frame, "Data", "data")
         if data_obj is None:
@@ -1111,12 +1131,10 @@ class WhewsAdapter(BaseAdapter):
         short = self._extract_source_short(frame)
         if not short and self.endpoint == "cenc":
             short = "cenc"
+        if not short and self.endpoint in ("cea", "cea-pr", "cea_pr"):
+            short = "cea-pr" if self.endpoint in ("cea-pr", "cea_pr") else "cea"
         if not short:
             logger.debug("[WHEWS] 无法识别 source，跳过")
-            return None
-
-        if _is_whews_cea_source(short) or _is_whews_cea_source(self.endpoint):
-            logger.debug(f"[WHEWS] source={short}（CEA/CEA-PR 已删除）直接丢弃")
             return None
 
         if short in WHEWS_SKIP_SOURCES or short.replace("_", "-") in WHEWS_SKIP_SOURCES:

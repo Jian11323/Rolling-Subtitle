@@ -38,6 +38,12 @@ class RegionNameFixer:
         self._grid_rows = 0
         self._grid_cols = 0
         self._grid_names: List[str] = []
+        self._grid_mode: str = "fe"  # fe=1°全球栅格；fine=局部精细栅格
+        self._grid_lat_min = 0.0
+        self._grid_lon_min = 0.0
+        self._grid_lat_step = 1.0
+        self._grid_lon_step = 1.0
+        self._grid_empty = -1
         self._loaded = False
         
         if json_file_path is None:
@@ -126,7 +132,7 @@ class RegionNameFixer:
             logger.warning("区域地名修正文件为空")
 
     def _load_grid_lookup(self, data: Dict[str, Any]) -> None:
-        """加载可选的 F-E 栅格查表数据（fe_fix_region_data.json 的 grid 字段）。"""
+        """加载可选栅格查表（fe_fix 1° 或 korea fine 局部栅格）。"""
         grid = data.get("grid")
         if not isinstance(grid, dict):
             return
@@ -134,24 +140,46 @@ class RegionNameFixer:
         names = grid.get("names")
         if not isinstance(table, list) or not table or not isinstance(names, list) or not names:
             return
-        if not isinstance(table[0], list) or not table[0]:
-            return
-        rows = len(table)
-        cols = len(table[0])
+
+        mode = str(grid.get("mode") or "").strip().lower()
+        if not mode:
+            mode = "fine" if grid.get("lat_step") is not None else "fe"
+
         try:
-            flat = array("i")
-            for row in table:
-                flat.extend(int(x) for x in row)
-            if len(flat) != rows * cols:
-                return
-            self._grid_table = flat
+            if table and isinstance(table[0], list):
+                rows = len(table)
+                cols = len(table[0])
+                flat = array("i")
+                for row in table:
+                    flat.extend(int(x) for x in row)
+                if len(flat) != rows * cols:
+                    return
+            else:
+                rows = int(grid.get("rows") or 0)
+                cols = int(grid.get("cols") or 0)
+                if rows <= 0 or cols <= 0 or len(table) != rows * cols:
+                    return
+                flat = array("i", (int(x) for x in table))
         except (TypeError, ValueError, OverflowError):
             return
+
+        self._grid_table = flat
         self._grid_rows = rows
         self._grid_cols = cols
         self._grid_names = names
+        self._grid_mode = mode if mode in ("fe", "fine") else "fe"
+        if self._grid_mode == "fine":
+            try:
+                self._grid_lat_min = float(grid["lat_min"])
+                self._grid_lon_min = float(grid["lon_min"])
+                self._grid_lat_step = float(grid.get("lat_step", 0.02))
+                self._grid_lon_step = float(grid.get("lon_step", self._grid_lat_step))
+                self._grid_empty = int(grid.get("empty", -1))
+            except (KeyError, TypeError, ValueError):
+                self._grid_table = None
+                return
         logger.info(
-            f"已加载 F-E 栅格查表: {rows}×{cols}, 地名 {len(names)} 条"
+            f"已加载区域栅格查表: mode={self._grid_mode}, {rows}×{cols}, 地名 {len(names)} 条"
         )
 
     @staticmethod
@@ -182,19 +210,26 @@ class RegionNameFixer:
         )
 
     def _lookup_by_grid(self, latitude: float, longitude: float) -> Optional[str]:
-        """按 1° F-E 栅格查表。
-
-        grid.table 存的是 1-based FE 区域号（与 feNumbers 一致）；
-        grid.names 为 0-based，names[0] 对应 FE 区域 1。
-        """
+        """栅格查表：fine 为局部精细索引（0-based，empty=-1）；fe 为 1° 全球索引。"""
         if not self._grid_table or not self._grid_names or self._grid_rows <= 0 or self._grid_cols <= 0:
             return None
+
+        if self._grid_mode == "fine":
+            row = int((latitude - self._grid_lat_min) / self._grid_lat_step)
+            col = int((longitude - self._grid_lon_min) / self._grid_lon_step)
+            if row < 0 or col < 0 or row >= self._grid_rows or col >= self._grid_cols:
+                return None
+            idx = self._grid_table[row * self._grid_cols + col]
+            if idx == self._grid_empty or idx < 0 or idx >= len(self._grid_names):
+                return None
+            return self._grid_names[idx]
+
+        # F-E：1° 栅格；table 存 1-based FE 区域号
         row = int(latitude + 90)
         col = int(longitude + 180)
         row = max(0, min(self._grid_rows - 1, row))
         col = max(0, min(self._grid_cols - 1, col))
         region_id = self._grid_table[row * self._grid_cols + col]
-        # 1-based FE 号 -> names 下标
         idx = region_id - 1
         if idx < 0 or idx >= len(self._grid_names):
             idx = len(self._grid_names) - 1
@@ -214,6 +249,21 @@ class RegionNameFixer:
         pool = leaf_hits if leaf_hits else hits
         pool.sort(key=self._bbox_area)
         return pool[0].get("name") or None
+
+    def lookup_zh_name(self, latitude: float, longitude: float) -> Optional[str]:
+        """按经纬度查中文行政区名；未命中返回 None。"""
+        if not self._loaded:
+            try:
+                self._load_json_file()
+            except Exception as e:
+                logger.error(f"加载区域地名修正文件失败: {e}")
+                return None
+        if not self.regions and not self._grid_table:
+            return None
+        name = self._lookup_by_grid(latitude, longitude)
+        if name is None:
+            name = self._lookup_by_bbox(latitude, longitude)
+        return name or None
     
     def fix_place_name(self, place_name: str, latitude: float, longitude: float) -> str:
         """
@@ -227,20 +277,15 @@ class RegionNameFixer:
         Returns:
             修正后的地名，如果无法修正则返回原始地名
         """
-        # 检查是否已加载
-        if not self._loaded:
-            try:
-                self._load_json_file()
-            except Exception as e:
-                logger.error(f"加载区域地名修正文件失败: {e}")
-                return place_name
-        
-        # 检查是否有有效数据
-        if not self.regions:  # 无区域数据则无法修正
-            return place_name
-
         # 中国境内优先使用行政区 polygon 查表（区县级精度）
         if self.source_type in ("fe-fix", "fe_fix", "fe"):
+            # 检查是否已加载
+            if not self._loaded:
+                try:
+                    self._load_json_file()
+                except Exception as e:
+                    logger.error(f"加载区域地名修正文件失败: {e}")
+                    return place_name
             china_name = lookup_china_place_name(latitude, longitude)
             if china_name:
                 if china_name != place_name:
@@ -249,11 +294,9 @@ class RegionNameFixer:
                         f"(坐标: {latitude}, {longitude})"
                     )
                 return china_name
-        
-        region_name = self._lookup_by_grid(latitude, longitude)
-        if region_name is None:
-            region_name = self._lookup_by_bbox(latitude, longitude)
-        if region_name is None:
+
+        region_name = self.lookup_zh_name(latitude, longitude)
+        if not region_name:
             return place_name
 
         if region_name != place_name:
@@ -295,7 +338,7 @@ def get_kma_region_fixer():
     global _kma_region_fixer
     if _kma_region_fixer is None:
         try:
-            _kma_region_fixer = RegionNameFixer(source_type='kma-eew')
+            _kma_region_fixer = RegionNameFixer(source_type='kma')
         except Exception as e:
             logger.error(f"初始化KMA区域地名修正器失败: {e}")
             _kma_region_fixer = None

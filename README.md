@@ -1,6 +1,6 @@
-# 地震预警及情报实况栏
+# 地震情报实况栏
 
-当前版本：**v2.8.3**
+当前版本：**v2.8.4**
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -10,7 +10,7 @@
 
 ## 简介
 
-地震预警及情报实况栏（Rolling Subtitle）是一款 Windows 桌面端滚动字幕工具：通过 WebSocket / HTTP 聚合多个数据源，在屏幕上实时展示地震预警、速报、海啸、火山及气象等信息，并可选音效 / TTS / 系统通知反馈。本项目基于 **PyQt5**开发。
+地震情报实况栏（Rolling Subtitle）是一款 Windows 桌面端滚动字幕工具：通过 WebSocket / HTTP 聚合多个数据源，在屏幕上实时展示地震预警、速报、海啸、火山及气象等信息，并可选音效 / TTS / 系统通知反馈。本项目基于 **PyQt5**开发。
 
 使用说明见 Wiki：[GitHub](https://github.com/Jian11323/Rolling-Subtitle/wiki) · [Gitee](https://gitee.com/jian0786/Rolling-Subtitle/wikis)
 
@@ -22,8 +22,8 @@
 
 ### 数据接入
 
-- **主数据源（三选一）**：Fan Studio、WeJet、Jian Project；切换主数据源源后自动清空消息缓冲并重新订阅。
-- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、OpenQuakeAPI、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。
+- **主数据源（三选一）**：Fan Studio、WeJet、Jian Project（默认）；切换主数据源后自动清空消息缓冲并重新订阅；保存后按所选主源启用连接。
+- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、OpenQuakeAPI、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。P2PQuake 地震情报（551）与主数据源 JMA 情报互斥。
 - **气象预警源（三选一）**：Fan Studio、WeJet、OpenQuakeAPI单独选用，避免同类信息重复推送。
 - **国际及地区机构速报**：支持 USGS、EMSC、HKO、GFZ、USP、CWA、KMA、BMKG、GeoNet、INGV、PTWC 等机构信息，经主聚合服务或辅助通道接入。
 

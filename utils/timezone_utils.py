@@ -55,10 +55,20 @@ def utc_to_display(utc_time_str: str) -> str:
 def jst_to_display(jst_time_str: str) -> str:
     """
     将日本时间（JST, UTC+9）字符串解析后转为显示时区，格式化为 YYYY-MM-DD HH:MM:SS。
+    支持 ISO 8601 带 +09:00（Jian /jma-eew 上游原生格式）。
     """
     try:
         if not jst_time_str:
             return ""
+        s = jst_time_str.strip()
+        # 优先：带偏移的 ISO（如 2026-08-20T08:38:21+09:00）
+        try:
+            s_iso = s.replace("Z", "+00:00").replace("z", "+00:00")
+            dt_iso = datetime.fromisoformat(s_iso)
+            if dt_iso.tzinfo is not None:
+                return dt_iso.astimezone(get_display_zone()).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
         jst = ZoneInfo("Asia/Tokyo")
         formats = [
             "%Y-%m-%d %H:%M:%S",
@@ -71,7 +81,7 @@ def jst_to_display(jst_time_str: str) -> str:
         dt = None
         for fmt in formats:
             try:
-                dt = datetime.strptime(jst_time_str.strip(), fmt)
+                dt = datetime.strptime(s, fmt)
                 break
             except ValueError:
                 continue

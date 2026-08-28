@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set
 
 from .base_adapter import BaseAdapter
@@ -22,9 +21,11 @@ logger = get_logger()
 
 # Jian 短名 → 内部 source_type
 JIAN_SOURCE_TO_INTERNAL: Dict[str, str] = {
+    "cea": "cea",
     "cwa-eew": "cwa-eew",
     "jma-eew": "jma",
     "sa": "sa",
+    "kma-eew": "kma-eew",
     "early-est": "early_est",
     "cenc": "cenc",
     "cwa": "cwa",
@@ -45,9 +46,9 @@ JIAN_SOURCE_TO_INTERNAL: Dict[str, str] = {
     "kma": "kma",
 }
 
-JIAN_WARNING_INTERNAL = frozenset({"cwa-eew", "jma", "sa", "early_est"})
-JIAN_SKIP_INTERNAL = frozenset({"cea", "cea-pr"})  # sismotide 已下线 CEA
-JIAN_UTC9_WARNING = frozenset({"jma"})
+JIAN_WARNING_INTERNAL = frozenset({"cea", "cwa-eew", "jma", "sa", "kma-eew", "early_est"})
+JIAN_SKIP_INTERNAL = frozenset()  # CEA 已恢复公开推送
+JIAN_UTC9_SOURCES = frozenset({"jma", "jma_eq"})  # JMA 预警/情报：ISO 常为 JST
 JIAN_LIST_RESPONSE_TYPES = frozenset(
     {
         "cenclist_response",
@@ -97,7 +98,13 @@ def _parse_origin_time(
     *,
     source_type: str,
 ) -> str:
-    """解析 originTime / shockTime / reportTime。"""
+    """
+    解析 originTime / shockTime / reportTime。
+
+    - 数值：Unix 毫秒/秒时间戳（绝对时刻）→ 显示时区
+    - JMA 字符串：上游原生 JST ISO（含 +09:00）→ 显示时区
+    - 其它字符串：带偏移走 ISO；否则按北京时间朴素串
+    """
     raw = data.get("originTime")
     if raw is None:
         for key in ("shockTime", "shock_time", "reportTime", "createTime"):
@@ -112,17 +119,19 @@ def _parse_origin_time(
     ):
         try:
             ms = int(raw)
-            if source_type in JIAN_UTC9_WARNING:
-                dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone(timedelta(hours=9)))
-                return timezone_utils.jst_to_display(dt.strftime("%Y-%m-%d %H:%M:%S"))
-            dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone(timedelta(hours=8)))
-            return timezone_utils.cst_to_display(dt.strftime("%Y-%m-%d %H:%M:%S"))
+            # 秒级时间戳（10 位）与毫秒统一交给 timestamp_to_display
+            return timezone_utils.timestamp_to_display(ms)
         except (ValueError, TypeError, OSError, OverflowError):
             return ""
     text = str(raw).strip()
     if not text:
         return ""
-    if source_type in JIAN_UTC9_WARNING or "+09:00" in text:
+    # 带时区偏移的 ISO（含 JMA +09:00）
+    if "T" in text and ("+" in text[10:] or text.endswith("Z") or text.endswith("z")):
+        converted = timezone_utils.flexible_time_to_display(text)
+        if converted:
+            return converted
+    if source_type in JIAN_UTC9_SOURCES or "+09:00" in text:
         return timezone_utils.jst_to_display(text)
     return timezone_utils.flexible_time_to_display(text) or timezone_utils.cst_to_display(text)
 
@@ -163,6 +172,28 @@ def _maybe_fix_place_name(
     except Exception as e:
         logger.debug(f"[Jian] 地名修正失败: {e}")
     return place_name
+
+
+def _lookup_kma_placename_zh(lat: float, lon: float) -> str:
+    """按坐标查韩国行政区中文名；失败返回空串。"""
+    if lat == 0.0 and lon == 0.0:
+        return ""
+    try:
+        from config import Config
+        from utils.place_name_utils import should_apply_place_name_fix
+
+        if not should_apply_place_name_fix(Config()):
+            return ""
+        from utils.region_name_fixer import get_kma_region_fixer
+
+        fixer = get_kma_region_fixer()
+        if not fixer or not fixer.is_supported():
+            return ""
+        name = fixer.lookup_zh_name(lat, lon)
+        return str(name).strip() if name else ""
+    except Exception as e:
+        logger.debug(f"[Jian] KMA placename_zh 查表失败: {e}")
+        return ""
 
 
 class JianProjectAdapter(BaseAdapter):
@@ -209,11 +240,27 @@ class JianProjectAdapter(BaseAdapter):
         latitude = _safe_float(data.get("latitude", 0))
         longitude = _safe_float(data.get("longitude", 0))
         depth = _safe_float(data.get("depth", 0))
-        place_name = _maybe_fix_place_name(
-            place_name, latitude, longitude, internal, is_warning=True
-        )
+
+        # KMA 预警：优先服务端 placename_zh，否则本地行政区查表 / 区域修正
+        placename_zh = ""
+        if internal == "kma-eew":
+            placename_zh = str(data.get("placename_zh") or "").strip()
+            if not placename_zh:
+                placename_zh = _lookup_kma_placename_zh(latitude, longitude)
+            if placename_zh:
+                place_name = placename_zh
+            else:
+                place_name = _maybe_fix_place_name(
+                    place_name, latitude, longitude, internal, is_warning=True
+                )
+        else:
+            place_name = _maybe_fix_place_name(
+                place_name, latitude, longitude, internal, is_warning=True
+            )
 
         intensity = data.get("intensity") or data.get("epiIntensity") or ""
+        if internal == "kma-eew" and (intensity is None or intensity == ""):
+            intensity = data.get("maxMMI")
         if isinstance(intensity, (int, float)):
             intensity = str(intensity)
 
@@ -238,14 +285,41 @@ class JianProjectAdapter(BaseAdapter):
             "raw_data": data,
             "jian": True,
         }
+        if placename_zh:
+            result["placename_zh"] = placename_zh
         if updates is not None:
             result["updates"] = updates
         if intensity:
             result["intensity"] = intensity
+        # 统一取消标志：下游按 cancel=True 撤回（兼容 isCancel）
+        if data.get("isCancel") is not None or data.get("cancel") is not None:
+            result["cancel"] = bool(data.get("isCancel") or data.get("cancel"))
+        if internal == "kma-eew":
+            info_type = str(data.get("infoTypeName") or "").strip()
+            if info_type:
+                result["info_type"] = info_type
+            if "isWarn" in data:
+                result["isWarn"] = bool(data.get("isWarn"))
+            if data.get("phase") is not None:
+                try:
+                    result["phase"] = int(data.get("phase"))
+                except (TypeError, ValueError):
+                    pass
+            if data.get("maxMMI") is not None:
+                try:
+                    result["max_mmi"] = int(data.get("maxMMI"))
+                except (TypeError, ValueError):
+                    result["max_mmi"] = data.get("maxMMI")
+            areas = data.get("maxIntensityArea")
+            if isinstance(areas, list) and areas:
+                result["affected_areas"] = [str(a).strip() for a in areas if str(a).strip()]
         if internal == "jma":
-            for key in ("infoTypeName", "isFinal", "isCancel", "isTraining", "isPLUM"):
+            for key in ("infoTypeName", "isFinal", "isCancel", "isTraining", "isPLUM", "isWarn"):
                 if key in data:
                     result[key] = data.get(key)
+            warn_area = data.get("warnArea") or data.get("wolfx_warn_areas")
+            if isinstance(warn_area, list) and warn_area:
+                result["wolfx_warn_areas"] = warn_area
         return result
 
     def _parse_report(self, data: Dict[str, Any], internal: str) -> Optional[Dict[str, Any]]:
@@ -258,9 +332,17 @@ class JianProjectAdapter(BaseAdapter):
         latitude = _safe_float(data.get("latitude", 0))
         longitude = _safe_float(data.get("longitude", 0))
         depth = _safe_float(data.get("depth", 0))
-        place_name = _maybe_fix_place_name(
-            place_name, latitude, longitude, internal, is_warning=False
-        )
+
+        # KMA 速报：保留原文地名；优先用上游 placename_zh，否则本地查表
+        placename_zh = ""
+        if internal == "kma":
+            placename_zh = str(data.get("placename_zh") or "").strip()
+            if not placename_zh:
+                placename_zh = _lookup_kma_placename_zh(latitude, longitude)
+        else:
+            place_name = _maybe_fix_place_name(
+                place_name, latitude, longitude, internal, is_warning=False
+            )
 
         event_id = str(data.get("id") or data.get("eventId") or "").strip()
         info_type = str(data.get("infoTypeName") or "").strip()
@@ -279,11 +361,16 @@ class JianProjectAdapter(BaseAdapter):
             "raw_data": data,
             "jian": True,
         }
+        if placename_zh:
+            result["placename_zh"] = placename_zh
         if info_type:
             result["info_type"] = info_type
         intensity = data.get("intensity") or data.get("maxIntensity")
         if intensity is not None and str(intensity).strip():
             result["intensity"] = str(intensity)
+        areas = data.get("intensityAreas")
+        if isinstance(areas, list) and areas:
+            result["intensity_areas"] = areas
         return result
 
     def _parse_by_internal(
