@@ -14,6 +14,14 @@
 
 使用说明见 Wiki：[GitHub](https://github.com/Jian11323/Rolling-Subtitle/wiki) · [Gitee](https://gitee.com/jian0786/Rolling-Subtitle/wikis)
 
+## 下载
+
+- 介绍页（安装包 / 便携版）：[sismotide.top/rolling-subtitle](https://sismotide.top/rolling-subtitle)
+- 安装包：https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe
+- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.8.4.zip
+- GitHub Release：[v2.8.4](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.8.4)
+- Gitee Release：[v2.8.4](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.8.4)
+
 ## 功能
 
 ### 实况信息发布

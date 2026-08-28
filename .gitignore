@@ -48,6 +48,9 @@ fe_fix.txt
 fe-fix.txt
 # SA、KMA-EEW 地名修正（不上传）
 SA、KMA-EEW-Fe Fix/
+# 韩国区域构建用 geojson（运行时用 korea_region_data.json）
+Region Fe Fix/*.geojson
+Region Fe Fix/build_korea_regions.py
 
 # 本地辅助（不上传）
 tools/
