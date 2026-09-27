@@ -28,8 +28,7 @@ from config import (
     CHANGELOG_TEXT,
     APP_DECLARATION_TEXT,
     FANSTUDIO_ALL_URL,
-    FANSTUDIO_TYPHOON_HTTP,
-    fanstudio_http_canonical_key,
+    JIAN_TYPHOON_HTTP,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
@@ -76,7 +75,7 @@ _EXPIRED_WARNING_LOG_TTL_SEC = 600
 # 切换主提供者时仍可保留的全局辅助源（与设置页「始终可用」一致）
 _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "__custom_text__",
-    "fanstudio_typhoon",
+    "jian_typhoon",
     "cenc-ir",
     "p2pquake",
     "p2pquake_ws",
@@ -94,7 +93,7 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "eqsc_emsc",
     "eqsc_typhoon",
     "eqsc_volcano",
-    # OpenQuakeAPI
+    # PancakesAPI（原 OpenQuakeAPI）
     "openquake",
     "openquake_gq",
     "openquake_nmefc",
@@ -790,13 +789,16 @@ class MainWindow(QMainWindow):
             from utils.performance_presets import _data_source_snapshot
 
             snapshot = _data_source_snapshot(self.config)
-            # 附带鉴权相关字段，令牌/Key/CEA App 变更也触发重载或热鉴权
+            # 附带鉴权相关字段，令牌/Key 变更也触发重载或热鉴权
             auth_part = (
                 (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_cea_app_id", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_cea_app_secret", "") or "").strip(),
+                (getattr(self.config.ws_config, "jian_login_token", "") or "").strip(),
+                (getattr(self.config.ws_config, "jian_refresh_token", "") or "").strip(),
+                float(getattr(self.config.ws_config, "jian_refresh_expire_at", 0) or 0),
                 tuple(sorted((self.config.http_poll_intervals or {}).items())),
             )
             full_snapshot = (snapshot, auth_part)
@@ -816,11 +818,16 @@ class MainWindow(QMainWindow):
                 def _after_ws_reload(f):
                     try:
                         f.result()
-                        fs_key = (
-                            getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
-                        ).strip()
-                        if fs_key and self.ws_manager is not None:
-                            self.ws_manager.send_fanstudio_auth(fs_key)
+                        # 仅当前主源为 Fan Studio 时热发鉴权；切到 WeJet/Jian 时勿误报「尚未连接」
+                        if (
+                            self.config.get_active_data_provider() == DATA_PROVIDER_FANSTUDIO
+                            and self.ws_manager is not None
+                        ):
+                            fs_key = (
+                                getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
+                            ).strip()
+                            if fs_key:
+                                self.ws_manager.send_fanstudio_auth(fs_key)
                         logger.info("数据源连接已按配置热重载")
                     except Exception as e_ws:
                         logger.error(f"热重载 WebSocket 连接失败: {e_ws}")
@@ -1289,18 +1296,8 @@ class MainWindow(QMainWindow):
                 
                 # 如果清理后预警缓冲区为空，根据配置切换到速报或仅自定义文本
                 if self.warning_buffer.size() == 0:
-                    if self.report_buffer.size() > 0 and not self._switching_to_report:
-                        use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
-                        enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
-                        has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
-                        if use_custom_text and enable_limited and has_non_custom:
-                            self._start_limited_report_mode(from_warning=True)
-                            self._switch_to_report_mode()
-                        elif use_custom_text:
-                            self._switch_to_custom_text_only("no_report_after_warning")
-                        else:
-                            self._switch_to_report_mode()
-                        logger.info("预警缓冲区已空（清理过期消息后），切换到速报/自定义模式")
+                    logger.info("预警缓冲区已空（清理过期消息后），切换到速报/自定义模式")
+                    self._after_warning_buffer_emptied()
                     return
                 
                 next_msg = self.warning_buffer.get_next()
@@ -1320,34 +1317,13 @@ class MainWindow(QMainWindow):
                         
                         # 如果清理后预警缓冲区为空，根据配置切换到速报或仅自定义文本
                         if self.warning_buffer.size() == 0:
-                            if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
-                                enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
-                                has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
-                                if use_custom_text and enable_limited and has_non_custom:
-                                    self._start_limited_report_mode(from_warning=True)
-                                    self._switch_to_report_mode()
-                                elif use_custom_text:
-                                    self._switch_to_custom_text_only("no_report_after_warning")
-                                else:
-                                    self._switch_to_report_mode()
+                            self._after_warning_buffer_emptied()
                             return
                         else:
                             # 如果还有有效预警，继续获取下一条
                             next_msg = self.warning_buffer.get_next()
                             if not next_msg or not self._is_warning_still_valid(next_msg):
-                                # 如果下一条也过期或不存在，根据配置切换到速报或仅自定义文本
-                                if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                    use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
-                                    enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
-                                    has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
-                                    if use_custom_text and enable_limited and has_non_custom:
-                                        self._start_limited_report_mode(from_warning=True)
-                                        self._switch_to_report_mode()
-                                    elif use_custom_text:
-                                        self._switch_to_custom_text_only("no_report_after_warning")
-                                    else:
-                                        self._switch_to_report_mode()
+                                self._after_warning_buffer_emptied()
                                 return
                     
                     # 预警消息在当前滚动完成后进入播放
@@ -1399,8 +1375,13 @@ class MainWindow(QMainWindow):
                         self._custom_text_return_at is not None and time.time() >= self._custom_text_return_at):
                     self._switch_to_custom_text_only("timeout")
                     return
-                # 检查是否有待更新的消息（当前数据源的消息收到更新）
-                if self._pending_update_message:
+                # 检查是否有待更新的消息（仅同事件更新：滚完后重显最新报，不打乱轮播）
+                # 不同事件（如另一条气象预警）只静默进缓冲，本轮滚完后按优先级插入，不连播占坑
+                if (
+                    self._pending_update_message
+                    and self._current_displaying_message
+                    and self._pending_update_message.is_same_event(self._current_displaying_message)
+                ):
                     # 使用待更新的消息（当前数据源的最新消息）
                     next_msg = self._pending_update_message
                     self._pending_update_message = None
@@ -1428,7 +1409,11 @@ class MainWindow(QMainWindow):
                     else:
                         logger.warning(f"无法在缓冲区中找到数据源【{next_msg.source}】的最新消息")
                     logger.info(f"使用待更新的数据源【{next_msg.source}】消息: {next_msg.text}")
+                    self.report_buffer.mark_source_shown(next_msg.source)
                 else:
+                    if self._pending_update_message:
+                        # 不同事件的更新：丢掉 pending，正常 dig 下一条
+                        self._pending_update_message = None
                     # 无待更新消息时：根据是否启用自定义文本模式选择下一条
                     use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
                     enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
@@ -1475,24 +1460,14 @@ class MainWindow(QMainWindow):
                         logger.warning(f"速报消息更新失败: {next_msg.source} - {next_msg.text}")
             
             # 如果当前显示的是预警，但预警缓冲区已空，根据配置切换到速报或仅自定义文本
-            if self._display_type_is_warning_or_test(self.current_display_type) and self.warning_buffer.size() == 0:  # 预警播完后若已无有效预警，立即回到速报/自定义
-                if self.report_buffer.size() > 0 and not self._switching_to_report:
-                    use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
-                    enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
-                    has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
-                    if use_custom_text and enable_limited and has_non_custom:
-                        self._start_limited_report_mode(from_warning=True)
-                        self._switch_to_report_mode()
-                    elif use_custom_text:
-                        self._switch_to_custom_text_only("no_report_after_warning")
-                    else:
-                        self._switch_to_report_mode()
-                    logger.info("预警缓冲区已空，立即切换到速报/自定义模式")
-                elif self.report_buffer.size() == 0:
-                    if getattr(self.config.message_config, 'use_custom_text', False):
-                        self._switch_to_custom_text_only("no_report_after_warning")
-                    else:
-                        logger.debug("预警和速报缓冲区都为空，保持当前显示")
+            if self._display_type_is_warning_or_test(self.current_display_type) and self.warning_buffer.size() == 0:
+                logger.info("预警缓冲区已空，立即切换到速报/自定义模式")
+                self._after_warning_buffer_emptied()
+                return
+
+            # 两侧缓冲皆空（切主源后首包全被过滤、加载文案滚完等）→ 必须回落，否则黑屏
+            if self.warning_buffer.size() == 0 and self.report_buffer.size() == 0:
+                self._ensure_nonempty_display("scroll_completed_empty")
         except Exception as e:
             logger.error(f"处理滚动完成事件失败: {e}")
     
@@ -1715,6 +1690,47 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"切换为仅显示自定义文本失败: {e}", exc_info=True)
     
+
+    def _after_warning_buffer_emptied(self) -> None:
+        """预警缓冲清空后切到速报或自定义，避免黑屏停住。"""
+        if self._switching_to_report:
+            self._switching_to_report = False
+        if self.report_buffer.size() > 0:
+            use_custom_text = getattr(self.config.message_config, 'use_custom_text', False)
+            enable_limited = getattr(self.config.message_config, 'custom_text_return_after_warning', False)
+            has_non_custom = any(m.source != '__custom_text__' for m in self.report_buffer.buffer)
+            if use_custom_text and enable_limited and has_non_custom:
+                self._start_limited_report_mode(from_warning=True)
+                self._switch_to_report_mode()
+            elif use_custom_text:
+                self._switch_to_custom_text_only("no_report_after_warning")
+            else:
+                self._switch_to_report_mode()
+            return
+        # 速报也空：必须回落，否则字幕滚出视口后只剩黑底
+        self._ensure_nonempty_display("warning_emptied_no_report")
+
+    def _ensure_nonempty_display(self, reason: str = "") -> None:
+        """预警/速报缓冲皆空时回落自定义文本或加载提示，避免黑屏。"""
+        try:
+            if self.warning_buffer.size() > 0 or self.report_buffer.size() > 0:
+                return
+            if getattr(self.config.message_config, "use_custom_text", False):
+                self._switch_to_custom_text_only(reason or "empty_buffers")
+                return
+            if self.scrolling_text is not None and hasattr(
+                self.scrolling_text, "show_loading_message"
+            ):
+                self.scrolling_text.show_loading_message()
+                self._current_displaying_message = None
+                self.current_display_type = "loading"
+                logger.info(
+                    f"缓冲为空，已回落加载提示以避免黑屏"
+                    f"{f' ({reason})' if reason else ''}"
+                )
+        except Exception as e:
+            logger.error(f"回落非空显示失败: {e}", exc_info=True)
+
     def _switch_to_report_mode(self):
         """切换到轮播模式"""
         try:
@@ -1794,6 +1810,8 @@ class MainWindow(QMainWindow):
                     self._assign_current_display_type("report")
                     self._current_displaying_message = current_msg
                     self._pending_update_message = None  # 清除待更新消息
+                    # 从预警切入速报：新开一轮并标记首条已播，避免 get_next 再播一次
+                    self.report_buffer.begin_round_with(current_msg)
                     # 显示当前正在轮播的数据
                     logger.info(f"【当前轮播】{current_msg.text} | 数据源: {current_msg.source} | 缓冲区大小: {self.report_buffer.size()}")
                     # 记录速报模式下的切屏行为（从预警或上一条速报切到当前速报）
@@ -1941,7 +1959,7 @@ class MainWindow(QMainWindow):
         sn = source_name or ""
         provider = self.config.get_active_data_provider()
 
-        # 气象预警：全局仅允许一个数据源（Fan Studio / WeJet / OpenQuakeAPI）
+        # 气象预警：全局仅允许一个数据源（Jian / Fan Studio / WeJet / PancakesAPI）
         weather_provider = weather_provider_for_parsed(parsed_data)
         if weather_provider:
             active_weather = active_weather_source(mc)
@@ -1967,12 +1985,12 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：P2PQuake 551 已启用，互斥丢弃主源 JMA 情报")
                 return False
 
-        # 主提供者门控：隐藏面板勾选残留不得继续投递/保留缓冲
-        # 台风 HTTP 虽带 fanstudio 标记，但是全局源，不随主提供者切换丢弃
+        # 台风 HTTP 为全局源，不随主提供者切换丢弃，也不走 Jian 子源门控
         is_typhoon = (
-            st == "fanstudio_typhoon"
-            or sn == "fanstudio_typhoon"
-            or source_name == "fanstudio_typhoon"
+            st == "jian_typhoon"
+            or sn == "jian_typhoon"
+            or source_name == "jian_typhoon"
+            or bool(parsed_data.get("jian_typhoon"))
         )
         # Fan Studio 专属子源：无标记时也按名称门控，防止旧缓冲窜屏
         if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and provider != DATA_PROVIDER_FANSTUDIO:
@@ -2037,7 +2055,7 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：WeJet JMA 地震情报解析已关闭")
                 return False
 
-        if parsed_data.get("jian"):
+        if parsed_data.get("jian") and not is_typhoon:
             if not any_jian_source_enabled(self.config):
                 logger.debug("已忽略消息：Jian Project 国际源均未启用")
                 return False
@@ -2045,7 +2063,7 @@ class MainWindow(QMainWindow):
                 logger.debug(f"已忽略消息：Jian Project 子源「{st}」未启用或解析已关闭")
                 return False
 
-        # 辅助源总开关（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）
+        # 辅助源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）
         from config import aux_sources_enabled
         is_aux_msg = (
             bool(parsed_data.get("eqsc"))
@@ -2115,7 +2133,7 @@ class MainWindow(QMainWindow):
             if not p2p_on:
                 logger.debug("已忽略消息：P2PQuake 总开关已关闭")
                 return False
-            if is_p2p_eq and not getattr(mc, "p2pquake_parse_551", True):
+            if is_p2p_eq and not getattr(mc, "p2pquake_parse_551", False):
                 logger.debug("已忽略消息：P2PQuake 地震情報解析已关闭")
                 return False
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
@@ -2125,7 +2143,7 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：P2PQuake 緊急地震速報解析已关闭")
                 return False
 
-        # OpenQuakeAPI 辅助源
+        # PancakesAPI 辅助源
         is_openquake = (
             bool(parsed_data.get("openquake"))
             or st.startswith("openquake")
@@ -2134,7 +2152,7 @@ class MainWindow(QMainWindow):
         )
         if is_openquake:
             if not openquake_master_enabled(es):
-                logger.debug("已忽略消息：OpenQuakeAPI 总开关已关闭")
+                logger.debug("已忽略消息：PancakesAPI 总开关已关闭")
                 return False
             oq_flag_map = {
                 "openquake_gq": "openquake_parse_gq",
@@ -2145,17 +2163,18 @@ class MainWindow(QMainWindow):
             }
             flag = oq_flag_map.get(st)
             if flag and not getattr(mc, flag, True):
-                logger.debug(f"已忽略消息：OpenQuakeAPI 子源「{st}」解析已关闭（{flag}=False）")
+                logger.debug(f"已忽略消息：PancakesAPI 子源「{st}」解析已关闭（{flag}=False）")
                 return False
 
-        fanstudio_http_map = {
-            "fanstudio_typhoon": FANSTUDIO_TYPHOON_HTTP,
+        typhoon_http_map = {
+            "jian_typhoon": JIAN_TYPHOON_HTTP,
         }
-        fs_http_url = fanstudio_http_map.get(sn) or fanstudio_http_map.get(st)
-        fs_http_key = fanstudio_http_canonical_key(fs_http_url) if fs_http_url else None
-        if fs_http_key and not es.get(fs_http_key, False):
-            logger.debug(f"已忽略消息：台风 HTTP 源「{sn or st}」已关闭")
-            return False
+        typhoon_url = typhoon_http_map.get(sn) or typhoon_http_map.get(st)
+        if is_typhoon or typhoon_url:
+            key = typhoon_url or JIAN_TYPHOON_HTTP
+            if not es.get(key, False):
+                logger.debug(f"已忽略消息：台风 HTTP 源「{sn or st}」已关闭")
+                return False
 
         return True
 
@@ -2166,20 +2185,21 @@ class MainWindow(QMainWindow):
     def _process_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
         """在主线程中处理数据源消息"""
         try:
-            # 过期预警：仅记「已解析」，不上屏
-            if isinstance(parsed_data, dict) and parsed_data.get("_ws_expired"):
+            # 过期预警 / 批量状态补记：仅记「已解析」，不上屏
+            if isinstance(parsed_data, dict) and (
+                parsed_data.get("_ws_expired") or parsed_data.get("_parse_status_only")
+            ):
                 self._mark_source_parsed(source_name, parsed_data)
                 return
+
+            # 适配器已成功解析即记入会话状态（含 initial / 首连数组）。
+            # 须在门控过滤之前，避免「解析成功却因互斥/总开关一直显示未解析」。
+            self._mark_source_parsed(source_name, parsed_data)
 
             if not self._should_process_data_source_message(source_name, parsed_data):
                 return
 
-            # 适配器已成功解析即记入会话状态（含 Fan Studio initial_all）。
-            # 与是否过期、是否入队展示无关，避免「有数据却一直显示未解析」。
-            self._mark_source_parsed(source_name, parsed_data)
-
             message_type = parsed_data.get('type', 'report')
-
             if not should_accept_message(parsed_data, self.config, message_type):
                 logger.debug(
                     f"消息被过滤: source={source_name}, type={message_type}, "
@@ -2235,9 +2255,8 @@ class MainWindow(QMainWindow):
                         )
                         self._show_cancellation_notice(notice_source, current_msg)
                         if self.warning_buffer.size() == 0:
-                            if self.report_buffer.size() > 0 and not self._switching_to_report:
-                                self._switch_to_report_mode()
-                                logger.info("取消报：预警缓冲区已空，切换到速报轮播模式")
+                            logger.info("取消报：预警缓冲区已空，切换到速报轮播模式")
+                            self._after_warning_buffer_emptied()
                         elif self.warning_buffer.size() > 0:
                             next_msg = self.warning_buffer.get_next()
                             if next_msg:
@@ -2399,11 +2418,18 @@ class MainWindow(QMainWindow):
                     or parsed_data.get('nodal_plane_1')
                 ):
                     pd_store = dict(parsed_data)
-                elif parsed_data.get("is_tsunami") and parsed_data.get("logo_url"):
-                    # 海啸图标轮播需要 logo_url
+                elif parsed_data.get("is_tsunami"):
+                    # 海啸：保留级别着色与图标，避免轮播/重绘时退回默认速报色
                     pd_store = dict(pd_store)
-                    pd_store["logo_url"] = parsed_data.get("logo_url")
                     pd_store["is_tsunami"] = True
+                    for _k in (
+                        "logo_url",
+                        "tsunami_warning_level",
+                        "tsunami_level",
+                        "tsunami_level_raw",
+                    ):
+                        if _k in parsed_data and parsed_data.get(_k) not in (None, ""):
+                            pd_store[_k] = parsed_data.get(_k)
             msg_item = MessageItem(
                 text=message,
                 color=color,
@@ -2687,13 +2713,14 @@ class MainWindow(QMainWindow):
                                                                   self._current_displaying_message.source == msg.source)
                                 
                                 if is_currently_displaying_source:
-                                    # 如果当前正在显示该数据源的消息
-                                    # 从缓冲区中获取更新后的消息（因为已经替换了）
+                                    # 仅「同事件」更新才挂 pending：滚完后重显最新报
+                                    # 不同事件（尤其气象换条）只改缓冲，等下一轮该 source 槽位再播，避免连播占坑
                                     updated_msg = self.report_buffer.find_by_source(msg.source)
-                                    if updated_msg:
-                                        # 标记为待更新，等待当前数据源轮播完成后替换
+                                    if updated_msg and self._current_displaying_message and updated_msg.is_same_event(self._current_displaying_message):
                                         self._pending_update_message = updated_msg
-                                        logger.debug(f"[{msg.source}] 等待轮播完成后更新")
+                                        logger.debug(f"[{msg.source}] 同事件更新，等待轮播完成后刷新")
+                                    elif updated_msg:
+                                        logger.debug(f"[{msg.source}] 不同事件，已静默更新缓冲区，不打断当前轮播")
                                     else:
                                         logger.warning(f"无法在缓冲区中找到更新后的消息: {msg.source}")
                                 else:
@@ -3141,8 +3168,8 @@ class MainWindow(QMainWindow):
             # Fan Studio / 同源短名：fanstudio_parse_*
             keys.append(f"fanstudio_parse_{fs_st.replace('-', '_')}")
 
-        if st == "fanstudio_typhoon" or sn_low == "fanstudio_typhoon":
-            keys.append(FANSTUDIO_TYPHOON_HTTP)
+        if st == "jian_typhoon" or sn_low == "jian_typhoon":
+            keys.append(JIAN_TYPHOON_HTTP)
 
         if st == "p2pquake" or sn_low == "p2pquake":
             keys.append("p2pquake_parse_551")

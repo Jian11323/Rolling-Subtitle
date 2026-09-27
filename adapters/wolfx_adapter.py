@@ -244,9 +244,13 @@ class WolfxAdapter(BaseAdapter):
         mag = _to_float(item.get("magnitude"), 0.0)
         lat = _to_float(item.get("latitude"), 0.0)
         lon = _to_float(item.get("longitude"), 0.0)
-        depth = _to_float(item.get("depth"), 10.0)
-        if depth <= 0:
-            depth = 10.0
+        # 上游缺失或不合法时不捏造 10km；0 保留为极浅
+        depth_raw = item.get("depth")
+        depth: Optional[float] = None
+        if depth_raw is not None and str(depth_raw).strip() != "":
+            d = _to_float(depth_raw, -1.0)
+            if d >= 0:
+                depth = d
 
         shock_raw = str(
             item.get("time_full") or item.get("time") or item.get("ReportTime") or ""
@@ -269,7 +273,6 @@ class WolfxAdapter(BaseAdapter):
             "magnitude": mag,
             "latitude": lat,
             "longitude": lon,
-            "depth": depth,
             "place_name": place_name,
             "shock_time": shock_time,
             "organization": ORG_BY_SOURCE.get(source_type, "地震信息"),
@@ -278,6 +281,8 @@ class WolfxAdapter(BaseAdapter):
             "fanstudio": False,
             "whews": False,
         }
+        if depth is not None:
+            result["depth"] = depth
 
         if source_type == "wolfx_cenc":
             itype = str(item.get("type") or "").strip().lower()
@@ -338,9 +343,11 @@ class WolfxAdapter(BaseAdapter):
         depth_raw = data.get("Depth")
         if depth_raw is None:
             depth_raw = data.get("depth")
-        depth_f = _to_float(depth_raw, 10.0) if depth_raw is not None else 10.0
-        if depth_f <= 0:
-            depth_f = 10.0
+        depth_f: Optional[float] = None
+        if depth_raw is not None and str(depth_raw).strip() != "":
+            d = _to_float(depth_raw, -1.0)
+            if d >= 0:
+                depth_f = d
 
         # JMA：发震时间 OriginTime（UTC+9）；其余子源为 UTC+8（与 Wolfx API 说明一致）→ 统一为 GUI 显示时区
         shock_time = str(
@@ -416,7 +423,7 @@ class WolfxAdapter(BaseAdapter):
             if jma_method and place_name and not place_name.startswith(f"（{jma_method}）"):
                 place_name = f"（{jma_method}）{place_name}"
             if jma_omit_depth:
-                depth_f = 0.0
+                depth_f = None
 
         result: Dict[str, Any] = {
             "type": "warning",
@@ -424,7 +431,6 @@ class WolfxAdapter(BaseAdapter):
             "magnitude": magnitude,
             "latitude": lat,
             "longitude": lon,
-            "depth": depth_f,
             "place_name": place_name,
             "shock_time": shock_time,
             "organization": ORG_BY_SOURCE.get(source_type, "地震预警"),
@@ -436,6 +442,8 @@ class WolfxAdapter(BaseAdapter):
             "fanstudio": False,
             "whews": False,
         }
+        if depth_f is not None:
+            result["depth"] = depth_f
         if jma_method:
             result["jma_method"] = jma_method
         if jma_omit_depth:

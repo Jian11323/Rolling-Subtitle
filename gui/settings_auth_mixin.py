@@ -371,3 +371,166 @@ class SettingsAuthMixin:
     def _sync_whews_cea_auth_status_label(self, force: bool = False) -> None:
         """兼容调用：刷新 CEA 鉴权状态。"""
         self._refresh_whews_cea_auth_status_label(force=force)
+
+
+    def _on_jian_auth_test_clicked(self):
+        """测试 Jian：用 lk_ 换取并保存长期 Token，或验证已保存的 rt_。"""
+        from gui.qt_light_theme import show_warning
+
+        login_token = ""
+        if hasattr(self, "jian_login_token_entry"):
+            login_token = self.jian_login_token_entry.text().strip()
+        persisted_rt = (getattr(self.config.ws_config, "jian_refresh_token", "") or "").strip()
+        if not login_token and not persisted_rt:
+            show_warning(self, "提示", "请先粘贴邮件内 lk_ 登录密钥（约 5 分钟有效）。")
+            return
+        if getattr(self, "_jian_auth_testing", False):
+            return
+
+        self._jian_auth_testing = True
+        if hasattr(self, "jian_auth_btn"):
+            self.jian_auth_btn.setEnabled(False)
+        if hasattr(self, "jian_clear_token_btn"):
+            self.jian_clear_token_btn.setEnabled(False)
+        if hasattr(self, "jian_auth_status_label"):
+            self.jian_auth_status_label.setText("正在换取 / 验证长期 Token…")
+            self._auth_set_widget_style(
+                self.jian_auth_status_label, "color: #666666; font-size: 14px;"
+            )
+
+        from utils.jian_credentials import test_jian_auth
+
+        expire_at = float(getattr(self.config.ws_config, "jian_refresh_expire_at", 0) or 0)
+
+        def _worker():
+            try:
+                ok, message, refresh, exp = test_jian_auth(
+                    login_token,
+                    persisted_refresh=persisted_rt,
+                    persisted_refresh_expire_at=expire_at,
+                )
+            except Exception as e:
+                ok, message, refresh, exp = False, f"鉴权异常: {e}", "", 0.0
+            self.jian_auth_test_finished.emit(
+                bool(ok), str(message or ""), str(refresh or ""), float(exp or 0)
+            )
+
+        threading.Thread(target=_worker, daemon=True, name="JianAuthTest").start()
+
+    def _on_jian_auth_test_finished(
+        self, ok: bool, message: str, refresh_token: str, refresh_expire_at: float
+    ):
+        """Jian 鉴权完成后：持久化 rt_，清空已用过的 lk_。"""
+        from gui.qt_light_theme import show_info, show_warning
+
+        self._jian_auth_testing = False
+        if hasattr(self, "jian_auth_btn"):
+            self.jian_auth_btn.setEnabled(True)
+        if hasattr(self, "jian_clear_token_btn"):
+            self.jian_clear_token_btn.setEnabled(True)
+        if ok:
+            rt = (refresh_token or "").strip()
+            if rt.startswith("rt_"):
+                self.config.ws_config.jian_refresh_token = rt
+                self.config.ws_config.jian_refresh_expire_at = float(refresh_expire_at or 0)
+            # lk_ 用后作废，勿再持久化
+            self.config.ws_config.jian_login_token = ""
+            if hasattr(self, "jian_login_token_entry"):
+                self.jian_login_token_entry.blockSignals(True)
+                self.jian_login_token_entry.clear()
+                self.jian_login_token_entry.blockSignals(False)
+            try:
+                self.config.save_config()
+            except Exception:
+                self._mark_settings_dirty()
+            status = message or "鉴权成功，已保存长期 Token。"
+            if hasattr(self, "jian_auth_status_label"):
+                self.jian_auth_status_label.setText(status)
+                self._auth_set_widget_style(
+                    self.jian_auth_status_label, "color: #2E7D32; font-size: 14px;"
+                )
+            show_info(self, "鉴权成功", status)
+        else:
+            if hasattr(self, "jian_auth_status_label"):
+                self.jian_auth_status_label.setText(message or "鉴权失败")
+                self._auth_set_widget_style(
+                    self.jian_auth_status_label, "color: #C62828; font-size: 14px;"
+                )
+            show_warning(self, "鉴权失败", message or "鉴权失败，请检查登录密钥。")
+        self._refresh_jian_auth_status_label(force=False)
+
+    def _on_jian_clear_tokens_clicked(self):
+        """清除本地保存的 Jian 长期 Token 与临时 lk_。"""
+        from gui.qt_light_theme import show_info
+
+        self.config.ws_config.jian_login_token = ""
+        self.config.ws_config.jian_refresh_token = ""
+        self.config.ws_config.jian_refresh_expire_at = 0.0
+        if hasattr(self, "jian_login_token_entry"):
+            self.jian_login_token_entry.clear()
+        try:
+            from utils.jian_credentials import invalidate_jian_token_cache
+
+            invalidate_jian_token_cache()
+        except Exception:
+            pass
+        try:
+            self.config.save_config()
+        except Exception:
+            self._mark_settings_dirty()
+        self._refresh_jian_auth_status_label(force=True)
+        show_info(self, "已清除", "已清除本地 Jian 长期 Token，请重新用邮件 lk_ 换票。")
+
+    def _jian_login_token_text(self) -> str:
+        """读取设置页当前填写的 Jian 登录密钥。"""
+        if hasattr(self, "jian_login_token_entry") and self.jian_login_token_entry is not None:
+            return (self.jian_login_token_entry.text() or "").strip()
+        return (getattr(self.config.ws_config, "jian_login_token", "") or "").strip()
+
+    def _set_jian_auth_status_text(self, text: str, color: str = "#888888") -> None:
+        """设置 Jian 鉴权状态行文案。"""
+        if not hasattr(self, "jian_auth_status_label") or self.jian_auth_status_label is None:
+            return
+        msg = (text or "").strip() or "请输入登录密钥"
+        self.jian_auth_status_label.setText(msg)
+        self._auth_set_widget_style(
+            self.jian_auth_status_label, f"color: {color}; font-size: 14px;"
+        )
+
+    def _refresh_jian_auth_status_label(self, force: bool = False) -> None:
+        """刷新 Jian 登录密钥下方状态行。"""
+        if not hasattr(self, "jian_auth_status_label") or self.jian_auth_status_label is None:
+            return
+        if getattr(self, "_jian_auth_testing", False) and not force:
+            self._set_jian_auth_status_text("正在换取 / 验证长期 Token…", "#666666")
+            return
+        from utils.jian_credentials import format_jian_refresh_expire
+
+        rt = (getattr(self.config.ws_config, "jian_refresh_token", "") or "").strip()
+        exp = float(getattr(self.config.ws_config, "jian_refresh_expire_at", 0) or 0)
+        key = self._jian_login_token_text()
+        if rt.startswith("rt_"):
+            date_s = format_jian_refresh_expire(exp)
+            if date_s:
+                self._set_jian_auth_status_text(
+                    f"已保存长期 Token（约有效至 {date_s}）；到期前无需再收邮件",
+                    "#2E7D32",
+                )
+            else:
+                self._set_jian_auth_status_text(
+                    "已保存长期 Token（约 180 天）；可点「连接」验证",
+                    "#2E7D32",
+                )
+            return
+        if not key:
+            self._set_jian_auth_status_text(
+                "请粘贴邮件内 lk_ 登录密钥后点「连接」", "#888888"
+            )
+            return
+        if key.startswith("lk_"):
+            self._set_jian_auth_status_text(
+                "已填写 lk_，请尽快点「连接」换取并保存长期 Token（约 5 分钟内有效）",
+                "#666666",
+            )
+            return
+        self._set_jian_auth_status_text("请填写 lk_ 开头的登录密钥", "#C62828")

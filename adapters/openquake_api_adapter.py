@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenQuakeAPI 辅助数据源适配器
-文档: https://docs.aloys23.link/docs/openquake/overview
-WSS: wss://api.aloys23.link/ws/all（聚合推送）
+PancakesAPI 辅助数据源适配器（原 OpenQuakeAPI）
+文档: https://wiki.aloys23.link/wiki/PancakesAPI/%E8%81%9A%E5%90%88
+WSS: wss://api.aloys23.link/api/v1/alert/ws/all（聚合推送）
 
 支持：
 - gq：GlobalQuake 全球地震
@@ -83,7 +83,7 @@ def _ms_to_display(ms: Any) -> str:
 
 
 class OpenQuakeApiAdapter(BaseAdapter):
-    """OpenQuakeAPI WebSocket 适配器（/ws/all 聚合）。"""
+    """PancakesAPI WebSocket 适配器（/api/v1/alert/ws/all 聚合）。"""
 
     def __init__(self, source_name: str, source_url: str):
         super().__init__(source_name, source_url)
@@ -128,10 +128,10 @@ class OpenQuakeApiAdapter(BaseAdapter):
                 return self._parse_cma(payload, data)
             return None
         except json.JSONDecodeError as e:
-            logger.debug(f"[OpenQuakeAPI] JSON 解析失败: {e}")
+            logger.debug(f"[PancakesAPI] JSON 解析失败: {e}")
             return None
         except Exception as e:
-            logger.debug(f"[OpenQuakeAPI] 解析跳过: {e}")
+            logger.debug(f"[PancakesAPI] 解析跳过: {e}")
             return None
 
     def get_message_type(self, data: Dict[str, Any]) -> str:
@@ -143,7 +143,7 @@ class OpenQuakeApiAdapter(BaseAdapter):
         """GQ 发震/事件时间 → 显示时区（originTimeIso / originTimeMs / timestampMs）。"""
         iso = payload.get("originTimeIso")
         if iso:
-            # ISO 8601（含 Z）统一走 flexible，与其它 OpenQuake 子源一致
+            # ISO 8601（含 Z）统一走 flexible，与其它 PancakesAPI 子源一致
             shock = timezone_utils.flexible_time_to_display(str(iso))
             if shock:
                 return shock

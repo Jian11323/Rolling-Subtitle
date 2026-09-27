@@ -254,15 +254,20 @@ class MessageProcessor:
                     logger.error(f"格式化预警消息时发生异常: {e}, 数据: {parsed_data}", exc_info=True)
                     return None
             elif message_type == 'report':
-                if parsed_data.get('source_type') == 'fanstudio_typhoon':
-                    return self._format_fanstudio_typhoon_message(parsed_data)
+                if parsed_data.get('source_type') in ('jian_typhoon', 'whews_typhoon'):
+                    return self._format_typhoon_live_message(parsed_data)
                 if parsed_data.get('source_type') == 'eqsc_typhoon':
                     place = parsed_data.get('place_name') or '台风情报'
                     return f"【EQSC 台风】{place}"
                 if parsed_data.get('source_type') == 'eqsc_volcano':
                     place = parsed_data.get('place_name') or '火山情报'
                     return f"【EQSC JMA 火山】{place}"
-                if parsed_data.get('source_type') == 'fssn-cmt':
+                st_cmt = str(parsed_data.get('source_type') or '')
+                if (
+                    st_cmt == 'fssn-cmt'
+                    or st_cmt.startswith('cmt_')
+                    or parsed_data.get('is_cmt')
+                ):
                     return self._format_fssn_cmt_message(parsed_data)
                 if parsed_data.get('source_type') in ('cenc-ir', 'eqsc_cenc_ir'):
                     return self._format_cenc_ir_message(parsed_data)
@@ -628,17 +633,15 @@ class MessageProcessor:
         shock_time = data.get('shock_time', '')  # 获取发震时间
         # JMA 特殊手法（PLUM/Level/IPF单点）深度不可靠时不展示
         jma_omit_depth = bool(data.get("jma_omit_depth"))
-        # 获取深度，如果为null或None，默认为10公里
-        depth_value = data.get('depth')
-        if jma_omit_depth:
-            depth = None
-        elif depth_value is None:
-            depth = 10.0
-        else:
-            depth = self._safe_float(depth_value, 10.0)
-            # 如果转换后为0，也使用默认值10（因为真实深度很少为0）
-            if depth == 0:
-                depth = 10.0
+        # 上游缺失或不合法时不捏造深度（勿默认 10km）；0 表示极浅，保留
+        depth = None
+        if not jma_omit_depth and data.get("depth") is not None:
+            try:
+                depth_v = self._safe_float(data.get("depth"), -1.0)
+                if depth_v >= 0:
+                    depth = depth_v
+            except Exception:
+                depth = None
         
         try:
             # 构建消息
@@ -745,8 +748,8 @@ class MessageProcessor:
             elif not place_name and magnitude == 0:
                 message_parts.append("发生地震")
             
-            # 添加深度信息（深度保留整数；JMA 特殊手法省略不可靠深度）
-            if depth is not None:
+            # 添加深度信息（深度保留整数；0=极浅；JMA 特殊手法省略不可靠深度）
+            if depth is not None and depth >= 0:
                 depth_int = int(round(depth, 0))
                 message_parts.append(f"，震源深度{depth_int}公里")
             self._append_epi_intensity_after_depth(message_parts, data, source_type)
@@ -834,7 +837,8 @@ class MessageProcessor:
             centroid_km = int(round(depth_km))
         np1 = data.get('nodal_plane_1') or raw.get('nodalPlane1', '')
         np2 = data.get('nodal_plane_2') or raw.get('nodalPlane2', '')
-        parts = ["【FSSN 矩心矩张量解】", time_display]
+        org = (data.get("organization") or "").strip() or "矩心矩张量解"
+        parts = [f"【{org}】", time_display]
         if place_name:
             parts.append(f"，{place_name}")
         parts.append(f"发生Mw {mww:.1f}级地震")
@@ -961,8 +965,8 @@ class MessageProcessor:
             out += "。"
         return out
 
-    def _format_fanstudio_typhoon_message(self, data: Dict[str, Any]) -> str:
-        """格式化 Fan Studio 台风数据"""
+    def _format_typhoon_live_message(self, data: Dict[str, Any]) -> str:
+        """格式化台风实况数据"""
         organization = (data.get('organization') or '台风实时与历史数据').strip()
         time_point = (data.get('Time') or data.get('shock_time') or '').strip()
         name = (data.get('Name') or data.get('place_name') or '').strip()
@@ -977,11 +981,32 @@ class MessageProcessor:
         jl = (data.get('Jl') or data.get('jl') or '').strip()
 
         header = f"【{organization}】"
-        message_body = (
-            f"{time_point}，台风“{name}”（{enname}）的中心位于{ckposition}，"
-            f"中心附近最大风力{power}级（{speed}米/秒），强度为{strong}，中心气压{pressure} hPa，"
-            f"将以{movespeed}公里/小时的速度向{movedirection}移动，{jl}。"
-        )
+        bits = []
+        if time_point:
+            bits.append(time_point)
+        title = f"台风“{name}”" if name else "台风"
+        if enname:
+            title += f"（{enname}）"
+        bits.append(f"{title}的中心位于{ckposition}" if ckposition else title)
+        if power or speed:
+            wind = f"中心附近最大风力{power}级" if power else "中心附近最大风力"
+            if speed:
+                wind += f"（{speed}米/秒）"
+            bits.append(wind)
+        if strong:
+            bits.append(f"强度为{strong}")
+        if pressure:
+            bits.append(f"中心气压{pressure} hPa")
+        if movespeed or movedirection:
+            move = "将以"
+            if movespeed:
+                move += f"{movespeed}公里/小时的速度"
+            if movedirection:
+                move += f"向{movedirection}移动" if movespeed else f"向{movedirection}方向移动"
+            bits.append(move)
+        if jl:
+            bits.append(jl)
+        message_body = "，".join(bits) + "。"
         message = f"{header}{message_body}"
         return message
 
@@ -997,7 +1022,15 @@ class MessageProcessor:
         # KMA 等：优先使用适配器写入的中文地名
         place_name = (data.get('placename_zh') or '').strip() or data.get('place_name', '')
         shock_time = data.get('shock_time', '')
-        depth = self._safe_float(data.get('depth', 0), 10.0)  # 无深度时默认为10km
+        # 上游无深度时不捏造（勿默认 10km）；0 表示极浅，保留
+        depth = None
+        if data.get('depth') is not None:
+            try:
+                depth_v = self._safe_float(data.get('depth'), -1.0)
+                if depth_v >= 0:
+                    depth = depth_v
+            except Exception:
+                depth = None
         info_type = data.get('info_type', '')  # 获取infoTypeName字段（用于CENC）
         source_type = str(data.get('source_type') or '').strip()
         
@@ -1081,6 +1114,7 @@ class MessageProcessor:
                 data.get("is_tsunami")
                 or source_type in (
                     "ntwc", "ptwc", "incois", "jma_tsunami", "tsunami",
+                    "cat_tsunami", "cwa_tsunami", "usgs_tsunami",
                     "海啸信息", "p2pquake_tsunami", "eqsc_jma_tsunami",
                     "openquake_nmefc",
                 )
@@ -1161,10 +1195,26 @@ class MessageProcessor:
                     message_parts.append(f"，{remarks}")
             if not remarks:
                 st = str(source_type or "").strip().lower()
-                # JMA / P2P：place_name 已是「级别+浪高+区域」
-                if st in ("jma_tsunami", "p2pquake_tsunami"):
-                    if place_name:
+                area = str(data.get("tsunami_area") or "").strip()
+                # JMA / P2P：WHEWS 的 place_name 已是「级别+浪高+区域」；
+                # Jian 扁平帧则 place=震源地名 + tsunami_area=预报区摘要
+                if st in ("jma_tsunami", "p2pquake_tsunami", "eqsc_jma_tsunami"):
+                    if place_name and magnitude > 0 and area:
+                        message_parts.append(f"，{place_name}发生{magnitude:.1f}级地震")
+                        if depth and depth > 0:
+                            message_parts.append(
+                                f"，震源深度{int(round(depth, 0))}公里"
+                            )
+                        message_parts.append(f"。{area}")
+                    elif place_name:
                         message_parts.append(f"，{place_name}")
+                        if area and area not in place_name:
+                            message_parts.append(f"。{area}")
+                    elif area:
+                        message_parts.append(f"，{area}")
+                    extra = self._tsunami_overseas_extra_text(data)
+                    if extra and extra not in (place_name or "") and extra not in area:
+                        message_parts.append(f"。{extra}")
                 # NMEFC：震中 + 震级/深度 + 浪高/预报区（勿把整段预报当地名套「发生地震」）
                 elif st in ("tsunami", "海啸信息"):
                     epi = (
@@ -1195,8 +1245,13 @@ class MessageProcessor:
                         message_parts.append(f"，发生{magnitude:.1f}级地震")
                 elif magnitude <= 0 and place_name:
                     message_parts.append(f"，{place_name}")
+                    if area and area not in place_name:
+                        message_parts.append(f"。{area}")
+                    extra = self._tsunami_overseas_extra_text(data)
+                    if extra and extra not in (place_name or ""):
+                        message_parts.append(f"。{extra}")
                 else:
-                    # NTWC / PTWC / INCOIS：地点 + 震级/深度 + 标题/摘要
+                    # NTWC / PTWC / INCOIS / USGS / CWA：地点 + 震级/深度 + 摘要（勿展示 WMO 产品码）
                     if place_name and magnitude > 0:
                         message_parts.append(f"，{place_name}发生{magnitude:.1f}级地震")
                         if depth and depth > 0:
@@ -1205,8 +1260,10 @@ class MessageProcessor:
                             )
                     elif place_name:
                         message_parts.append(f"，{place_name}")
+                    if area and area not in (place_name or ""):
+                        message_parts.append(f"。{area}")
                     extra = self._tsunami_overseas_extra_text(data)
-                    if extra and extra not in (place_name or ""):
+                    if extra and extra not in (place_name or "") and extra not in area:
                         message_parts.append(f"。{extra}")
             return "".join(message_parts)
 
@@ -1236,8 +1293,9 @@ class MessageProcessor:
             elif magnitude > 0:
                 message_parts.append(f" - M{magnitude:.1f}")
 
-            depth_int = int(round(depth, 0))
-            message_parts.append(f" 深度{depth_int}公里")
+            depth_int = int(round(depth, 0)) if depth is not None and depth >= 0 else None
+            if depth_int is not None:
+                message_parts.append(f" 深度{depth_int}公里")
 
             if severity:
                 message_parts.append(f" ({severity})")
@@ -1279,9 +1337,10 @@ class MessageProcessor:
         elif magnitude > 0:
             message_parts.append(f"，发生{magnitude:.1f}级地震")
         
-        # 震源深度（深度保留整数，无深度时默认为10km）
-        depth_int = int(round(depth, 0))
-        message_parts.append(f"，震源深度{depth_int}公里")
+        # 震源深度：仅上游有有效深度时展示（含 0=极浅）
+        if depth is not None and depth >= 0:
+            depth_int = int(round(depth, 0))
+            message_parts.append(f"，震源深度{depth_int}公里")
         st_rep = data.get("source_type") or ""
         self._append_epi_intensity_after_depth(message_parts, data, st_rep)
         self._append_jma_intensity_areas_detail(message_parts, data, st_rep)
@@ -1473,21 +1532,38 @@ class MessageProcessor:
             return '#01FF00'
 
     def _tsunami_overseas_extra_text(self, data: Dict[str, Any]) -> str:
-        """海外海啸字幕附加文：优先标题，其次短摘要（截断 CAP 长文）。"""
-        headline = self._translate_text_if_needed(
-            str(data.get("tsunami_headline") or data.get("headline") or "").strip()
-        )
-        if headline:
-            return headline
+        """海外/Jian 海啸字幕附加文：优先真实摘要，跳过 WMO 产品码类 headline。"""
+        def _is_product_code(text: str) -> bool:
+            s = (text or "").strip()
+            if not s:
+                return True
+            if re.fullmatch(r"\d{6,}", s):
+                return True
+            # WEAK53 / WECA42 / VTSE41 等
+            if re.fullmatch(r"[A-Z]{3,6}\d{0,4}", s, flags=re.IGNORECASE):
+                return True
+            return False
+
+        # 摘要优先（description / instruction），避免把产品码当正文
         for key in ("tsunami_description", "description", "tsunami_instruction"):
             raw = str(data.get(key) or "").strip()
-            if not raw:
+            if not raw or _is_product_code(raw):
                 continue
-            # 取首句，避免 CAP description 过长撑满滚动条
             first = re.split(r"(?<=[.!?。！？])\s+", raw, maxsplit=1)[0].strip()
             if len(first) > 160:
                 first = first[:157].rstrip() + "..."
             return self._translate_text_if_needed(first)
+
+        headline = str(data.get("tsunami_headline") or data.get("headline") or "").strip()
+        if headline and not _is_product_code(headline):
+            return self._translate_text_if_needed(headline)
+
+        title = str(data.get("tsunami_warning_title") or data.get("title") or "").strip()
+        if title and not _is_product_code(title) and "·" in title:
+            # CWA「海嘯警報 · 地点」类标题：级别段可作补充
+            left = title.split("·", 1)[0].strip()
+            if left:
+                return self._translate_text_if_needed(left)
         return ""
 
     def _get_tsunami_level_color(self, parsed_data: Dict[str, Any]) -> Optional[str]:
@@ -1537,74 +1613,56 @@ class MessageProcessor:
     
     def _get_weather_warning_color(self, parsed_data: Dict[str, Any]) -> str:
         """
-        根据气象预警类型获取对应的字体颜色
-        自动根据预警颜色（红色/橙色/黄色/蓝色/白色）返回对应的字体颜色
-        
-        Args:
-            parsed_data: 解析后的数据字典
-            
-        Returns:
-            颜色代码
+        根据气象预警等级取字体色（红/橙/黄/蓝）。
+        优先复用 geo_utils.extract_weather_level（文案 + 中央台 p00 码 + weather_level），
+        避免精简入库后仅剩 place_name/warning_type 时退回默认黄。
         """
-        # 默认颜色（当无法提取预警颜色时使用）
         DEFAULT_WEATHER_COLOR = '#FFF500'  # 黄色
-        
+        color_by_level = {
+            'red': '#FF0000',
+            'orange': '#FF8C00',
+            'yellow': '#FFFF00',
+            'blue': '#00BFFF',
+        }
         try:
-            # 从raw_data中提取headline或title
-            raw_data = parsed_data.get('raw_data', {})
-            headline = raw_data.get('headline', '') or raw_data.get('title', '')
-            
-            if not headline:
-                # 如果无法获取headline，使用默认颜色
-                logger.debug("无法获取headline，使用默认气象预警颜色")
-                return DEFAULT_WEATHER_COLOR
-            
-            # 提取预警颜色
-            # 例如："广东省阳江市发布暴雨橙色预警信号" -> "橙色"
-            pattern = r'发布(.+?)(红色|橙色|黄色|蓝色|白色)预警'
-            match = re.search(pattern, headline)
-            
-            if match:
-                warning_color = match.group(2)  # 预警颜色，如"橙色"
-                
-                # 根据预警颜色返回对应的字体颜色
-                color_map = {
-                    '红色': '#FF0000',  # 红色
-                    '橙色': '#FF8C00',  # 橙色（深橙色）
-                    '黄色': '#FFFF00',  # 黄色
-                    '蓝色': '#00BFFF',  # 蓝色（深蓝色）
-                    '白色': '#FFFFFF',  # 白色
+            from utils.geo_utils import extract_weather_level
+
+            level = extract_weather_level(parsed_data or {})
+            if level in color_by_level:
+                color = color_by_level[level]
+                logger.info(f"气象预警颜色: level={level} -> {color}")
+                return color
+
+            # 兼容旧路径：仅 raw_data 文案能匹配时
+            raw_data = parsed_data.get('raw_data', {}) if isinstance(parsed_data, dict) else {}
+            if not isinstance(raw_data, dict):
+                raw_data = {}
+            for text in (
+                raw_data.get('headline'),
+                raw_data.get('title'),
+                raw_data.get('description'),
+                (parsed_data or {}).get('place_name'),
+                (parsed_data or {}).get('title'),
+            ):
+                if not text:
+                    continue
+                match = re.search(r'(红色|橙色|黄色|蓝色|白色)预警', str(text))
+                if not match:
+                    continue
+                cn_map = {
+                    '红色': '#FF0000',
+                    '橙色': '#FF8C00',
+                    '黄色': '#FFFF00',
+                    '蓝色': '#00BFFF',
+                    '白色': '#FFFFFF',
                 }
-                
-                color = color_map.get(warning_color)
+                color = cn_map.get(match.group(1))
                 if color:
-                    logger.info(f"气象预警颜色: {warning_color} -> {color}")
+                    logger.info(f"气象预警颜色(文案): {match.group(1)} -> {color}")
                     return color
-            
-            # 如果无法匹配，尝试从description中提取
-            description = raw_data.get('description', '')
-            if description:
-                # 尝试从description中匹配预警颜色
-                desc_pattern = r'([^，。：:；;]+?)(红色|橙色|黄色|蓝色|白色)预警'
-                desc_match = re.search(desc_pattern, description)
-                if desc_match:
-                    warning_color = desc_match.group(2)
-                    color_map = {
-                        '红色': '#FF0000',
-                        '橙色': '#FF8C00',
-                        '黄色': '#FFFF00',
-                        '蓝色': '#00BFFF',
-                        '白色': '#FFFFFF',
-                    }
-                    color = color_map.get(warning_color)
-                    if color:
-                        logger.info(f"从description提取气象预警颜色: {warning_color} -> {color}")
-                        return color
-            
-            # 如果无法匹配，使用默认颜色
-            logger.debug(f"无法从headline或description提取预警颜色: {headline}，使用默认颜色")
+
+            logger.debug("无法提取气象预警颜色，使用默认黄色")
             return DEFAULT_WEATHER_COLOR
-            
         except Exception as e:
             logger.error(f"获取气象预警颜色失败: {e}")
             return DEFAULT_WEATHER_COLOR

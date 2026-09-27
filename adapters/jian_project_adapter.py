@@ -19,44 +19,24 @@ from utils import timezone_utils
 
 logger = get_logger()
 
-# Jian 短名 → 内部 source_type
-JIAN_SOURCE_TO_INTERNAL: Dict[str, str] = {
-    "cea": "cea",
-    "cwa-eew": "cwa-eew",
-    "jma-eew": "jma",
-    "sa": "sa",
-    "kma-eew": "kma-eew",
-    "early-est": "early_est",
-    "cenc": "cenc",
-    "cwa": "cwa",
-    "jma": "jma_eq",
-    "hko": "hko",
-    "tmd": "tmd",
-    "mmd": "mmd",
-    "bmkg": "bmkg",
-    "geonet": "geonet",
-    "usgs": "usgs",
-    "emsc": "emsc",
-    "gfz": "gfz",
-    "bcsf": "bcsf",
-    "ingv": "ingv",
-    "usp": "usp",
-    "nrcan": "nrcan",
-    "afad": "afad",
-    "kma": "kma",
+# 列表命令响应 type → API 短名（复合名无法靠 strip list 还原）
+_LIST_RESPONSE_TO_SHORT: Dict[str, str] = {
+    "jmavolcanolist_response": "jma-volcano",
+    "usgsvolcanolist_response": "usgs-volcano",
+    "weatherlist_response": "weather",
 }
 
-JIAN_WARNING_INTERNAL = frozenset({"cea", "cwa-eew", "jma", "sa", "kma-eew", "early_est"})
-JIAN_SKIP_INTERNAL = frozenset()  # CEA 已恢复公开推送
-JIAN_UTC9_SOURCES = frozenset({"jma", "jma_eq"})  # JMA 预警/情报：ISO 常为 JST
-JIAN_LIST_RESPONSE_TYPES = frozenset(
-    {
-        "cenclist_response",
-        "cwalist_response",
-        "jmalist_response",
-        "hkolist_response",
-    }
+JIAN_WARNING_INTERNAL = frozenset(
+    {"cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est"}
 )
+JIAN_TSUNAMI_INTERNAL = frozenset(
+    {"tsunami", "cwa_tsunami", "jma_tsunami", "usgs_tsunami"}
+)
+JIAN_VOLCANO_INTERNAL = frozenset({"jma_volcano", "usgs_volcano"})
+JIAN_SKIP_INTERNAL = frozenset()  # CEA 已恢复公开推送
+JIAN_UTC9_SOURCES = frozenset(
+    {"jma", "jma_eq", "jma_tsunami", "jma_volcano"}
+)  # JMA 系列：ISO/发表时刻常为 JST
 
 _SOURCE_KEY_RE = re.compile(r"^source[：:]\s*(.+)$", re.IGNORECASE)
 
@@ -74,14 +54,30 @@ def _normalize_short(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _clean_text(value: Any, *, max_len: int = 0) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+    if max_len > 0 and len(text) > max_len:
+        return text[: max_len - 3].rstrip() + "..."
+    return text
+
+
 def _resolve_internal(short: str) -> Optional[str]:
+    """短名 → 内部 source_type；以 config 映射为准。"""
     key = _normalize_short(short)
     if not key:
         return None
-    for alias in (key, key.replace("_", "-"), key.replace("-", "_")):
-        if alias in JIAN_SOURCE_TO_INTERNAL:
-            return JIAN_SOURCE_TO_INTERNAL[alias]
-    return JIAN_SOURCE_TO_INTERNAL.get(key)
+    try:
+        from config import JIAN_SHORT_TO_PARSE_FLAG, jian_short_to_internal
+
+        for alias in (key, key.replace("_", "-"), key.replace("-", "_")):
+            if alias in JIAN_SHORT_TO_PARSE_FLAG:
+                return jian_short_to_internal(alias)
+    except Exception as e:
+        logger.debug(f"[Jian] 解析短名映射失败: {e}")
+    return None
 
 
 def _get_organization_name(source_type: str) -> str:
@@ -107,7 +103,7 @@ def _parse_origin_time(
     """
     raw = data.get("originTime")
     if raw is None:
-        for key in ("shockTime", "shock_time", "reportTime", "createTime"):
+        for key in ("shockTime", "shock_time", "reportTime", "createTime", "effective"):
             val = data.get(key)
             if val is not None and str(val).strip():
                 raw = val
@@ -119,14 +115,12 @@ def _parse_origin_time(
     ):
         try:
             ms = int(raw)
-            # 秒级时间戳（10 位）与毫秒统一交给 timestamp_to_display
             return timezone_utils.timestamp_to_display(ms)
         except (ValueError, TypeError, OSError, OverflowError):
             return ""
     text = str(raw).strip()
     if not text:
         return ""
-    # 带时区偏移的 ISO（含 JMA +09:00）
     if "T" in text and ("+" in text[10:] or text.endswith("Z") or text.endswith("z")):
         converted = timezone_utils.flexible_time_to_display(text)
         if converted:
@@ -196,6 +190,92 @@ def _lookup_kma_placename_zh(lat: float, lon: float) -> str:
         return ""
 
 
+def _format_weather_display(headline: str) -> str:
+    """大陆 NMC 气象预警滚动文案；港澳单独标注。"""
+    text = (headline or "").strip()
+    if not text:
+        return ""
+    hk_markers = ("香港", "澳門", "澳门", "HKO", "Hong Kong")
+    is_hk = any(m in text for m in hk_markers)
+    m = re.match(r"^(.+?)发布(.+)$", text)
+    if m:
+        region = m.group(1).strip()
+        warning = m.group(2).strip()
+        if is_hk or any(x in region for x in ("香港", "澳门", "澳門")):
+            return f"【港澳气象预警】{region} {warning}"
+        return f"{region} {warning}"
+    if is_hk:
+        return f"【港澳气象预警】{text}"
+    return text
+
+
+def _localize_tsunami_level(level: str) -> str:
+    raw = (level or "").strip()
+    if not raw:
+        return ""
+    mapping = {
+        "信息": "信息",
+        "藍色": "蓝色",
+        "蓝色": "蓝色",
+        "黃色": "黄色",
+        "黄色": "黄色",
+        "橙色": "橙色",
+        "紅色": "红色",
+        "红色": "红色",
+        "綠色": "绿色",
+        "绿色": "绿色",
+        "Information": "信息",
+        "Tsunami Warning": "海啸警报",
+        "Warning": "警报",
+        "Advisory": "注意报",
+        "Watch": "监视",
+        "津波予報": "海啸预报",
+        "津波注意報": "海啸注意报",
+        "津波警報": "海啸警报",
+        "大津波警報": "大海啸警报",
+    }
+    return mapping.get(raw, raw)
+
+
+# 上游 orgUnit 缩写 → 字幕机构名（优先于裸缩写）
+_TSUNAMI_ORG_UNIT_NAMES: Dict[str, str] = {
+    "NTWC": "美国国家海啸预警中心 (NTWC)",
+    "PTWC": "太平洋海啸预警中心 (PTWC)",
+    "NWS": "美国国家气象局 (NWS)",
+    "気象庁": "日本气象厅海啸预警",
+    "氣象署": "台湾气象署海啸信息",
+    "中央氣象署": "台湾气象署海啸信息",
+}
+
+
+def _tsunami_organization(internal: str, org_unit: str, updates: Optional[int], level: str) -> str:
+    """海啸字幕机构标头：配置中文名 / orgUnit 映射 + 报次 + 级别。"""
+    unit = (org_unit or "").strip()
+    base = (
+        _TSUNAMI_ORG_UNIT_NAMES.get(unit)
+        or _get_organization_name(internal)
+        or unit
+        or "海啸预警"
+    )
+    if updates is not None:
+        base = f"{base} 第{updates}报".strip()
+    if level:
+        base = f"{base} {level}".strip()
+    return base
+
+
+def _is_tsunami_product_code(text: str) -> bool:
+    """判断是否为 WMO/电文产品码（如 WEAK53、VTSE41、纯数字 EventID），不宜当正文展示。"""
+    s = (text or "").strip()
+    if not s:
+        return True
+    if re.fullmatch(r"\d{6,}", s):
+        return True
+    if re.fullmatch(r"[A-Z]{3,6}\d{0,4}", s, flags=re.IGNORECASE):
+        return True
+    return False
+
+
 class JianProjectAdapter(BaseAdapter):
     """Jian Project /all 聚合通道适配器。"""
 
@@ -215,11 +295,9 @@ class JianProjectAdapter(BaseAdapter):
             cfg = Config()
             out: Set[str] = set()
             for short in JIAN_SHORT_TO_PARSE_FLAG:
-                if not jian_internal_enabled(cfg, jian_short_to_internal(short)):
-                    continue
-                adapter_internal = JIAN_SOURCE_TO_INTERNAL.get(short)
-                if adapter_internal:
-                    out.add(adapter_internal)
+                internal = jian_short_to_internal(short)
+                if jian_internal_enabled(cfg, internal):
+                    out.add(internal)
             return out
         except Exception as e:
             logger.debug(f"[Jian] 读取子源开关失败: {e}")
@@ -241,7 +319,6 @@ class JianProjectAdapter(BaseAdapter):
         longitude = _safe_float(data.get("longitude", 0))
         depth = _safe_float(data.get("depth", 0))
 
-        # KMA 预警：优先服务端 placename_zh，否则本地行政区查表 / 区域修正
         placename_zh = ""
         if internal == "kma-eew":
             placename_zh = str(data.get("placename_zh") or "").strip()
@@ -291,9 +368,12 @@ class JianProjectAdapter(BaseAdapter):
             result["updates"] = updates
         if intensity:
             result["intensity"] = intensity
-        # 统一取消标志：下游按 cancel=True 撤回（兼容 isCancel）
         if data.get("isCancel") is not None or data.get("cancel") is not None:
             result["cancel"] = bool(data.get("isCancel") or data.get("cancel"))
+        if internal == "cea-pr":
+            province = str(data.get("province") or "").strip()
+            if province:
+                result["province"] = province
         if internal == "kma-eew":
             info_type = str(data.get("infoTypeName") or "").strip()
             if info_type:
@@ -333,7 +413,6 @@ class JianProjectAdapter(BaseAdapter):
         longitude = _safe_float(data.get("longitude", 0))
         depth = _safe_float(data.get("depth", 0))
 
-        # KMA 速报：保留原文地名；优先用上游 placename_zh，否则本地查表
         placename_zh = ""
         if internal == "kma":
             placename_zh = str(data.get("placename_zh") or "").strip()
@@ -373,11 +452,164 @@ class JianProjectAdapter(BaseAdapter):
             result["intensity_areas"] = areas
         return result
 
+    def _parse_weather(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """中国气象局气象预警（Data.type 为中央台图标码 p00…）。"""
+        if not data:
+            return None
+        event_id = str(data.get("id") or data.get("eventId") or "").strip()
+        headline = _clean_text(data.get("headline") or data.get("title"))
+        title = _clean_text(data.get("title") or headline)
+        if not event_id and headline:
+            event_id = f"{headline}_{data.get('originTime') or ''}"
+        display_title = _format_weather_display(headline or title)
+        shock_time = _parse_origin_time(data, source_type="weatheralarm")
+        description = _clean_text(data.get("description"), max_len=120)
+        if not display_title and not shock_time:
+            return None
+        return {
+            "type": "weather",
+            "magnitude": 0,
+            "latitude": _safe_float(data.get("latitude", 0)),
+            "longitude": _safe_float(data.get("longitude", 0)),
+            "depth": 0,
+            "place_name": display_title or title,
+            "shock_time": shock_time,
+            "organization": _get_organization_name("weatheralarm"),
+            "title": display_title or title,
+            "description": description,
+            "warning_type": str(data.get("type") or "").strip(),
+            "event_id": event_id,
+            "source_type": "weatheralarm",
+            "raw_data": data,
+            "jian": True,
+        }
+
+    def _parse_tsunami(self, data: Dict[str, Any], internal: str) -> Optional[Dict[str, Any]]:
+        """扁平海啸帧：nmefc / cwa / jma / usgs。"""
+        if not data:
+            return None
+        shock_time = _parse_origin_time(data, source_type=internal)
+        title = _clean_text(data.get("title"))
+        level_raw = str(data.get("level") or "").strip()
+        level = _localize_tsunami_level(level_raw)
+        # 地点仅保留地理名，勿把 description/area 拼进 place（否则会被 FE 地名修正整段冲掉）
+        place = _clean_text(data.get("place") or data.get("placeName") or "")
+        if not place and title and "·" not in title and not _is_tsunami_product_code(title):
+            # CWA 标题常为「海嘯警報 · 地点」；纯地点 title 可作地名回退
+            place = title
+        elif not place and title and "·" in title:
+            place = title.split("·", 1)[-1].strip() or place
+        headline = _clean_text(data.get("headline"))
+        description = _clean_text(data.get("description"), max_len=220)
+        area = _clean_text(data.get("area"), max_len=200)
+        if not shock_time and not title and not place and not description:
+            return None
+
+        updates = data.get("number") or data.get("updates")
+        try:
+            updates_i = int(updates) if updates is not None else None
+        except (TypeError, ValueError):
+            updates_i = None
+
+        org_unit = str(data.get("orgUnit") or "").strip()
+        org = _tsunami_organization(internal, org_unit, updates_i, level)
+
+        lat = _safe_float(data.get("latitude"), 0)
+        lon = _safe_float(data.get("longitude"), 0)
+        # USGS 英文地点可做 FE 粗分区；JMA/CWA 保留官方地名
+        if place and internal == "usgs_tsunami":
+            place = _maybe_fix_place_name(place, lat, lon, internal, is_warning=False) or place
+
+        place_name = place or level or "海啸信息"
+
+        result: Dict[str, Any] = {
+            "type": "report",
+            "is_tsunami": True,
+            "source_type": internal,
+            "place_name": place_name,
+            "shock_time": shock_time,
+            "organization": org,
+            "magnitude": _safe_float(data.get("magnitude"), 0),
+            "depth": _safe_float(data.get("depth"), 0),
+            "latitude": lat,
+            "longitude": lon,
+            "event_id": str(data.get("id") or "").strip(),
+            "tsunami_level": level,
+            "tsunami_level_raw": level_raw,
+            "tsunami_warning_level": level,
+            "tsunami_headline": "" if _is_tsunami_product_code(headline) else headline,
+            "tsunami_description": description,
+            "tsunami_warning_title": title,
+            "raw_data": data,
+            "jian": True,
+        }
+        if area:
+            result["tsunami_area"] = area
+        # 产品码仅作元数据，不进字幕正文
+        if headline and _is_tsunami_product_code(headline):
+            result["tsunami_product_code"] = headline
+        html_url = str(data.get("htmlUrl") or data.get("url") or "").strip()
+        if html_url:
+            result["detail_url"] = html_url
+        if data.get("telegram"):
+            result["telegram"] = str(data.get("telegram")).strip()
+        return result
+
+    def _parse_volcano(self, data: Dict[str, Any], internal: str) -> Optional[Dict[str, Any]]:
+        """JMA / USGS 火山情报。"""
+        if not data:
+            return None
+        volcano = _clean_text(data.get("title") or data.get("volcanoName"))
+        headline = _clean_text(data.get("headline"))
+        description = _clean_text(
+            data.get("description") or data.get("observation") or headline,
+            max_len=200,
+        )
+        shock_time = _parse_origin_time(data, source_type=internal)
+        if not volcano and not headline and not description:
+            return None
+
+        alert_level = str(data.get("alertLevel") or "").strip()
+        color_code = str(data.get("colorCode") or "").strip()
+        org = _get_organization_name(internal)
+        if internal == "usgs_volcano":
+            obs = str(data.get("observatory") or "").strip()
+            if obs:
+                org = f"{org} ({obs})"
+            if color_code or alert_level:
+                org = f"{org} {color_code}/{alert_level}".strip(" /")
+
+        title = headline or (
+            f"警戒级别 {alert_level}" if alert_level else (color_code or "火山情报")
+        )
+        return {
+            "type": "volcano",
+            "source_type": internal,
+            "title": title,
+            "volcano": volcano,
+            "description": description,
+            "name": org,
+            "shock_time": shock_time,
+            "place_name": volcano or title,
+            "organization": org,
+            "event_id": str(data.get("id") or "").strip(),
+            "latitude": _safe_float(data.get("latitude"), 0),
+            "longitude": _safe_float(data.get("longitude"), 0),
+            "raw_data": data,
+            "jian": True,
+        }
+
     def _parse_by_internal(
         self, data: Dict[str, Any], internal: str
     ) -> Optional[Dict[str, Any]]:
         if internal in JIAN_SKIP_INTERNAL:
             return None
+        if internal == "weatheralarm":
+            return self._parse_weather(data)
+        if internal in JIAN_TSUNAMI_INTERNAL:
+            return self._parse_tsunami(data, internal)
+        if internal in JIAN_VOLCANO_INTERNAL:
+            return self._parse_volcano(data, internal)
         if internal in JIAN_WARNING_INTERNAL:
             return self._parse_warning(data, internal)
         return self._parse_report(data, internal)
@@ -387,22 +619,27 @@ class JianProjectAdapter(BaseAdapter):
         if short:
             return short
         msg_type = _normalize_short(frame.get("type") or "")
-        if msg_type and msg_type not in ("all", "heartbeat", "ping", "pong"):
+        if msg_type and msg_type not in ("all", "heartbeat", "ping", "pong", "error"):
             if not msg_type.endswith("_response"):
                 return msg_type
         return ""
 
+    @staticmethod
+    def _is_list_response(msg_type: str) -> bool:
+        return bool(msg_type) and msg_type.endswith("list_response")
+
+    def _short_from_list_response(self, msg_type: str) -> str:
+        if msg_type in _LIST_RESPONSE_TO_SHORT:
+            return _LIST_RESPONSE_TO_SHORT[msg_type]
+        # cenclist_response → cenc；ningxialist_response → ningxia
+        base = msg_type[: -len("_response")] if msg_type.endswith("_response") else msg_type
+        if base.endswith("list"):
+            return base[: -len("list")]
+        return base
+
     def _parse_list_response(self, frame: Dict[str, Any]) -> List[Dict[str, Any]]:
         msg_type = _normalize_short(frame.get("type") or "")
-        short = msg_type.replace("_response", "").replace("list", "")
-        if msg_type == "cenclist_response":
-            short = "cenc"
-        elif msg_type == "cwalist_response":
-            short = "cwa"
-        elif msg_type == "jmalist_response":
-            short = "jma"
-        elif msg_type == "hkolist_response":
-            short = "hko"
+        short = self._short_from_list_response(msg_type)
         internal = _resolve_internal(short)
         if not internal or internal in JIAN_SKIP_INTERNAL:
             return []
@@ -448,9 +685,9 @@ class JianProjectAdapter(BaseAdapter):
         if not isinstance(frame, dict):
             return None
         msg_type = _normalize_short(frame.get("type") or "")
-        if msg_type in ("heartbeat", "ping", "pong"):
+        if msg_type in ("heartbeat", "ping", "pong", "error"):
             return None
-        if msg_type in JIAN_LIST_RESPONSE_TYPES:
+        if self._is_list_response(msg_type):
             items = self._parse_list_response(frame)
             return items[0] if items else None
         if msg_type == "all":
@@ -480,7 +717,7 @@ class JianProjectAdapter(BaseAdapter):
                     if not isinstance(item, dict):
                         continue
                     msg_type = _normalize_short(item.get("type") or "")
-                    if msg_type in JIAN_LIST_RESPONSE_TYPES:
+                    if self._is_list_response(msg_type):
                         results.extend(self._parse_list_response(item))
                     elif msg_type == "all":
                         results.extend(self._parse_aggregate_snapshot(item))
@@ -495,7 +732,7 @@ class JianProjectAdapter(BaseAdapter):
                 msg_type = _normalize_short(data.get("type") or "")
                 if msg_type == "all":
                     return self._parse_aggregate_snapshot(data)
-                if msg_type in JIAN_LIST_RESPONSE_TYPES:
+                if self._is_list_response(msg_type):
                     return self._parse_list_response(data)
                 one = self._parse_one_frame(data)
                 return [one] if one else []
@@ -518,7 +755,7 @@ class JianProjectAdapter(BaseAdapter):
                 return all_parsed[0] if all_parsed else None
             if isinstance(data, dict):
                 msg_type = _normalize_short(data.get("type") or "")
-                if msg_type in JIAN_LIST_RESPONSE_TYPES:
+                if self._is_list_response(msg_type):
                     items = self._parse_list_response(data)
                     return items[0] if items else None
                 if msg_type == "all":

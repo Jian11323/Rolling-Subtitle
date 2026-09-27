@@ -19,8 +19,7 @@ from config import (
     Config,
     APP_VERSION,
     P2PQUAKE_HTTP_SOURCE_KEYS,
-    FANSTUDIO_HTTP_SOURCE_KEYS,
-    fanstudio_http_canonical_key,
+    JIAN_TYPHOON_HTTP_KEYS,
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     EQSC_HTTP_URL_TO_SCOPE,
@@ -37,7 +36,7 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     if not url:
         return False
     low = url.lower()
-    lookup_url = fanstudio_http_canonical_key(url) if "api.fanstudio" in low else url
+    lookup_url = url
     if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in low:
         return False
     if url == EQSC_HTTP_MASTER or url.rstrip("/") == "https://equake.top":
@@ -182,9 +181,9 @@ class HTTPPollingManager:
         if 'api.p2pquake.net' in url and 'tsunami' in url.lower():
             from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
             return P2PQuakeTsunamiAdapter('p2pquake_tsunami', url)
-        if "api.fanstudio.tech" in url and 'typhoon.php' in url:
-            from adapters.fanstudio_http_adapter import FanStudioHttpAdapter
-            return FanStudioHttpAdapter('fanstudio_typhoon', url)
+        if "typhoon.php" in (url or "").lower() and "sismotide.top" in (url or "").lower():
+            from adapters.jian_typhoon_http_adapter import JianTyphoonHttpAdapter
+            return JianTyphoonHttpAdapter('jian_typhoon', url)
         if 'api.p2pquake.net' in url:
             from adapters.p2pquake_adapter import P2PQuakeAdapter
             return P2PQuakeAdapter('p2pquake', url)
@@ -227,7 +226,7 @@ class HTTPPollingManager:
                 if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in url.lower():
                     logger.debug(f"跳过 P2PQuake HTTP 持续轮询（仅启动补拉）: {url}")
                     continue
-                if url in FANSTUDIO_HTTP_SOURCE_KEYS:
+                if url in JIAN_TYPHOON_HTTP_KEYS:
                     if is_http_source_enabled(self.config, url):
                         http_urls.append(url)
                 elif is_http_source_enabled(self.config, url):

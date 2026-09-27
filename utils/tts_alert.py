@@ -304,23 +304,22 @@ def build_report_tts_script(parsed_data: Dict[str, Any], config: Any = None) -> 
     shock_time = _format_shock_time_for_tts(str(pd.get("shock_time") or ""))
     place = _sanitize_place_name(str(pd.get("place_name") or ""))
     magnitude = _safe_float(pd.get("magnitude"), 0.0)
+    # 上游缺失或不合法时不播深度（勿默认 10km）；0 表示极浅，保留
+    depth_part = ""
     depth_value = pd.get("depth")
-    if depth_value is None:
-        depth = 10.0
-    else:
-        depth = _safe_float(depth_value, 10.0)
-        if depth == 0:
-            depth = 10.0
-    depth_int = int(round(depth, 0))
+    if depth_value is not None:
+        depth = _safe_float(depth_value, -1.0)
+        if depth >= 0:
+            depth_part = f"，震源深度{int(round(depth, 0))}公里"
 
     if place and magnitude > 0:
-        body = f"{place}发生{magnitude:.1f}级地震，震源深度{depth_int}公里"
+        body = f"{place}发生{magnitude:.1f}级地震{depth_part}"
     elif place:
-        body = f"{place}发生地震，震源深度{depth_int}公里"
+        body = f"{place}发生地震{depth_part}"
     elif magnitude > 0:
-        body = f"发生{magnitude:.1f}级地震，震源深度{depth_int}公里"
+        body = f"发生{magnitude:.1f}级地震{depth_part}"
     else:
-        body = f"发生地震，震源深度{depth_int}公里"
+        body = f"发生地震{depth_part}"
 
     if shock_time:
         return f"{org}，{shock_time}，{body}"
@@ -855,7 +854,13 @@ def _run_tts_feedback(
         if not bool(getattr(ac, "report_tts_enabled", True)):
             return
         msg_cfg = getattr(config, "message_config", None)
-        if msg_cfg is not None:
+        # 与 geo_utils.passes_magnitude_filter 一致：仅地震速报受阈值约束
+        if (
+            msg_cfg is not None
+            and not pd.get("is_tsunami")
+            and not pd.get("is_typhoon")
+            and not pd.get("jian_typhoon")
+        ):
             try:
                 min_mag = float(getattr(msg_cfg, "min_report_magnitude", 0) or 0)
             except (TypeError, ValueError):

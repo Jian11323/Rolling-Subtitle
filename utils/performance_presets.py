@@ -20,7 +20,7 @@ from config import (
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     FANSTUDIO_ALL_URL,
-    FANSTUDIO_TYPHOON_HTTP,
+    JIAN_TYPHOON_HTTP,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
@@ -132,8 +132,8 @@ def performance_mode_budget_hint(mode: str) -> str:
     cpu_pct, mem_mb = PERFORMANCE_MODE_BUDGETS.get(normalized, (3, 70))
     return f"CPU 占用不大于 {cpu_pct}%，内存占用不高于 {mem_mb}MB"
 
-# Fan Studio HTTP 辅助数据源
-TYPHOON_HTTP = FANSTUDIO_TYPHOON_HTTP
+# Jian Project 台风 HTTP
+TYPHOON_HTTP = JIAN_TYPHOON_HTTP
 
 
 def _base_enabled_sources() -> Dict[str, bool]:
@@ -208,9 +208,9 @@ def _scale_http_poll_intervals(factor: float) -> Dict[str, int]:
     return scaled
 
 
-def _jian_parse_fields(**overrides: bool) -> Dict[str, bool]:
-    """Jian Project 子源解析开关（默认全开，可用 overrides 覆盖）。"""
-    fields = {flag: True for flag in JIAN_SHORT_TO_PARSE_FLAG.values()}
+def _jian_parse_fields(default: bool = True, **overrides: bool) -> Dict[str, bool]:
+    """Jian Project 子源解析开关（默认全开，可用 overrides / default 覆盖）。"""
+    fields = {flag: bool(default) for flag in JIAN_SHORT_TO_PARSE_FLAG.values()}
     for key, value in overrides.items():
         if key in fields:
             fields[key] = bool(value)
@@ -281,6 +281,13 @@ def _message_fields_low() -> Dict[str, Any]:
         "whews_parse_ptwc": False,
         "whews_parse_incois": False,
         "whews_parse_jma_tsunami": False,
+        "whews_parse_cat_tsunami": False,
+        "whews_parse_cwa_tsunami": False,
+        "whews_parse_early_est": False,
+        "whews_parse_cmt_usgs": False,
+        "whews_parse_cmt_emsc": False,
+        "whews_parse_cmt_cenc": False,
+        "whews_parse_cmt_ingv": False,
         "whews_parse_phivolcs": False,
         "whews_parse_sgc": False,
         "whews_parse_ga": False,
@@ -308,29 +315,15 @@ def _message_fields_low() -> Dict[str, Any]:
         "p2pquake_parse_552": False,
         "p2pquake_parse_556": True,
         **_jian_parse_fields(
+            default=False,
             jian_parse_cea=True,
+            jian_parse_cea_pr=True,
             jian_parse_cwa_eew=True,
             jian_parse_jma_eew=True,
             jian_parse_sa=True,
             jian_parse_kma_eew=True,
             jian_parse_early_est=True,
             jian_parse_cenc=True,
-            jian_parse_cwa=False,
-            jian_parse_jma=False,
-            jian_parse_hko=False,
-            jian_parse_tmd=False,
-            jian_parse_mmd=False,
-            jian_parse_bmkg=False,
-            jian_parse_geonet=False,
-            jian_parse_usgs=False,
-            jian_parse_emsc=False,
-            jian_parse_gfz=False,
-            jian_parse_bcsf=False,
-            jian_parse_ingv=False,
-            jian_parse_usp=False,
-            jian_parse_nrcan=False,
-            jian_parse_afad=False,
-            jian_parse_kma=False,
         ),
     }
 
@@ -367,7 +360,7 @@ def _message_fields_high() -> Dict[str, Any]:
         "fanstudio_parse_kma": True,
         "fanstudio_parse_fssn": True,
         "fanstudio_parse_fssn_cmt": True,
-        "fanstudio_parse_weatheralarm": True,
+        "fanstudio_parse_weatheralarm": False,
         "fanstudio_parse_tsunami": True,
         "whews_parse_jma_eew": True,
         "whews_parse_cwa_eew": True,
@@ -399,11 +392,18 @@ def _message_fields_high() -> Dict[str, Any]:
         "whews_parse_ptwc": True,
         "whews_parse_incois": True,
         "whews_parse_jma_tsunami": True,
+        "whews_parse_cat_tsunami": True,
+        "whews_parse_cwa_tsunami": True,
+        "whews_parse_early_est": True,
+        "whews_parse_cmt_usgs": True,
+        "whews_parse_cmt_emsc": True,
+        "whews_parse_cmt_cenc": True,
+        "whews_parse_cmt_ingv": True,
         "whews_parse_phivolcs": True,
         "whews_parse_sgc": True,
         "whews_parse_ga": True,
         "whews_parse_cenais": True,
-        # 气象三选一：高配默认 Fan Studio，避免 apply 后被 weather mutex 改写
+        # 气象三选一：默认主源 Jian，高配保留 jian_parse_weather，避免与 Fan Studio 气象冲突
         "whews_parse_weatheralarm": False,
         "openquake_parse_cma": False,
         "whews_parse_gsras": True,
@@ -679,11 +679,18 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "whews_parse_ptwc", True),
         getattr(mc, "whews_parse_incois", True),
         getattr(mc, "whews_parse_jma_tsunami", True),
+        getattr(mc, "whews_parse_cat_tsunami", True),
+        getattr(mc, "whews_parse_cwa_tsunami", True),
+        getattr(mc, "whews_parse_early_est", True),
+        getattr(mc, "whews_parse_cmt_usgs", True),
+        getattr(mc, "whews_parse_cmt_emsc", True),
+        getattr(mc, "whews_parse_cmt_cenc", True),
+        getattr(mc, "whews_parse_cmt_ingv", True),
         getattr(mc, "whews_parse_phivolcs", True),
         getattr(mc, "whews_parse_sgc", True),
         getattr(mc, "whews_parse_ga", True),
         getattr(mc, "whews_parse_cenais", True),
-        getattr(mc, "whews_parse_weatheralarm", True),
+        getattr(mc, "whews_parse_weatheralarm", False),
         getattr(mc, "whews_parse_gsras", True),
         getattr(mc, "whews_parse_bgs", True),
         getattr(mc, "whews_parse_ipma", True),
@@ -695,13 +702,13 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "whews_parse_iag", True),
         getattr(mc, "whews_parse_igp", True),
         getattr(mc, "whews_parse_nepal", True),
-        getattr(mc, "whews_parse_typhoon", True),
+        getattr(mc, "whews_parse_typhoon", False),
         getattr(mc, "ali_all_parse_nied", True),
         getattr(mc, "ali_all_parse_early_est", True),
         getattr(mc, "ali_all_parse_jma_volcano", True),
         getattr(mc, "ali_all_parse_bmkg", True),
         getattr(mc, "ali_all_parse_cq_eew", True),
-        getattr(mc, "p2pquake_parse_551", True),
+        getattr(mc, "p2pquake_parse_551", False),
         getattr(mc, "p2pquake_parse_552", True),
         getattr(mc, "p2pquake_parse_556", True),
         *(
@@ -713,7 +720,7 @@ def _data_source_snapshot(config) -> tuple:
         tuple(config.ws_urls),
         tuple(sorted(config.enabled_sources.items())),
         (config.custom_data_source_url or "").strip(),
-        getattr(config, "data_provider", "fanstudio"),
+        getattr(config, "data_provider", "jian"),
         flags,
     )
 
@@ -815,6 +822,13 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
             "whews_parse_ptwc",
             "whews_parse_incois",
             "whews_parse_jma_tsunami",
+            "whews_parse_cat_tsunami",
+            "whews_parse_cwa_tsunami",
+            "whews_parse_early_est",
+            "whews_parse_cmt_usgs",
+            "whews_parse_cmt_emsc",
+            "whews_parse_cmt_cenc",
+            "whews_parse_cmt_ingv",
             "whews_parse_phivolcs",
             "whews_parse_sgc",
             "whews_parse_ga",
@@ -861,9 +875,19 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
     config._ensure_jian_source_defaults()
     config._ensure_wolfx_source_defaults()
 
-    from config import enforce_weather_source_mutex, enforce_jma_report_mutex
+    from config import (
+        DATA_PROVIDER_JIAN,
+        enforce_weather_source_mutex,
+        enforce_jma_report_mutex,
+        normalize_data_provider,
+    )
 
-    enforce_weather_source_mutex(config.message_config)
+    enforce_weather_source_mutex(
+        config.message_config,
+        prefer=normalize_data_provider(
+            getattr(config, "data_provider", DATA_PROVIDER_JIAN)
+        ),
+    )
     # 高配等预设可能同时打开主源 JMA 与 P2P 551：收敛为优先主源
     enforce_jma_report_mutex(config.message_config, prefer="main")
 

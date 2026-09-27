@@ -54,7 +54,7 @@ class P2PQuakeWebSocketAdapter(BaseAdapter):
                 return None  # 非 551/552 忽略
             mc = Config().message_config
             if code == 551:
-                if not getattr(mc, "p2pquake_parse_551", True):
+                if not getattr(mc, "p2pquake_parse_551", False):
                     return None  # 设置页关闭地震情報解析
                 parsed = self._eq_adapter._parse_single_item(data)
                 if parsed:

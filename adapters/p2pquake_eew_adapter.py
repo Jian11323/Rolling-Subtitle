@@ -49,8 +49,8 @@ class P2PQuakeEEWAdapter(BaseAdapter):
             latitude = self._safe_float(hypocenter.get("latitude"), 0.0)
             longitude = self._safe_float(hypocenter.get("longitude"), 0.0)
             depth_raw = self._safe_float(hypocenter.get("depth"), None)
-            # depth=-1 表示不明；0 为ごく浅い，保留 0
-            depth = 10.0 if depth_raw is None or depth_raw < 0 else depth_raw
+            # depth=-1 表示不明 → 不写字段；0 为ごく浅い，保留 0
+            depth = None if depth_raw is None or depth_raw < 0 else depth_raw
 
             origin_raw = earthquake.get("originTime") or ""
             shock_time = (
@@ -86,13 +86,14 @@ class P2PQuakeEEWAdapter(BaseAdapter):
                 "magnitude": magnitude,
                 "latitude": latitude,
                 "longitude": longitude,
-                "depth": depth,
                 "place_name": place_name or "未知地区",
                 "shock_time": shock_time or issue_time,
                 "organization": organization,
                 "event_id": event_id,
                 "raw_data": item,
             }
+            if depth is not None:
+                result["depth"] = depth
             if updates is not None and updates > 0:
                 result["updates"] = updates
             if max_intensity:

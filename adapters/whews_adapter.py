@@ -85,14 +85,21 @@ WHEWS_SOURCE_TO_INTERNAL = {
     "iag": "iag",
     "igp": "igp",
     "nepal": "nepal",
-    "typhoon": "fanstudio_typhoon",
+    "typhoon": "whews_typhoon",
     "tsunami": "tsunami",
     "ntwc": "ntwc",
     "ptwc": "ptwc",
     "incois": "incois",
+    "cat_tsunami": "cat_tsunami",
+    "cwa_tsunami": "cwa_tsunami",
     "jma_tsunami": "jma_tsunami",
     "weatheralarm": "weatheralarm",
     "va": "jma_volcano",
+    "early_est": "early_est",
+    "cmt_usgs": "cmt_usgs",
+    "cmt_emsc": "cmt_emsc",
+    "cmt_cenc": "cmt_cenc",
+    "cmt_ingv": "cmt_ingv",
 }
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_TO_INTERNAL[_prov] = _prov
@@ -165,19 +172,32 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "iag": "whews_parse_iag",
     "igp": "whews_parse_igp",
     "nepal": "whews_parse_nepal",
-    "fanstudio_typhoon": "whews_parse_typhoon",
+    "whews_typhoon": "whews_parse_typhoon",
     "tsunami": "whews_parse_tsunami",
     "ntwc": "whews_parse_ntwc",
     "ptwc": "whews_parse_ptwc",
     "incois": "whews_parse_incois",
+    "cat_tsunami": "whews_parse_cat_tsunami",
+    "cwa_tsunami": "whews_parse_cwa_tsunami",
     "jma_tsunami": "whews_parse_jma_tsunami",
     "weatheralarm": "whews_parse_weatheralarm",
     "jma_volcano": "whews_parse_jma_volcano",
+    "early_est": "whews_parse_early_est",
+    "cmt_usgs": "whews_parse_cmt_usgs",
+    "cmt_emsc": "whews_parse_cmt_emsc",
+    "cmt_cenc": "whews_parse_cmt_cenc",
+    "cmt_ingv": "whews_parse_cmt_ingv",
 }
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_FLAG_FIELD[_prov] = f"whews_parse_{_prov}"
 
-WHEWS_WARNING_INTERNAL = frozenset({"jma", "cwa-eew", "sa", "kma-eew", "cea", "cea-pr"})
+WHEWS_WARNING_INTERNAL = frozenset(
+    {"jma", "cwa-eew", "sa", "kma-eew", "cea", "cea-pr", "early_est"}
+)
+WHEWS_CMT_INTERNAL = frozenset({"cmt_usgs", "cmt_emsc", "cmt_cenc", "cmt_ingv"})
+WHEWS_FLAT_TSUNAMI_INTERNAL = frozenset(
+    {"ntwc", "ptwc", "incois", "cat_tsunami", "cwa_tsunami"}
+)
 
 # 发震时间为 UTC+9（JST/KST）的预警源
 WHEWS_UTC9_WARNING = frozenset({"jma", "kma-eew"})
@@ -384,6 +404,13 @@ class WhewsAdapter(BaseAdapter):
             )
 
         magnitude = _safe_float(data.get("magnitude", 0))
+        # Early-est 等源常用 mb / Mw，无统一 magnitude 字段
+        if magnitude <= 0:
+            for mag_key in ("mb", "mB", "Mw", "mw", "Ms", "ms", "ML", "ml"):
+                if data.get(mag_key) is not None and data.get(mag_key) != "":
+                    magnitude = _safe_float(data.get(mag_key), 0)
+                    if magnitude > 0:
+                        break
         latitude = _safe_float(data.get("latitude", 0))
         longitude = _safe_float(data.get("longitude", 0))
         depth = _safe_float(data.get("depth", 0))
@@ -835,6 +862,69 @@ class WhewsAdapter(BaseAdapter):
                 result["tsunami_remarks"] = remarks
         return result
 
+    def _parse_cmt(
+        self, data: Dict[str, Any], source_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """解析矩心矩张量解（cmt_usgs / cmt_emsc / cmt_cenc / cmt_ingv）。"""
+        if not data or not isinstance(data, dict):
+            return None
+        place_name = str(data.get("placeName") or data.get("title") or "").strip()
+        shock_time = str(data.get("shockTime") or data.get("createTime") or "").strip()
+        if not place_name and not shock_time:
+            return None
+        latitude = _safe_float(data.get("latitude", 0))
+        longitude = _safe_float(data.get("longitude", 0))
+        depth_raw = data.get("depth", "")
+        if isinstance(depth_raw, str):
+            match = re.match(r"^([\d.]+)", depth_raw.strip())
+            depth = _safe_float(match.group(1), 10.0) if match else 10.0
+        else:
+            depth = _safe_float(depth_raw, 10.0)
+        all_mag = data.get("allMagnitudes") or {}
+        magnitude = _safe_float(
+            all_mag.get("Mww")
+            or all_mag.get("Mw")
+            or all_mag.get("M")
+            or all_mag.get("mB")
+            or all_mag.get("mb")
+            or all_mag.get("Mwp")
+            or data.get("magnitude")
+            or 0
+        )
+        nodal_plane_1 = str(data.get("nodalPlane1") or data.get("np1") or "").strip()
+        nodal_plane_2 = str(data.get("nodalPlane2") or data.get("np2") or "").strip()
+        if shock_time:
+            shock_time = timezone_utils.cst_to_display(shock_time)
+        place_name = _maybe_fix_place_name(
+            place_name, latitude, longitude, source_type, is_warning=False
+        )
+        event_id = _resolve_event_id(
+            data, source_type, place_name, shock_time, latitude, longitude
+        )
+        result: Dict[str, Any] = {
+            "type": "report",
+            "is_cmt": True,
+            "source_type": source_type,
+            "place_name": place_name,
+            "shock_time": shock_time,
+            "magnitude": magnitude,
+            "latitude": latitude,
+            "longitude": longitude,
+            "depth": depth,
+            "organization": _get_organization_name(source_type),
+            "event_id": event_id,
+            "raw_data": data,
+        }
+        if nodal_plane_1:
+            result["nodal_plane_1"] = nodal_plane_1
+        if nodal_plane_2:
+            result["nodal_plane_2"] = nodal_plane_2
+        for key in ("mnn", "mee", "mdd", "mne", "mnd", "med"):
+            val = data.get(key)
+            if val is not None and (val != "" if isinstance(val, str) else True):
+                result[key] = val
+        return result
+
     def _parse_by_internal(
         self, data_obj: Dict[str, Any], internal: str
     ) -> Optional[Dict[str, Any]]:
@@ -843,12 +933,14 @@ class WhewsAdapter(BaseAdapter):
             return self._parse_weather(data_obj)
         if internal == "tsunami":
             return self._parse_tsunami(data_obj)
-        if internal in ("ntwc", "ptwc", "incois"):
+        if internal in WHEWS_FLAT_TSUNAMI_INTERNAL:
             return self._parse_overseas_tsunami(data_obj, internal)
         if internal == "jma_tsunami":
             return self._parse_jma_tsunami(data_obj)
         if internal == "jma_volcano":
             return self._parse_volcano(data_obj)
+        if internal in WHEWS_CMT_INTERNAL:
+            return self._parse_cmt(data_obj, internal)
         if internal in WHEWS_WARNING_INTERNAL:
             return self._parse_warning(data_obj, internal)
         return self._parse_report(data_obj, internal)

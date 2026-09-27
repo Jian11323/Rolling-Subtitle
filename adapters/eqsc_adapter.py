@@ -113,6 +113,17 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _optional_depth(*candidates: Any) -> Optional[float]:
+    """解析深度：上游缺失或不合法则返回 None（勿默认 10km）；0 表示极浅，保留。"""
+    for value in candidates:
+        if value is None or value == "":
+            continue
+        d = _to_float(value, -1.0)
+        if d >= 0:
+            return d
+    return None
+
+
 def _to_bool(value: Any) -> bool:
     """宽松布尔解析。"""
     if isinstance(value, bool):
@@ -461,9 +472,7 @@ class EqscAdapter(BaseAdapter):
 
         lat = _to_float(data.get("Latitude") or data.get("latitude"), 0.0)
         lon = _to_float(data.get("Longitude") or data.get("longitude"), 0.0)
-        depth = _to_float(data.get("Depth") or data.get("depth"), 10.0)
-        if depth <= 0:
-            depth = 10.0
+        depth = _optional_depth(data.get("Depth"), data.get("depth"))
 
         shock_raw = str(data.get("OriginTime") or data.get("origin_time") or "").strip()
         shock_time = timezone_utils.jst_to_display(shock_raw) if shock_raw else ""
@@ -501,7 +510,6 @@ class EqscAdapter(BaseAdapter):
             magnitude=magnitude,
             latitude=lat,
             longitude=lon,
-            depth=depth,
             place_name=place_name or "未知地区",
             shock_time=shock_time,
             event_id=event_id,
@@ -509,6 +517,8 @@ class EqscAdapter(BaseAdapter):
             cancel=_to_bool(data.get("isCancel")),
             raw_data=data,
         )
+        if depth is not None:
+            result["depth"] = depth
         if updates_i is not None:
             result["updates"] = updates_i
         if epi is not None and str(epi).strip() != "":
@@ -546,12 +556,9 @@ class EqscAdapter(BaseAdapter):
         # 坐标可能在 Coordinate 字符串中
         lat = _to_float(area.get("Latitude") or hypo.get("Latitude"), 0.0)
         lon = _to_float(area.get("Longitude") or hypo.get("Longitude"), 0.0)
-        depth = _to_float(
-            area.get("Depth") or hypo.get("Depth") or earthquake.get("Depth"),
-            10.0,
+        depth = _optional_depth(
+            area.get("Depth"), hypo.get("Depth"), earthquake.get("Depth")
         )
-        if depth <= 0:
-            depth = 10.0
         mag_raw = earthquake.get("Magnitude")
         mag_info = earthquake.get("MagnitudeInfo")
         if mag_raw is None and isinstance(mag_info, dict):
@@ -592,12 +599,13 @@ class EqscAdapter(BaseAdapter):
             magnitude=mag,
             latitude=lat,
             longitude=lon,
-            depth=depth,
             place_name=place_name or title or "未知地区",
             shock_time=shock_time,
             event_id=event_id or fp,
             raw_data=data,
         )
+        if depth is not None:
+            result["depth"] = depth
         if intensity:
             result["epiIntensity"] = intensity
             result["intensity"] = intensity
@@ -696,9 +704,7 @@ class EqscAdapter(BaseAdapter):
         mag = _to_float(item.get("magnitude"), 0.0)
         lat = _to_float(item.get("latitude"), 0.0)
         lon = _to_float(item.get("longitude"), 0.0)
-        depth = _to_float(item.get("depth"), 10.0)
-        if depth <= 0:
-            depth = 10.0
+        depth = _optional_depth(item.get("depth"))
 
         shock_raw = str(item.get("shockTime") or item.get("time") or "").strip()
         if shock_raw:
@@ -720,12 +726,13 @@ class EqscAdapter(BaseAdapter):
             magnitude=mag,
             latitude=lat,
             longitude=lon,
-            depth=depth,
             place_name=place_name or "未知地区",
             shock_time=shock_time,
             event_id=event_id,
             raw_data=item,
         )
+        if depth is not None:
+            result["depth"] = depth
 
         if source_type == "eqsc_cenc":
             itype = str(item.get("type") or "").strip().lower()
@@ -760,7 +767,7 @@ class EqscAdapter(BaseAdapter):
             mag = _to_float(event_info.get("magnitude"), 0.0)
             lat = _to_float(event_info.get("latitude"), 0.0)
             lon = _to_float(event_info.get("longitude"), 0.0)
-            depth = _to_float(event_info.get("depth"), 10.0)
+            depth = _optional_depth(event_info.get("depth"))
             shock_raw = str(event_info.get("shockTime") or "").strip()
             # 示例：20251129 06:53:28
             if re.match(r"^\d{8}\s+\d", shock_raw):
@@ -780,12 +787,13 @@ class EqscAdapter(BaseAdapter):
                 magnitude=mag,
                 latitude=lat,
                 longitude=lon,
-                depth=depth if depth > 0 else 10.0,
                 place_name=place_name or "未知地区",
                 shock_time=shock_time,
                 event_id=event_id or fp,
                 raw_data=data,
             )
+            if depth is not None:
+                result["depth"] = depth
             if max_int is not None and str(max_int).strip() != "":
                 result["max_intensity"] = max_int
                 result["maxIntensity"] = max_int
@@ -806,13 +814,13 @@ class EqscAdapter(BaseAdapter):
         place_name = str(item.get("placeName") or "").strip()
         mag = _to_float(item.get("magnitude"), 0.0)
         event_id = str(item.get("eventID") or "").strip()
+        # 列表 stub 尚无坐标/深度，等详情补全；勿捏造 10km
         result = self._base_result(
             source_type,
             type="report",
             magnitude=mag,
             latitude=0.0,
             longitude=0.0,
-            depth=10.0,
             place_name=place_name or "未知地区",
             shock_time="",
             event_id=event_id or fp,

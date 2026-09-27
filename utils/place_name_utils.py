@@ -19,6 +19,7 @@ CHINESE_SOURCE_TYPES = frozenset({
     "nmefc", "nmefc-tsunami",
     # NMEFC 海啸正文已是中文地点+预报区，勿被 FE 粗分区覆盖
     "tsunami", "海啸信息",
+    "cwa_tsunami",
     "openquake_nmefc", "openquake_nmefc_wave", "openquake_nmefc_surge", "openquake_cma",
 })
 

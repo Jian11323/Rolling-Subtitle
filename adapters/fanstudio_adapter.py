@@ -81,7 +81,7 @@ class FanStudioAdapter(BaseAdapter):
     # Fan Studio All 时按配置决定解析范围
     FANSTUDIO_WARNING_SOURCES = ['cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew']
     FANSTUDIO_REPORT_SOURCES = ['cenc', 'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan', 'cwa', 'hko',
-                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt', 'weatheralarm', 'tsunami', 'typhoon']
+                                'usgs', 'emsc', 'bcsf', 'gfz', 'usp', 'kma', 'fssn', 'fssn-cmt', 'weatheralarm', 'tsunami']
 
     # 映射 Fan Studio 子源 → Config.message_config 中的细粒度开关字段名
     FANSTUDIO_SOURCE_FLAG_FIELD = {
@@ -338,7 +338,7 @@ class FanStudioAdapter(BaseAdapter):
                         return None
                     # All 通道转发的 P2PQuake 地震情報：与消息配置开关一致
                     if source == 'p2pquake' and not getattr(
-                        config.message_config, 'p2pquake_parse_551', True
+                        config.message_config, 'p2pquake_parse_551', False
                     ):
                         logger.debug("[FanStudio] update p2pquake：地震情報解析已关闭，跳过")
                         return None
@@ -408,11 +408,9 @@ class FanStudioAdapter(BaseAdapter):
                     return None
                 result = self._parse_jma_volcano(data)
             elif source_type == 'typhoon':
-                # All 通道会推送 source=typhoon，Data 常为 list；复用 HTTP 台风解析
-                from adapters.fanstudio_http_adapter import FanStudioHttpAdapter
-                result = FanStudioHttpAdapter(
-                    'fanstudio_typhoon', self.source_url
-                )._parse_typhoon(data)
+                # Fan Studio 台风已停运，忽略 /all 内残留 typhoon 帧
+                logger.debug("[FanStudio] 已忽略停运的 typhoon 子源")
+                return None
             elif source_type == 'fssn-cmt':
                 result = self._parse_fssn_cmt(data)
             elif source_type == 'cenc-ir':

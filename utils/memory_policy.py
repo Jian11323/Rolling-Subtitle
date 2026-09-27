@@ -33,16 +33,17 @@ MEMORY_TARGET_MB: Dict[str, int] = {
 OPENGL_MEMORY_TARGET_MB = 220
 
 # 消息队列 / 滚动缓冲容量
+# 与 performance_presets 各档实际写入值保持一致
 QUEUE_BUFFER_LIMITS: Dict[str, Dict[str, int]] = {
     PERFORMANCE_MODE_LOW: {"message_queue_maxsize": 24, "message_buffer_max_size": 12},
-    PERFORMANCE_MODE_MEDIUM: {"message_queue_maxsize": 48, "message_buffer_max_size": 20},
-    PERFORMANCE_MODE_HIGH: {"message_queue_maxsize": 60, "message_buffer_max_size": 28},
+    PERFORMANCE_MODE_MEDIUM: {"message_queue_maxsize": 32, "message_buffer_max_size": 16},
+    PERFORMANCE_MODE_HIGH: {"message_queue_maxsize": 48, "message_buffer_max_size": 20},
     PERFORMANCE_MODE_EXTREME: {"message_queue_maxsize": 56, "message_buffer_max_size": 24},
 }
 
-# 纹理 / 图片缓存上限
+# 纹理 / 图片缓存上限（与 _gui_fields_* 一致）
 GUI_CACHE_LIMITS: Dict[str, Dict[str, int]] = {
-    PERFORMANCE_MODE_LOW: {"image_cache_max": 4, "text_texture_cache_max": 3},
+    PERFORMANCE_MODE_LOW: {"image_cache_max": 4, "text_texture_cache_max": 4},
     PERFORMANCE_MODE_MEDIUM: {"image_cache_max": 6, "text_texture_cache_max": 5},
     PERFORMANCE_MODE_HIGH: {"image_cache_max": 8, "text_texture_cache_max": 6},
     PERFORMANCE_MODE_EXTREME: {"image_cache_max": 12, "text_texture_cache_max": 8},
@@ -90,11 +91,16 @@ _WEATHER_STORE_KEYS = frozenset(
         "headline",
         "title",
         "place_name",
+        "description",
         "level",
         "color",
         "img",
         "image",
         "icon",
+        "warning_type",
+        "warning_level",
+        "weather_level",
+        "severity",
         "fanstudio",
         "whews",
         "eqsc",
@@ -104,7 +110,17 @@ _WEATHER_STORE_KEYS = frozenset(
 )
 
 _WEATHER_RAW_KEYS = frozenset(
-    {"img", "image", "icon", "headline", "title", "type", "level", "description"}
+    {
+        "img",
+        "image",
+        "icon",
+        "headline",
+        "title",
+        "type",
+        "level",
+        "description",
+        "severity",
+    }
 )
 
 
@@ -139,33 +155,74 @@ def should_fetch_jian_alllist(mode: Any) -> bool:
     )
 
 
+def _bulk_item_source_type(item: Dict[str, Any]) -> str:
+    return str(item.get("source_type") or item.get("type") or "default").strip().lower()
+
+
+def _order_bulk_by_fixed_stream(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    批量快照统一为「每源最新 1 条 + 固定 /all 键序」。
+
+    任意性能模式限流后都必须是该序列的前缀，禁止截尾、禁止重排，
+    避免气象预警等队首源被裁掉或顺序随模式变化。
+    """
+    latest: Dict[str, Dict[str, Any]] = {}
+    first_seen: List[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        st = _bulk_item_source_type(item)
+        if st not in latest:
+            first_seen.append(st)
+        latest[st] = item
+    if not latest:
+        return []
+
+    ordered: List[Dict[str, Any]] = []
+    seen: set = set()
+    try:
+        from gui.message_manager import SOURCE_FIXED_ORDER
+
+        for st in SOURCE_FIXED_ORDER:
+            item = latest.get(st)
+            if item is None:
+                continue
+            ordered.append(item)
+            seen.add(st)
+    except Exception:
+        pass
+    for st in first_seen:
+        if st in seen:
+            continue
+        ordered.append(latest[st])
+        seen.add(st)
+    return ordered
+
+
 def limit_bulk_parsed_messages(
     items: List[Dict[str, Any]],
     mode: Any,
 ) -> List[Dict[str, Any]]:
     """
     限制 initial_all / alllist 等批量快照入队数量。
+
+    各模式共用同一固定键序（weather → … → 台风）；差异仅在于保留长度：
     - 低配：跳过（仅等实时推送）
-    - 中配：每 source_type 保留最新 1 条
-    - 高配/极致：总量上限 28 条
+    - 中配：每源 1 条，完整有序序列
+    - 高配/极致/自定义：同一有序序列的前 28 条（只裁队尾，不改相对顺序）
     """
     if not items:
         return []
     perf = normalize_performance_mode(mode)
     if perf == PERFORMANCE_MODE_LOW:
         return []
+    ordered = _order_bulk_by_fixed_stream(items)
     if perf == PERFORMANCE_MODE_MEDIUM:
-        latest: Dict[str, Dict[str, Any]] = {}
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            st = str(item.get("source_type") or item.get("type") or "default").strip().lower()
-            latest[st] = item
-        return list(latest.values())
+        return ordered
     cap = 28
-    if len(items) <= cap:
-        return [i for i in items if isinstance(i, dict)]
-    return [i for i in items[-cap:] if isinstance(i, dict)]
+    if len(ordered) <= cap:
+        return ordered
+    return ordered[:cap]
 
 
 def slim_parsed_for_storage(

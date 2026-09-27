@@ -152,6 +152,25 @@ def _apply_bulk_dispatch_limit(items: List[Dict[str, Any]]) -> List[Dict[str, An
         logger.debug(f"批量限流失败，使用原始列表: {e}")
         return items
 
+
+def _emit_bulk_parse_status(
+    manager: "WebSocketManager",
+    all_parsed: List[Dict[str, Any]],
+    source_name: str,
+) -> None:
+    """
+    批量快照：先为「全部」成功解析项记设置页「已解析」。
+
+    性能模式限流只影响后续上屏/入队，不得把被裁掉的源永久留在「未解析」。
+    """
+    for parsed_data in all_parsed:
+        if not parsed_data:
+            continue
+        status_msg = dict(parsed_data)
+        status_msg["_parse_status_only"] = True
+        actual_source = manager._get_source_name_from_data(parsed_data, source_name)
+        manager.message_callback(actual_source, status_msg)
+
 # all_eew 聚合端：建连后查询各子源（不含 CWA；CWA 有独立 wss …/cwa_eew 端点）
 # 列表速报 query_cenceqlist / query_jmaeqlist 亦发往 all_eew（见 _wolfx_all_eew_query_commands）
 WOLFX_ALL_EEW_QUERY_COMMANDS = (
@@ -408,7 +427,7 @@ class WebSocketManager:
             adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
             adapter._manager_source_type = 'p2pquake_ws'
             return adapter
-        # OpenQuakeAPI WebSocket（/ws/all 聚合）
+        # PancakesAPI WebSocket（/api/v1/alert/ws/all 聚合）
         if 'api.aloys23.link' in url and (url.startswith('ws://') or url.startswith('wss://')):
             from adapters.openquake_api_adapter import OpenQuakeApiAdapter
             adapter = OpenQuakeApiAdapter('openquake', url)
@@ -619,12 +638,10 @@ class WebSocketManager:
             # 处理initial_all类型
             if isinstance(data, dict) and data.get('type') == 'initial_all' and data_source_type == 'all':
                 logger.info(f"[{source_name}] 收到initial_all类型消息，开始处理所有数据源")
-                all_parsed_data = _apply_bulk_dispatch_limit(
-                    await asyncio.to_thread(adapter.parse_all_sources, data)
-                )
+                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 logger.info(f"[{source_name}] initial_all解析完成，共{len(all_parsed_data)}条有效数据")
-                
-                for parsed_data in all_parsed_data:
+                _emit_bulk_parse_status(self, all_parsed_data, source_name)
+                for parsed_data in _apply_bulk_dispatch_limit(all_parsed_data):
                     if parsed_data:
                         parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -632,10 +649,9 @@ class WebSocketManager:
             # 无界科技 /ws/all 首连为 JSON 数组
             elif isinstance(data, list) and str(data_source_type).startswith("whews"):
                 logger.info(f"[{source_name}] 收到 WeJet 首连数组，共 {len(data)} 帧")
-                all_parsed_data = _apply_bulk_dispatch_limit(
-                    await asyncio.to_thread(adapter.parse_all_sources, data)
-                )
-                for parsed_data in all_parsed_data:
+                all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
+                _emit_bulk_parse_status(self, all_parsed_data, source_name)
+                for parsed_data in _apply_bulk_dispatch_limit(all_parsed_data):
                     if parsed_data:
                         parsed_data["_suppress_tts"] = True
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -646,22 +662,17 @@ class WebSocketManager:
                     msg_type = str(data.get("type", "")).strip().lower()
                 if isinstance(data, dict) and msg_type == "all":
                     logger.info(f"[{source_name}] 收到 Jian Project 聚合快照")
-                    all_parsed_data = _apply_bulk_dispatch_limit(
-                        await asyncio.to_thread(adapter.parse_all_sources, data)
-                    )
+                    all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 elif isinstance(data, list):
                     logger.info(f"[{source_name}] 收到 Jian Project 批量帧，共 {len(data)} 条")
-                    all_parsed_data = _apply_bulk_dispatch_limit(
-                        await asyncio.to_thread(adapter.parse_all_sources, data)
-                    )
+                    all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 elif isinstance(data, dict) and msg_type.endswith("_response"):
-                    all_parsed_data = _apply_bulk_dispatch_limit(
-                        await asyncio.to_thread(adapter.parse_all_sources, data)
-                    )
+                    all_parsed_data = await asyncio.to_thread(adapter.parse_all_sources, data)
                 else:
                     one = await asyncio.to_thread(adapter.parse, data)
                     all_parsed_data = [one] if one else []
-                for parsed_data in all_parsed_data:
+                _emit_bulk_parse_status(self, all_parsed_data, source_name)
+                for parsed_data in _apply_bulk_dispatch_limit(all_parsed_data):
                     if parsed_data:
                         actual_source = self._get_source_name_from_data(
                             parsed_data, source_name
@@ -714,7 +725,7 @@ class WebSocketManager:
                                 parsed_data = None
                     if not parsed_data:
                         return
-                    # Wolfx / P2PQuake / EMSC / Nowquake / EQSC / OpenQuake：用 parsed_data 的 source_type
+                    # Wolfx / P2PQuake / EMSC / Nowquake / EQSC / PancakesAPI：用 parsed_data 的 source_type
                     pt = parsed_data.get('source_type', '')
                     direct_sources = WOLFX_DIRECT_SOURCE_TYPES + (
                         'p2pquake',
@@ -945,6 +956,66 @@ class WebSocketManager:
                     await asyncio.sleep(3600)
                     continue
                 
+                if is_jian_project_url(url or ""):
+                    ws_cfg = Config().ws_config
+                    login_key = (getattr(ws_cfg, "jian_login_token", "") or "").strip()
+                    refresh_token = (getattr(ws_cfg, "jian_refresh_token", "") or "").strip()
+                    refresh_expire_at = float(
+                        getattr(ws_cfg, "jian_refresh_expire_at", 0) or 0
+                    )
+                    if not refresh_token and not login_key:
+                        logger.error(
+                            f"[{source_name}] 未配置 Jian 长期 Token，暂停连接"
+                            "（请在设置中粘贴邮件 lk_ 并点「连接」换取 180 天 Token）"
+                        )
+                        self.connection_states[url] = "unconnected"
+                        await asyncio.sleep(30)
+                        continue
+                    try:
+                        from utils.jian_credentials import (
+                            append_jian_ws_key,
+                            get_jian_access_token,
+                            peek_jian_refresh_bundle,
+                        )
+
+                        def _jian_exchange():
+                            return get_jian_access_token(
+                                login_key,
+                                persisted_refresh=refresh_token,
+                                persisted_refresh_expire_at=refresh_expire_at,
+                            )
+
+                        ok, at_token, msg = await asyncio.to_thread(_jian_exchange)
+                        if not ok or not at_token:
+                            logger.error(f"[{source_name}] Jian 换取访问令牌失败: {msg}")
+                            self.connection_states[url] = "unconnected"
+                            await asyncio.sleep(15)
+                            continue
+                        # 换票过程中可能新生成 rt_：写回配置以便重启后仍可用
+                        new_rt, new_exp = peek_jian_refresh_bundle(
+                            refresh_token or login_key
+                        )
+                        if new_rt and new_rt != refresh_token:
+                            ws_cfg.jian_refresh_token = new_rt
+                            ws_cfg.jian_refresh_expire_at = float(new_exp or 0)
+                            ws_cfg.jian_login_token = ""
+                            try:
+                                Config().save_config()
+                                logger.info(
+                                    f"[{source_name}] 已将 Jian 长期 Token 写入本地配置"
+                                )
+                            except Exception as e_save:
+                                logger.warning(
+                                    f"[{source_name}] 保存 Jian 长期 Token 失败: {e_save}"
+                                )
+                        connect_url = append_jian_ws_key(url, at_token)
+                        logger.info(f"[{source_name}] 已附带 Jian 访问令牌握手")
+                    except Exception as e:
+                        logger.error(f"[{source_name}] Jian 鉴权异常: {e}")
+                        self.connection_states[url] = "unconnected"
+                        await asyncio.sleep(15)
+                        continue
+
                 async with websockets.connect(
                     connect_url,
                     ping_interval=self.ping_interval,
@@ -1303,7 +1374,7 @@ class WebSocketManager:
                 eew_count = 0
 
                 msg_cfg = config.message_config
-                parse_551 = getattr(msg_cfg, "p2pquake_parse_551", True)
+                parse_551 = getattr(msg_cfg, "p2pquake_parse_551", False)
                 parse_552 = getattr(msg_cfg, "p2pquake_parse_552", True)
                 parse_556 = getattr(msg_cfg, "p2pquake_parse_556", True)
                 for item in data:
@@ -1415,13 +1486,7 @@ class WebSocketManager:
             await websocket.send(token)
             logger.info(f"[{source_name}] 已发送 WeJet 纯文本令牌鉴权")
             if is_whews_cea_endpoint(url or ""):
-                if whews_cea_app_configured():
-                    self._whews_cea_auth_status[url] = ("pending", "等待服务端 hello…")
-                else:
-                    self._whews_cea_auth_status[url] = (
-                        "failed",
-                        "未配置 CEA AppId/AppSecret，无法接收预警",
-                    )
+                self._whews_cea_auth_status[url] = ("ok", "无需 App 鉴权（已取消二次鉴权）")
         except Exception as e:
             logger.warning(f"[{source_name}] 发送 WeJet 令牌失败: {e}")
 
@@ -1515,14 +1580,8 @@ class WebSocketManager:
         payload = data.get("data") if isinstance(data.get("data"), dict) else {}
 
         if msg_type == "hello":
-            need_auth = bool(payload.get("needAuth", False))
-            # 非 CEA 端点且未声明 needAuth：忽略
-            if not is_whews_cea_endpoint(url or "") and not need_auth:
-                return
-            if not need_auth:
-                self._whews_cea_auth_status[url] = ("ok", "无需 App 鉴权")
-                return
-            await self._send_whews_cea_app_auth(url, source_name)
+            # 公开版已取消 CEA/CEA-PR 二次 App 鉴权；仅记录状态
+            self._whews_cea_auth_status[url] = ("ok", "无需 App 鉴权（已取消二次鉴权）")
             return
 
         if msg_type == "auth_ok":

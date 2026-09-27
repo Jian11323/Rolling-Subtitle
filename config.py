@@ -30,20 +30,15 @@ def fanstudio_http_url(path: str) -> str:
     return f"https://api.{FANSTUDIO_DOMAIN}/{path.lstrip('/')}"
 
 
-def fanstudio_http_canonical_key(url: str) -> str:
-    """返回 Fan Studio HTTP URL 查找键。"""
-    return url or ""
-
-
 FANSTUDIO_ALL_URL = fanstudio_ws_url("all")
 FANSTUDIO_ALL_URLS = (FANSTUDIO_ALL_URL,)
 
-# WeJet（WHEWS）：默认 api.beecld.com；国内站 api.2v8.cn（含 CEA，需 App 鉴权）
-WHEWS_HOST_PRIMARY = "api.beecld.com"
-WHEWS_HOST_BACKUP = "api.2v8.cn"
+# WeJet（WHEWS）：国内为主 api.2v8.cn，国外为辅 api.beecld.com（仅 WAuth；CEA 走 /ws/all，无二次 App 鉴权）
+WHEWS_HOST_PRIMARY = "api.2v8.cn"
+WHEWS_HOST_BACKUP = "api.beecld.com"
 WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
 WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主机域名
-WHEWS_CEA_APPLY_URL = "https://api.2v8.cn/apply"  # CEA App 申请页
+WHEWS_CEA_APPLY_URL = "https://api.2v8.cn/apply"  # 历史申请页（已不再需要 App 二次鉴权）
 DATA_PROVIDER_FANSTUDIO = "fanstudio"
 DATA_PROVIDER_WHEWS = "whews"
 DATA_PROVIDER_JIAN = "jian"
@@ -167,7 +162,7 @@ def whews_cea_app_configured(ws_config: Any = None) -> bool:
 
 
 def normalize_data_provider(value: Any) -> str:
-    """规范化数据源提供者取值。"""
+    """规范化数据源提供者取值；无效/空值默认 Jian Project。"""
     v = str(value or "").strip().lower()
     if v == DATA_PROVIDER_OFFICIAL:
         return DATA_PROVIDER_FANSTUDIO
@@ -175,7 +170,7 @@ def normalize_data_provider(value: Any) -> str:
         return DATA_PROVIDER_JIAN
     if v in DATA_PROVIDERS:
         return v
-    return DATA_PROVIDER_FANSTUDIO
+    return DATA_PROVIDER_JIAN
 
 
 def is_whews_all_enabled(enabled_sources: Dict[str, Any]) -> bool:
@@ -212,24 +207,27 @@ WOLFX_VIRTUAL_SOURCE_KEYS: Tuple[str, ...] = (
     WOLFX_JMA_EQLIST_URL,
 )
 WOLFX_MASTER_KEY = "wolfx://master"  # Wolfx 总开关逻辑键（全局辅助源，参考 EQSC）
-AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）
+AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）
 NOWQUAKE_CENCINT_WSS_URL = "wss://api-cencint-public.nowquake.cn/websocket"  # Nowquake CENC 烈度速报
 
-# OpenQuakeAPI（api.aloys23.link）全局辅助 WebSocket：默认连 /ws/all 聚合
-# 文档: https://docs.aloys23.link/docs/openquake/overview
+# PancakesAPI（原 OpenQuakeAPI，api.aloys23.link）全局辅助 WebSocket：/api/v1/alert/ws/all 聚合
+# 文档: https://wiki.aloys23.link/wiki/PancakesAPI/%E8%81%9A%E5%90%88
 OPENQUAKE_WS_BASE = "wss://api.aloys23.link"
-OPENQUAKE_WS_ALL_URL = f"{OPENQUAKE_WS_BASE}/ws/all"
+OPENQUAKE_WS_ALL_URL = f"{OPENQUAKE_WS_BASE}/api/v1/alert/ws/all"
+# 旧路径（配置迁移用）
+OPENQUAKE_WS_ALL_URL_LEGACY = f"{OPENQUAKE_WS_BASE}/ws/all"
 
 # 气象预警源互斥：同一时刻仅允许一个解析开关为 True
 WEATHER_SOURCE_FLAGS: Dict[str, str] = {
+    "jian": "jian_parse_weather",
     "fanstudio": "fanstudio_parse_weatheralarm",
     "whews": "whews_parse_weatheralarm",
     "openquake": "openquake_parse_cma",
 }
 
 
-def enforce_weather_source_mutex(message_config: Any) -> str:
-    """确保最多一个气象预警源开启；若旧配置多项为真，保留优先级最高者。"""
+def enforce_weather_source_mutex(message_config: Any, prefer: str = "") -> str:
+    """确保最多一个气象预警源开启；多项为真时优先保留 prefer（通常为当前主源）。"""
     enabled = [
         key
         for key, flag in WEATHER_SOURCE_FLAGS.items()
@@ -237,8 +235,11 @@ def enforce_weather_source_mutex(message_config: Any) -> str:
     ]
     if len(enabled) <= 1:
         return enabled[0] if enabled else ""
-    keep = enabled[0]
-    for key in enabled[1:]:
+    prefer_key = str(prefer or "").strip().lower()
+    keep = prefer_key if prefer_key in enabled else enabled[0]
+    for key in enabled:
+        if key == keep:
+            continue
         flag = WEATHER_SOURCE_FLAGS[key]
         if hasattr(message_config, flag):
             setattr(message_config, flag, False)
@@ -297,7 +298,7 @@ def enforce_jma_report_mutex(
 
 
 def active_weather_source(message_config: Any) -> str:
-    """返回当前启用的气象预警源键（fanstudio / whews / openquake），无则空串。"""
+    """返回当前启用的气象预警源键（jian / fanstudio / whews / openquake），无则空串。"""
     for key, flag in WEATHER_SOURCE_FLAGS.items():
         if bool(getattr(message_config, flag, False)):
             return key
@@ -315,6 +316,8 @@ def weather_provider_for_parsed(parsed_data: Dict[str, Any]) -> Optional[str]:
     ):
         return "openquake"
     if st == "weatheralarm" or msg_type == "weather":
+        if parsed_data.get("jian"):
+            return "jian"
         if parsed_data.get("whews"):
             return "whews"
         if parsed_data.get("fanstudio"):
@@ -417,17 +420,35 @@ JIAN_LOGICAL_PREFIX = "jian://"
 JIAN_MASTER_KEY = f"{JIAN_LOGICAL_PREFIX}master"
 
 # (短名, 展示用标签) — 对应 message_config.jian_parse_* 解析开关
+# 与 api.sismotide.top 公开 /all 路径对齐（不含测站、cenc-ir；烈度速报仍走 Nowquake）
 JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = [
+    # 预警
     ("cea", "中国地震预警网"),
+    ("cea-pr", "中国地震预警网省级分中心"),
     ("cwa-eew", "台湾中央气象署地震预警"),
     ("jma-eew", "日本气象厅紧急地震速报"),
     ("sa", "美国 ShakeAlert 地震预警"),
     ("kma-eew", "韩国气象厅地震预警"),
     ("early-est", "INGV Early-est 快速定位"),
+    # 灾害预警
+    ("weather", "中国气象局气象预警"),
+    ("nmefc-tsunami", "自然资源部海啸预警"),
+    ("cwa-tsunami", "台湾中央气象署海啸资讯"),
+    ("jma-tsunami", "日本气象厅津波警报"),
+    ("jma-volcano", "日本气象厅火山情报"),
+    ("usgs-volcano", "USGS 火山警戒"),
+    ("usgs-tsunami", "NOAA/USGS 海啸预警"),
+    # 国内速报
     ("cenc", "CENC 中国地震台网中心"),
+    ("ningxia", "宁夏地震局"),
+    ("yunnan", "云南省地震局"),
+    ("shanxi", "山西省地震局"),
+    ("beijing", "北京市地震局"),
     ("cwa", "CWA 台湾中央气象署速报"),
     ("jma", "日本气象厅地震情报"),
     ("hko", "HKO 香港天文台"),
+    ("kma", "KMA 韩国气象厅速报"),
+    # 国际速报
     ("tmd", "TMD 泰国气象局"),
     ("mmd", "MMD 马来西亚气象局"),
     ("bmkg", "BMKG 印尼气象气候地球物理局"),
@@ -440,8 +461,39 @@ JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = [
     ("usp", "USP 巴西圣保罗大学"),
     ("nrcan", "NRCan 加拿大自然资源部"),
     ("afad", "AFAD 土耳其灾害应急管理局"),
-    ("kma", "KMA 韩国气象厅速报"),
+    ("ipma", "IPMA 葡萄牙气象局"),
+    ("noa", "NOA 希腊国家天文台"),
+    ("sed", "SED 瑞士地震服务中心"),
+    ("scsn", "SCSN 南加州地震数据中心"),
+    ("ipgp", "IPGP 巴黎地球物理研究所"),
+    ("infp", "INFP 罗马尼亚国家地球物理研究所"),
+    ("isc", "ISC 国际地震中心"),
+    ("knmi", "KNMI 荷兰皇家气象研究所"),
+    ("ncedc", "NCEDC 北加州地震数据中心"),
+    ("lmu", "LMU 慕尼黑大学地震服务"),
+    ("koeri", "KOERI 土耳其坎迪利天文台"),
+    ("gsras", "GSRAS 俄罗斯地球物理局"),
+    ("csn", "CSN 智利国家地震中心"),
+    ("phivolcs", "PHIVOLCS 菲律宾火山与地震研究所"),
+    ("ssn", "SSN 墨西哥国家地震服务"),
+    ("ga", "GA 澳大利亚地质局"),
+    ("igepn", "IGEPN 厄瓜多尔地球物理研究所"),
+    ("peru", "IGP 秘鲁地球物理研究所"),
 ]
+
+# 短名 → 内部 source_type（与适配器 / 轮播优先级键一致）
+_JIAN_SHORT_TO_INTERNAL_SPECIAL: Dict[str, str] = {
+    "early-est": "early_est",
+    "jma-eew": "jma",
+    "jma": "jma_eq",
+    "weather": "weatheralarm",
+    "nmefc-tsunami": "tsunami",
+    "cwa-tsunami": "cwa_tsunami",
+    "jma-tsunami": "jma_tsunami",
+    "usgs-tsunami": "usgs_tsunami",
+    "jma-volcano": "jma_volcano",
+    "usgs-volcano": "usgs_volcano",
+}
 
 
 def jian_logical_key(short: str) -> str:
@@ -452,12 +504,8 @@ def jian_logical_key(short: str) -> str:
 def jian_short_to_internal(short: str) -> str:
     """Jian 短名 → 内部 source_type（与适配器一致：jma-eew→jma，jma→jma_eq）。"""
     s = str(short or "").strip().lower()
-    if s == "early-est":
-        return "early_est"
-    if s == "jma-eew":
-        return "jma"
-    if s == "jma":
-        return "jma_eq"
+    if s in _JIAN_SHORT_TO_INTERNAL_SPECIAL:
+        return _JIAN_SHORT_TO_INTERNAL_SPECIAL[s]
     return s.replace("_", "-")
 
 
@@ -470,33 +518,25 @@ JIAN_INTERNAL_TO_LOGICAL_KEY: Dict[str, str] = {
 }
 JIAN_SUB_SOURCE_KEYS: List[str] = list(JIAN_LOGICAL_TO_INTERNAL.keys())
 
-JIAN_WARNING_INTERNALS = frozenset({"cea", "cwa-eew", "jma", "sa", "kma-eew", "early_est"})
+JIAN_WARNING_INTERNALS = frozenset(
+    {"cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est"}
+)
+JIAN_HAZARD_INTERNALS = frozenset(
+    {
+        "weatheralarm",
+        "tsunami",
+        "cwa_tsunami",
+        "jma_tsunami",
+        "usgs_tsunami",
+        "jma_volcano",
+        "usgs_volcano",
+    }
+)
 
 # Jian 短名 → message_config.jian_parse_* 字段名
 JIAN_SHORT_TO_PARSE_FLAG: Dict[str, str] = {
-    "cea": "jian_parse_cea",
-    "cwa-eew": "jian_parse_cwa_eew",
-    "jma-eew": "jian_parse_jma_eew",
-    "sa": "jian_parse_sa",
-    "kma-eew": "jian_parse_kma_eew",
-    "early-est": "jian_parse_early_est",
-    "cenc": "jian_parse_cenc",
-    "cwa": "jian_parse_cwa",
-    "jma": "jian_parse_jma",
-    "hko": "jian_parse_hko",
-    "tmd": "jian_parse_tmd",
-    "mmd": "jian_parse_mmd",
-    "bmkg": "jian_parse_bmkg",
-    "geonet": "jian_parse_geonet",
-    "usgs": "jian_parse_usgs",
-    "emsc": "jian_parse_emsc",
-    "gfz": "jian_parse_gfz",
-    "bcsf": "jian_parse_bcsf",
-    "ingv": "jian_parse_ingv",
-    "usp": "jian_parse_usp",
-    "nrcan": "jian_parse_nrcan",
-    "afad": "jian_parse_afad",
-    "kma": "jian_parse_kma",
+    short: f"jian_parse_{short.replace('-', '_')}"
+    for short, _ in JIAN_SUB_SOURCE_SPECS
 }
 
 JIAN_INTERNAL_TO_PARSE_FLAG: Dict[str, str] = {
@@ -522,10 +562,10 @@ P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
     P2PQUAKE_HISTORY_AGGREGATE_URL,
 ]
 
-FANSTUDIO_HTTP_SOURCE_KEYS: List[str] = [
-    fanstudio_http_url("we/typhoon.php"),
-]
-FANSTUDIO_TYPHOON_HTTP = FANSTUDIO_HTTP_SOURCE_KEYS[0]
+# 台风 HTTP：Jian Project GET（已停运的 Fan Studio we/typhoon.php 仅作启动迁移）
+JIAN_TYPHOON_HTTP = "https://api.sismotide.top/get/typhoon.php"
+JIAN_TYPHOON_HTTP_KEYS: List[str] = [JIAN_TYPHOON_HTTP]
+_LEGACY_FANSTUDIO_TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
 
 
 def is_jian_project_url(url: str) -> bool:
@@ -550,14 +590,14 @@ def wolfx_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
 
 
 def openquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
-    """OpenQuakeAPI 总开关是否开启（依赖辅助总开关）。"""
+    """PancakesAPI（原 OpenQuakeAPI）总开关是否开启（依赖辅助总开关）。"""
     if not aux_sources_enabled(enabled_sources):
         return False
     return bool(enabled_sources.get(OPENQUAKE_WS_ALL_URL, False))
 
 
 def aux_sources_enabled(enabled_sources: Dict[str, Any]) -> bool:
-    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）；缺省视为开启以兼容旧配置。"""
+    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）；缺省视为开启以兼容旧配置。"""
     if not isinstance(enabled_sources, dict):
         return True
     if AUX_SOURCES_MASTER_KEY not in enabled_sources:
@@ -608,12 +648,13 @@ DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
     EQSC_USGS_HTTP: 60,
     EQSC_EMSC_HTTP: 60,
     EQSC_TYPHOON_HTTP: 300,
+    JIAN_TYPHOON_HTTP: 60,  # Jian GET typhoon.php（≥1s；默认 60s）
     EQSC_VOLCANO_HTTP: 300,
 }
 
 ALL_KNOWN_HTTP_SOURCE_KEYS: List[str] = (
     P2PQUAKE_HTTP_SOURCE_KEYS
-    + FANSTUDIO_HTTP_SOURCE_KEYS
+    + JIAN_TYPHOON_HTTP_KEYS
     + [EQSC_HTTP_MASTER]
     + EQSC_HTTP_SOURCE_KEYS
 )
@@ -629,19 +670,20 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.5"  # 当前程序版本
+APP_VERSION = "2.8.6"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.5
+CHANGELOG_TEXT = """版本 2.8.6
 
-1、修复预警「最少展示时长」过大时盖掉发震有效期，导致已过期预警仍长时间滚动
-2、展示侧过期判定与入口一致：以发震时间窗口为主（含分源），最少展示仅作过期后短宽限
-3、同事件更新报替换时保留首次上屏时间，避免展示计时被重置
-4、设置页「预警最少展示」上限改为 15 分钟，并澄清与发震有效期的关系"""
+1、修复Jian Project API鉴权问题，适配新增的部分数据源；
+2、替换台风实况数据来源；
+3、移除whews数据源的部分数据的二次鉴权，并适配新增的部分数据；
+4、修复字幕黑屏问题；
+5、修复不同性能模式导致的数据缺失以及顺序错乱问题"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -877,15 +919,15 @@ class MessageConfig:
     fanstudio_parse_kma: bool = True
     fanstudio_parse_fssn: bool = True
     fanstudio_parse_fssn_cmt: bool = True
-    fanstudio_parse_weatheralarm: bool = True
+    fanstudio_parse_weatheralarm: bool = False  # 默认主源为 Jian，气象仅开其一
     fanstudio_parse_tsunami: bool = True
     # 无界科技（WHEWS）子源解析开关
     whews_parse_jma_eew: bool = True
     whews_parse_jma: bool = True  # WeJet /ws/jma 地震情报（与紧急地震速报分开）
     whews_parse_cwa_eew: bool = True
     whews_parse_sa_eew: bool = True
-    whews_parse_cea: bool = True  # WeJet CEA 国家级预警（需 App 鉴权）
-    whews_parse_cea_pr: bool = True  # WeJet CEA 省级预警（需 App 鉴权）
+    whews_parse_cea: bool = True  # WeJet CEA 国家级预警（经 /ws/all）
+    whews_parse_cea_pr: bool = True  # WeJet CEA 省级预警（经 /ws/all）
     whews_parse_cenc: bool = True
     whews_parse_cwa: bool = True
     whews_parse_hko: bool = True
@@ -907,7 +949,7 @@ class MessageConfig:
     whews_parse_ningxia: bool = True
     whews_parse_jma_volcano: bool = True  # 无界科技 source=va 火山情报
     whews_parse_tsunami: bool = True
-    whews_parse_weatheralarm: bool = True
+    whews_parse_weatheralarm: bool = False  # 与 jian_parse_weather 互斥，默认关
     whews_parse_phivolcs: bool = True
     whews_parse_sgc: bool = True
     whews_parse_ga: bool = True
@@ -916,6 +958,13 @@ class MessageConfig:
     whews_parse_ptwc: bool = True
     whews_parse_incois: bool = True
     whews_parse_jma_tsunami: bool = True
+    whews_parse_cat_tsunami: bool = True
+    whews_parse_cwa_tsunami: bool = True
+    whews_parse_early_est: bool = True
+    whews_parse_cmt_usgs: bool = True
+    whews_parse_cmt_emsc: bool = True
+    whews_parse_cmt_cenc: bool = True
+    whews_parse_cmt_ingv: bool = True
     whews_parse_gsras: bool = True
     whews_parse_bgs: bool = True
     whews_parse_ipma: bool = True
@@ -930,15 +979,28 @@ class MessageConfig:
     whews_parse_typhoon: bool = False
     # Jian Project 子源解析开关（主提供者 api.sismotide.top/all）
     jian_parse_cea: bool = True
+    jian_parse_cea_pr: bool = True
     jian_parse_cwa_eew: bool = True
     jian_parse_jma_eew: bool = True
     jian_parse_sa: bool = True
     jian_parse_kma_eew: bool = True
     jian_parse_early_est: bool = True
+    jian_parse_weather: bool = True
+    jian_parse_nmefc_tsunami: bool = True
+    jian_parse_cwa_tsunami: bool = True
+    jian_parse_jma_tsunami: bool = True
+    jian_parse_jma_volcano: bool = True
+    jian_parse_usgs_volcano: bool = True
+    jian_parse_usgs_tsunami: bool = True
     jian_parse_cenc: bool = True
+    jian_parse_ningxia: bool = True
+    jian_parse_yunnan: bool = True
+    jian_parse_shanxi: bool = True
+    jian_parse_beijing: bool = True
     jian_parse_cwa: bool = True
     jian_parse_jma: bool = True  # Jian /jma 地震情报（与 jma-eew 分开）
     jian_parse_hko: bool = True
+    jian_parse_kma: bool = True
     jian_parse_tmd: bool = True
     jian_parse_mmd: bool = True
     jian_parse_bmkg: bool = True
@@ -951,17 +1013,34 @@ class MessageConfig:
     jian_parse_usp: bool = True
     jian_parse_nrcan: bool = True
     jian_parse_afad: bool = True
-    jian_parse_kma: bool = True
+    jian_parse_ipma: bool = True
+    jian_parse_noa: bool = True
+    jian_parse_sed: bool = True
+    jian_parse_scsn: bool = True
+    jian_parse_ipgp: bool = True
+    jian_parse_infp: bool = True
+    jian_parse_isc: bool = True
+    jian_parse_knmi: bool = True
+    jian_parse_ncedc: bool = True
+    jian_parse_lmu: bool = True
+    jian_parse_koeri: bool = True
+    jian_parse_gsras: bool = True
+    jian_parse_csn: bool = True
+    jian_parse_phivolcs: bool = True
+    jian_parse_ssn: bool = True
+    jian_parse_ga: bool = True
+    jian_parse_igepn: bool = True
+    jian_parse_peru: bool = True
     # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報 / 556 緊急地震速報）
     p2pquake_parse_551: bool = False  # 与主源 JMA 情报互斥；默认关，优先主源
     p2pquake_parse_552: bool = True
     p2pquake_parse_556: bool = True
-    # OpenQuakeAPI（/ws/all）：按子源分别控制是否解析
+    # PancakesAPI（/api/v1/alert/ws/all）：按子源分别控制是否解析
     openquake_parse_gq: bool = True
     openquake_parse_nmefc: bool = True
     openquake_parse_nmefc_wave: bool = True
     openquake_parse_nmefc_surge: bool = True
-    openquake_parse_cma: bool = True
+    openquake_parse_cma: bool = False  # 与 jian_parse_weather 互斥，默认关
     # GlobalQuake 专用震级阈值（0 表示不限制；与全局 min_report_magnitude 独立）
     openquake_gq_min_magnitude: float = 4.5
     # 速报震级过滤（0 表示不限制）
@@ -1191,12 +1270,18 @@ class WebSocketConfig:
     fanstudio_api_key: str = ""
     # 无界科技 WAuth 令牌（wat_…）；建连后以纯文本首帧发送，须在 5 秒内
     whews_token: str = ""
-    # CEA App 凭证由内置模块注入（公开版不对外暴露设置项；连接 /ws/cea_all）
+    # CEA App 凭证（历史字段保留兼容；公开版已不再二次鉴权）
     whews_cea_app_id: str = ""
     whews_cea_app_secret: str = ""
     # EQSC 登录密钥（https://equake.top/auth）；软件内自动换取 Refresh/Access Token
     eqsc_login_token: str = ""
-    # WeJet 主机：api.beecld.com（默认）/ api.2v8.cn（国内，CEA）
+    # Jian Project：邮件 lk_ 仅用于一次性换票（约 5 分钟、用后作废）；勿长期依赖
+    jian_login_token: str = ""
+    # Jian 长期 Token（rt_…，约 180 天）；换票成功后本地持久化，建连用它换 at_
+    jian_refresh_token: str = ""
+    # 长期 Token 过期时刻（Unix 秒）；0 表示未知（仍尝试使用直至服务端拒绝）
+    jian_refresh_expire_at: float = 0.0
+    # WeJet 主机：api.2v8.cn（国内，默认）/ api.beecld.com（国外）
     whews_host: str = WHEWS_HOST_PRIMARY
 
     def validate(self) -> bool:
@@ -1281,7 +1366,7 @@ class Config:
         self.log_config = LogConfig()
 
         # 数据源配置
-        # 当前选用的数据源提供者：fanstudio / whews（二选一，设置页顶部切换）
+        # 当前选用的数据源提供者：fanstudio / whews / jian（三选一，默认 Jian Project）
         self.data_provider: str = DATA_PROVIDER_JIAN
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
@@ -1453,7 +1538,8 @@ class Config:
                 'eqsc_parse_emsc': getattr(self.message_config, 'eqsc_parse_emsc', True),
                 'eqsc_parse_typhoon': getattr(self.message_config, 'eqsc_parse_typhoon', True),
                 'eqsc_parse_volcano': getattr(self.message_config, 'eqsc_parse_volcano', False),
-                'p2pquake_parse_551': getattr(self.message_config, 'p2pquake_parse_551', True),
+                # 默认 False，与 MessageConfig / 主源 JMA 情报互斥约定一致
+                'p2pquake_parse_551': getattr(self.message_config, 'p2pquake_parse_551', False),
                 'p2pquake_parse_552': getattr(self.message_config, 'p2pquake_parse_552', True),
                 'p2pquake_parse_556': getattr(self.message_config, 'p2pquake_parse_556', True),
                 'openquake_parse_gq': getattr(self.message_config, 'openquake_parse_gq', True),
@@ -1464,7 +1550,8 @@ class Config:
                 'openquake_parse_nmefc_surge': getattr(
                     self.message_config, 'openquake_parse_nmefc_surge', True
                 ),
-                'openquake_parse_cma': getattr(self.message_config, 'openquake_parse_cma', True),
+                # 默认 False，与 MessageConfig / 气象互斥约定一致（勿写成 True）
+                'openquake_parse_cma': getattr(self.message_config, 'openquake_parse_cma', False),
                 'openquake_gq_min_magnitude': float(
                     getattr(self.message_config, 'openquake_gq_min_magnitude', 4.5) or 0.0
                 ),
@@ -1537,7 +1624,8 @@ class Config:
                 'whews_parse_ningxia': getattr(self.message_config, 'whews_parse_ningxia', True),
                 'whews_parse_jma_volcano': getattr(self.message_config, 'whews_parse_jma_volcano', True),
                 'whews_parse_tsunami': getattr(self.message_config, 'whews_parse_tsunami', True),
-                'whews_parse_weatheralarm': getattr(self.message_config, 'whews_parse_weatheralarm', True),
+                # 默认 False，与 MessageConfig / 气象互斥约定一致
+                'whews_parse_weatheralarm': getattr(self.message_config, 'whews_parse_weatheralarm', False),
                 'whews_parse_phivolcs': getattr(self.message_config, 'whews_parse_phivolcs', True),
                 'whews_parse_sgc': getattr(self.message_config, 'whews_parse_sgc', True),
                 'whews_parse_ga': getattr(self.message_config, 'whews_parse_ga', True),
@@ -1546,6 +1634,13 @@ class Config:
                 'whews_parse_ptwc': getattr(self.message_config, 'whews_parse_ptwc', True),
                 'whews_parse_incois': getattr(self.message_config, 'whews_parse_incois', True),
                 'whews_parse_jma_tsunami': getattr(self.message_config, 'whews_parse_jma_tsunami', True),
+                'whews_parse_cat_tsunami': getattr(self.message_config, 'whews_parse_cat_tsunami', True),
+                'whews_parse_cwa_tsunami': getattr(self.message_config, 'whews_parse_cwa_tsunami', True),
+                'whews_parse_early_est': getattr(self.message_config, 'whews_parse_early_est', True),
+                'whews_parse_cmt_usgs': getattr(self.message_config, 'whews_parse_cmt_usgs', True),
+                'whews_parse_cmt_emsc': getattr(self.message_config, 'whews_parse_cmt_emsc', True),
+                'whews_parse_cmt_cenc': getattr(self.message_config, 'whews_parse_cmt_cenc', True),
+                'whews_parse_cmt_ingv': getattr(self.message_config, 'whews_parse_cmt_ingv', True),
                 'whews_parse_gsras': getattr(self.message_config, 'whews_parse_gsras', True),
                 'whews_parse_bgs': getattr(self.message_config, 'whews_parse_bgs', True),
                 'whews_parse_ipma': getattr(self.message_config, 'whews_parse_ipma', True),
@@ -1558,29 +1653,10 @@ class Config:
                 'whews_parse_igp': getattr(self.message_config, 'whews_parse_igp', True),
                 'whews_parse_nepal': getattr(self.message_config, 'whews_parse_nepal', True),
                 'whews_parse_typhoon': getattr(self.message_config, 'whews_parse_typhoon', False),
-                'jian_parse_cea': getattr(self.message_config, 'jian_parse_cea', True),
-                'jian_parse_cwa_eew': getattr(self.message_config, 'jian_parse_cwa_eew', True),
-                'jian_parse_jma_eew': getattr(self.message_config, 'jian_parse_jma_eew', True),
-                'jian_parse_sa': getattr(self.message_config, 'jian_parse_sa', True),
-                'jian_parse_kma_eew': getattr(self.message_config, 'jian_parse_kma_eew', True),
-                'jian_parse_early_est': getattr(self.message_config, 'jian_parse_early_est', True),
-                'jian_parse_cenc': getattr(self.message_config, 'jian_parse_cenc', True),
-                'jian_parse_cwa': getattr(self.message_config, 'jian_parse_cwa', True),
-                'jian_parse_jma': getattr(self.message_config, 'jian_parse_jma', True),
-                'jian_parse_hko': getattr(self.message_config, 'jian_parse_hko', True),
-                'jian_parse_tmd': getattr(self.message_config, 'jian_parse_tmd', True),
-                'jian_parse_mmd': getattr(self.message_config, 'jian_parse_mmd', True),
-                'jian_parse_bmkg': getattr(self.message_config, 'jian_parse_bmkg', True),
-                'jian_parse_geonet': getattr(self.message_config, 'jian_parse_geonet', True),
-                'jian_parse_usgs': getattr(self.message_config, 'jian_parse_usgs', True),
-                'jian_parse_emsc': getattr(self.message_config, 'jian_parse_emsc', True),
-                'jian_parse_gfz': getattr(self.message_config, 'jian_parse_gfz', True),
-                'jian_parse_bcsf': getattr(self.message_config, 'jian_parse_bcsf', True),
-                'jian_parse_ingv': getattr(self.message_config, 'jian_parse_ingv', True),
-                'jian_parse_usp': getattr(self.message_config, 'jian_parse_usp', True),
-                'jian_parse_nrcan': getattr(self.message_config, 'jian_parse_nrcan', True),
-                'jian_parse_afad': getattr(self.message_config, 'jian_parse_afad', True),
-                'jian_parse_kma': getattr(self.message_config, 'jian_parse_kma', True),
+                **{
+                    flag: getattr(self.message_config, flag, True)
+                    for flag in JIAN_SHORT_TO_PARSE_FLAG.values()
+                },
                 'min_report_magnitude': getattr(self.message_config, 'min_report_magnitude', 0.0),
                 'geo_filter_enabled': getattr(self.message_config, 'geo_filter_enabled', False),
                 'geo_filter_latitude': getattr(self.message_config, 'geo_filter_latitude', 39.9042),
@@ -1653,6 +1729,11 @@ class Config:
                 'whews_cea_app_id': getattr(self.ws_config, 'whews_cea_app_id', '') or '',
                 'whews_cea_app_secret': getattr(self.ws_config, 'whews_cea_app_secret', '') or '',
                 'eqsc_login_token': getattr(self.ws_config, 'eqsc_login_token', '') or '',
+                'jian_login_token': getattr(self.ws_config, 'jian_login_token', '') or '',
+                'jian_refresh_token': getattr(self.ws_config, 'jian_refresh_token', '') or '',
+                'jian_refresh_expire_at': float(
+                    getattr(self.ws_config, 'jian_refresh_expire_at', 0) or 0
+                ),
                 'whews_host': normalize_whews_host(
                     getattr(self.ws_config, 'whews_host', WHEWS_HOST_PRIMARY)
                 ),
@@ -1669,7 +1750,7 @@ class Config:
                 'split_by_date': self.log_config.split_by_date,
                 'max_log_size': self.log_config.max_log_size,
             },
-            'DATA_PROVIDER': normalize_data_provider(getattr(self, 'data_provider', DATA_PROVIDER_FANSTUDIO)),
+            'DATA_PROVIDER': normalize_data_provider(getattr(self, 'data_provider', DATA_PROVIDER_JIAN)),
             'ENABLED_SOURCES': self._get_persisted_enabled_sources(),
             'CUSTOM_DATA_SOURCE_URL': self.custom_data_source_url,
             'CUSTOM_DATA_SOURCE_INSECURE_SSL': bool(
@@ -1684,7 +1765,7 @@ class Config:
             return False
         if "fanstudio.tech" not in url:
             return False
-        # Fan Studio HTTP 源（如 typhoon.php）不应被视为“历史遗留的单项 URL”，
+        # Fan Studio HTTP 源不应被视为“历史遗留的单项 URL”，
         # 它们需要持久化开关状态，否则用户关闭后重启会被恢复为默认启用。
         if url.startswith("http://") or url.startswith("https://"):
             return False
@@ -1863,47 +1944,37 @@ class Config:
                 del self.enabled_sources[key]
 
     def _disable_whews_dedicated_endpoints(self) -> None:
-        """强制关闭 cenc 与拆分 CEA 线；公开版仅允许 /ws/cea_all。"""
+        """强制关闭 cenc 与全部 CEA 专用线；CEA/CEA-PR 仅经 /ws/all。"""
         for url in list(self.enabled_sources.keys()):
-            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
+            if (
+                is_whews_dedicated_endpoint(url)
+                or is_whews_cea_split_endpoint(url)
+                or is_whews_cea_endpoint(url)
+            ):
                 if self.enabled_sources.get(url):
-                    logger.info(f"已关闭 WeJet 专用端点（改走聚合通道）: {url}")
+                    logger.info(f"已关闭 WeJet 专用端点（改走 /ws/all）: {url}")
                 self.enabled_sources[url] = False
         for url in all_whews_ws_urls():
-            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
+            if (
+                is_whews_dedicated_endpoint(url)
+                or is_whews_cea_split_endpoint(url)
+                or is_whews_cea_endpoint(url)
+            ):
                 self.enabled_sources[url] = False
-        # 注入内置 CEA 凭证；失败时关闭全部 cea_all
-        if not whews_cea_app_configured(self.ws_config):
-            for url in list(self.enabled_sources.keys()):
-                if is_whews_cea_endpoint(url):
-                    self.enabled_sources[url] = False
-            for host in WHEWS_HOSTS:
-                self.enabled_sources[whews_ws_url("cea_all", host)] = False
-        else:
-            # CEA 固定国内站：关掉主站上的 cea_all，避免双连
-            primary_cea = whews_ws_url("cea_all", WHEWS_HOST_PRIMARY)
-            self.enabled_sources[primary_cea] = False
-            for url in list(self.enabled_sources.keys()):
-                if is_whews_cea_all_endpoint(url) and WHEWS_HOST_BACKUP not in (url or "").lower():
-                    self.enabled_sources[url] = False
 
     def get_whews_host(self) -> str:
         """返回当前无界科技主机。"""
         return normalize_whews_host(getattr(self.ws_config, "whews_host", WHEWS_HOST_PRIMARY))
 
     def get_whews_endpoint_urls(self, host: Any = None) -> Dict[str, str]:
-        """WeJet 端点：/ws/all 跟所选主机；/ws/cea_all 始终走国内站。"""
+        """WeJet 端点：仅 /ws/all（CEA/CEA-PR 随聚合推送，无二次鉴权）。"""
         h = normalize_whews_host(host if host is not None else self.get_whews_host())
         token = (getattr(self.ws_config, "whews_token", "") or "").strip()
-        urls = {"all": whews_ws_url("all", h, token=token)}
-        if whews_cea_app_configured(self.ws_config):
-            # CEA 仅国内站提供；与主站/国内站选择无关
-            urls["cea_all"] = whews_ws_url("cea_all", WHEWS_HOST_BACKUP, token=token)
-        return urls
+        return {"all": whews_ws_url("all", h, token=token)}
 
     def get_active_data_provider(self) -> str:
         """返回当前规范化后的数据源提供者。"""
-        return normalize_data_provider(getattr(self, "data_provider", DATA_PROVIDER_FANSTUDIO))
+        return normalize_data_provider(getattr(self, "data_provider", DATA_PROVIDER_JIAN))
 
     def is_url_active_for_provider(self, url: str, provider: Optional[str] = None) -> bool:
         """判断 URL 是否属于当前（或指定）数据源提供者。P2PQuake / Nowquake / 台风 HTTP 始终可用。"""
@@ -1912,7 +1983,7 @@ class Config:
         if not u:
             return False
         low = u.lower()
-        # 辅助数据源（Wolfx / EQSC / P2PQuake / OpenQuakeAPI）：总开关关闭时不可用
+        # 辅助数据源（Wolfx / EQSC / P2PQuake / PancakesAPI）：总开关关闭时不可用
         if u == P2PQUAKE_WSS_URL or "api.p2pquake.net" in low:
             return aux_sources_enabled(self.enabled_sources)
         if "equake.top" in low:
@@ -1923,7 +1994,11 @@ class Config:
             or u == WOLFX_MASTER_KEY
         ):
             return aux_sources_enabled(self.enabled_sources)
-        if u == OPENQUAKE_WS_ALL_URL or "api.aloys23.link" in low:
+        if (
+            u == OPENQUAKE_WS_ALL_URL
+            or u == OPENQUAKE_WS_ALL_URL_LEGACY
+            or "api.aloys23.link" in low
+        ):
             return aux_sources_enabled(self.enabled_sources)
         # 自定义数据源：与主提供者无关，始终可用
         if is_custom_data_source_url(u, self):
@@ -1933,20 +2008,15 @@ class Config:
             return True
         # 台风 HTTP：任意提供者下均可轮询（全局，与主提供者/辅助三源解耦）
         if (
-            u == FANSTUDIO_TYPHOON_HTTP
-            or FANSTUDIO_TYPHOON_HTTP in u
+            u == JIAN_TYPHOON_HTTP
+            or JIAN_TYPHOON_HTTP in u
             or "typhoon.php" in low
         ):
             return True
         if provider == DATA_PROVIDER_FANSTUDIO:
             return u == FANSTUDIO_ALL_URL or "fanstudio" in low
         if provider == DATA_PROVIDER_WHEWS:
-            # /ws/all 跟所选主机；/ws/cea_all 固定国内站，二者均属 WeJet
-            return (
-                u == WHEWS_MASTER_KEY
-                or is_whews_all_url(u)
-                or is_whews_cea_all_endpoint(u)
-            )
+            return u == WHEWS_MASTER_KEY or is_whews_all_url(u)
         if provider == DATA_PROVIDER_JIAN:
             return u == JIAN_MASTER_KEY or u == JIAN_PROJECT_ALL_URL or is_jian_project_url(u)
         if "fanstudio" in low or is_whews_url(u) or is_jian_project_url(u):
@@ -1960,7 +2030,7 @@ class Config:
             if custom_key in self.http_poll_intervals:
                 return max(1, int(self.http_poll_intervals[custom_key]))
             return 1
-        lookup_url = fanstudio_http_canonical_key(url) if "api.fanstudio" in (url or "") else url
+        lookup_url = url
         try:
             val = self.http_poll_intervals.get(
                 lookup_url, DEFAULT_HTTP_POLL_INTERVALS.get(lookup_url, 2)
@@ -1969,8 +2039,34 @@ class Config:
         except (TypeError, ValueError):
             return max(1, DEFAULT_HTTP_POLL_INTERVALS.get(lookup_url, 2))
 
+
+    def _migrate_typhoon_http_url(self) -> None:
+        """已停运的 Fan Studio 台风 URL → Jian Project GET。"""
+        legacy = _LEGACY_FANSTUDIO_TYPHOON_HTTP
+        new_url = JIAN_TYPHOON_HTTP
+        if legacy == new_url:
+            return
+        if legacy in self.enabled_sources:
+            self.enabled_sources[new_url] = bool(self.enabled_sources.pop(legacy))
+            logger.info(f"已迁移台风 HTTP：{legacy} → {new_url}")
+        if legacy in self.http_poll_intervals:
+            self.http_poll_intervals[new_url] = self.http_poll_intervals.pop(legacy)
+
+    def _migrate_openquake_ws_url(self) -> None:
+        """PancakesAPI 聚合路径：旧 /ws/all → /api/v1/alert/ws/all。"""
+        legacy = OPENQUAKE_WS_ALL_URL_LEGACY
+        new_url = OPENQUAKE_WS_ALL_URL
+        if legacy == new_url:
+            return
+        if legacy in self.enabled_sources:
+            on = bool(self.enabled_sources.pop(legacy))
+            if new_url not in self.enabled_sources or on:
+                self.enabled_sources[new_url] = on
+            logger.info(f"已迁移 PancakesAPI WebSocket：{legacy} → {new_url}")
+
     def _ensure_http_poll_interval_defaults(self) -> None:
         """补全已知 HTTP 源的默认轮询间隔（不覆盖用户已设值）。"""
+        self._migrate_typhoon_http_url()
         for url, default_sec in DEFAULT_HTTP_POLL_INTERVALS.items():
             if url not in self.http_poll_intervals:
                 self.http_poll_intervals[url] = default_sec
@@ -2066,10 +2162,12 @@ class Config:
             "api.p2pquake.net",
             "api.fanstudio",
             "equake.top",
+            "sismotide.top",  # Jian Project GET（台风等）
             "tsunami.gov",
             "kma.go.kr",
             "jma.go.jp/developer/xml/feed/eqvol",
         )
+        keep_http = keep_markers[:4]
         removed = False
         for key in list(self.enabled_sources.keys()):
             if not isinstance(key, str):
@@ -2077,9 +2175,9 @@ class Config:
             low = key.lower()
             if not low.startswith(("http://", "https://")):
                 continue
-            if any(m in low for m in keep_markers[:3]):
+            if any(m in low for m in keep_http):
                 continue
-            if any(m in low for m in keep_markers[3:]):
+            if any(m in low for m in keep_markers[4:]):
                 del self.enabled_sources[key]
                 removed = True
                 continue
@@ -2096,7 +2194,7 @@ class Config:
                 continue
             low = key.lower()
             if low.startswith(("http://", "https://")) and not any(
-                m in low for m in ("api.p2pquake.net", "api.fanstudio", "equake.top")
+                m in low for m in keep_http
             ):
                 del self.http_poll_intervals[key]
                 removed = True
@@ -2275,6 +2373,25 @@ class Config:
             
             # 加载各模块配置（缺失的键保持 dataclass 默认值）
             success = True
+
+            # 先解析主数据源，供 MESSAGE_CONFIG 气象互斥 prefer 使用
+            raw_provider = config_data.get('DATA_PROVIDER', None)
+            raw_sources_preview = config_data.get('ENABLED_SOURCES', {}) or {}
+            if raw_provider is None or str(raw_provider).strip() == '':
+                fs_on = bool(raw_sources_preview.get(FANSTUDIO_ALL_URL, False))
+                jian_on = bool(
+                    raw_sources_preview.get(JIAN_MASTER_KEY, False)
+                    or raw_sources_preview.get(JIAN_PROJECT_ALL_URL, False)
+                )
+                whews_on = is_whews_all_enabled(raw_sources_preview)
+                if fs_on and not jian_on and not whews_on:
+                    self.data_provider = DATA_PROVIDER_FANSTUDIO
+                elif whews_on and not jian_on and not fs_on:
+                    self.data_provider = DATA_PROVIDER_WHEWS
+                else:
+                    self.data_provider = DATA_PROVIDER_JIAN
+            else:
+                self.data_provider = normalize_data_provider(raw_provider)
             
             if 'GUI_CONFIG' in config_data:
                 gui_section = config_data['GUI_CONFIG']
@@ -2309,7 +2426,12 @@ class Config:
                         setattr(self.message_config, key, value)
                 if not self.message_config.validate():
                     success = False
-                enforce_weather_source_mutex(self.message_config)
+                enforce_weather_source_mutex(
+                    self.message_config,
+                    prefer=normalize_data_provider(
+                        getattr(self, "data_provider", DATA_PROVIDER_JIAN)
+                    ),
+                )
                 enforce_jma_report_mutex(self.message_config, prefer="main")
                 # 迁移逻辑：当老配置仅有 fanstudio_parse_warning / fanstudio_parse_report 时，
                 # 按这两个总开关初始化各 Fan Studio 子源细粒度开关，避免升级后行为变化。
@@ -2356,6 +2478,12 @@ class Config:
                             setattr(self.message_config, field, bool(parse_report_flag))
                 except Exception as e:
                     logger.debug(f"迁移 Fan Studio 子源解析开关失败(可忽略): {e}")
+                # 子源迁移可能重新打开气象开关，再按当前主源收敛互斥
+                enforce_weather_source_mutex(
+                    self.message_config,
+                    prefer=self.get_active_data_provider(),
+                )
+                enforce_jma_report_mutex(self.message_config, prefer="main")
             
             # 加载 ALERT_CONFIG（若不存在，则触发一次旧字段迁移）
             if 'ALERT_CONFIG' in config_data:
@@ -2416,10 +2544,6 @@ class Config:
                 if not self.log_config.validate():
                     success = False
 
-            self.data_provider = normalize_data_provider(
-                config_data.get('DATA_PROVIDER', getattr(self, 'data_provider', DATA_PROVIDER_FANSTUDIO))
-            )
-
             # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
             raw_sources = config_data.get('ENABLED_SOURCES', {})
             all_url = FANSTUDIO_ALL_URL
@@ -2431,6 +2555,8 @@ class Config:
             for k in list(self.enabled_sources.keys()):
                 if self._is_fanstudio_individual_url(k):
                     del self.enabled_sources[k]
+            self._migrate_typhoon_http_url()
+            self._migrate_openquake_ws_url()
             removed_ws = self._enforce_public_ws_sources()
             if removed_ws:
                 logger.info(f"已清理非公开 WebSocket 数据源: {removed_ws}")
@@ -2451,12 +2577,12 @@ class Config:
                 self.http_poll_intervals = dict(DEFAULT_HTTP_POLL_INTERVALS)
             self._ensure_http_poll_interval_defaults()
 
-            # 如果配置文件中没有数据源配置，使用默认配置（仅 all + 非 Fan Studio）
+            # 如果配置文件中没有数据源配置，使用默认配置（Jian Project 为主源）
             if not self.enabled_sources:
-                self.enabled_sources = {all_url: True}
+                self.enabled_sources = {all_url: False}
                 # P2PQuake 仅 WSS + 启动时 HTTP 拉取，不启用 HTTP 轮询
                 self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
-                self.enabled_sources[FANSTUDIO_TYPHOON_HTTP] = True
+                self.enabled_sources[JIAN_TYPHOON_HTTP] = True
                 self.enabled_sources[WOLFX_MASTER_KEY] = False
                 self.enabled_sources[WOLFX_ALL_EEW_URL] = False
                 self.enabled_sources[WOLFX_CWA_EEW_URL] = False
@@ -2465,16 +2591,26 @@ class Config:
                 self.enabled_sources[NOWQUAKE_CENCINT_WSS_URL] = False
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
                 self.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
-                logger.info("配置文件中没有数据源配置，使用默认配置（all + 非 Fan Studio）")
+                self.enabled_sources[AUX_SOURCES_MASTER_KEY] = True
+                self.enabled_sources[JIAN_MASTER_KEY] = True
+                self.enabled_sources[WHEWS_MASTER_KEY] = False
+                self.data_provider = DATA_PROVIDER_JIAN
+                logger.info("配置文件中没有数据源配置，使用默认配置（Jian Project）")
             else:
                 if all_url not in self.enabled_sources:
-                    self.enabled_sources[all_url] = True
+                    self.enabled_sources[all_url] = False
                 # 若配置中已有 all_url，尊重用户关闭聚合连接的设置，不再强制为 True
                 # 仅补全非 Fan Studio 数据源缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉取
                 if P2PQUAKE_HISTORY_AGGREGATE_URL not in self.enabled_sources:
                     self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
-                if FANSTUDIO_TYPHOON_HTTP not in self.enabled_sources:
-                    self.enabled_sources[FANSTUDIO_TYPHOON_HTTP] = True
+                if JIAN_TYPHOON_HTTP not in self.enabled_sources:
+                    self.enabled_sources[JIAN_TYPHOON_HTTP] = True
+                if (
+                    self.get_active_data_provider() == DATA_PROVIDER_JIAN
+                    and JIAN_MASTER_KEY not in self.enabled_sources
+                    and JIAN_PROJECT_ALL_URL not in self.enabled_sources
+                ):
+                    self.enabled_sources[JIAN_MASTER_KEY] = True
                 other_wss_urls = [
                     WOLFX_ALL_EEW_URL,
                     WOLFX_CWA_EEW_URL,
@@ -2654,7 +2790,7 @@ class Config:
         self.enabled_sources = {all_url: False}
         # P2PQuake 仅 WSS + 启动时 HTTP 拉取，不启用 HTTP 轮询
         self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
-        self.enabled_sources[FANSTUDIO_TYPHOON_HTTP] = True
+        self.enabled_sources[JIAN_TYPHOON_HTTP] = True
         self.enabled_sources[WOLFX_MASTER_KEY] = False
         self.enabled_sources[WOLFX_ALL_EEW_URL] = False
         self.enabled_sources[WOLFX_CWA_EEW_URL] = False
@@ -2673,15 +2809,18 @@ class Config:
         self._ensure_eqsc_http_defaults()
         self._ensure_http_poll_interval_defaults()
         self._enforce_public_ws_sources()
+        enforce_weather_source_mutex(self.message_config, prefer=DATA_PROVIDER_JIAN)
+        enforce_jma_report_mutex(self.message_config, prefer="main")
 
         self.ws_urls = self._build_ws_urls_ordered()
         self.custom_data_source_url = ""
         self.custom_data_source_insecure_ssl = False
-        logger.info(f"已应用默认配置（仅聚合/独立源，无 Fan Studio 单项）: {self.ws_urls}")
+        logger.info(f"已应用默认配置（主源 Jian Project）: {self.ws_urls}")
     
     def _build_ws_urls_ordered(self) -> List[str]:
         """按主提供者构建 ws_urls；Wolfx / P2P / Nowquake 为全局辅助源。"""
         self._cleanup_invalid_fanstudio_ws_sources()
+        self._migrate_openquake_ws_url()
         self._enforce_public_ws_sources()
         self._disable_whews_dedicated_endpoints()
         self._migrate_whews_url_keys_to_master()
@@ -2695,16 +2834,10 @@ class Config:
                 all_url = self.get_whews_endpoint_urls().get("all")
                 if all_url:
                     ws_urls.append(all_url)
-                cea_all = self.get_whews_endpoint_urls().get("cea_all")
-                if cea_all:
-                    # CEA App 鉴权专用合并通道（与 /ws/all 并存）
-                    self.enabled_sources[cea_all] = True
-                    if cea_all not in ws_urls:
-                        ws_urls.append(cea_all)
         elif provider == DATA_PROVIDER_JIAN:
             if any_jian_source_enabled(self):
                 ws_urls.append(JIAN_PROJECT_ALL_URL)
-        # Wolfx / P2PQuake / OpenQuakeAPI（辅助源；受 aux://master 门控）
+        # Wolfx / P2PQuake / PancakesAPI（辅助源；受 aux://master 门控）
         if aux_sources_enabled(self.enabled_sources):
             if wolfx_master_enabled(self.enabled_sources):
                 if WOLFX_ALL_EEW_URL not in ws_urls:
@@ -2802,7 +2935,7 @@ class Config:
             return "custom"
         normalized_url = (url or "").rstrip("/")
         http_url_to_name = {
-            FANSTUDIO_TYPHOON_HTTP: "fanstudio_typhoon",
+            JIAN_TYPHOON_HTTP: "jian_typhoon",
             P2PQUAKE_HISTORY_AGGREGATE_URL: "p2pquake",
             "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
             "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
@@ -2904,14 +3037,16 @@ class Config:
             "p2pquake": "日本气象厅地震情报",
             "p2pquake_tsunami": "日本气象厅海啸预报",
             "p2pquake_eew": "日本气象厅紧急地震速报",
-            "openquake": "OpenQuakeAPI",
+            "openquake": "PancakesAPI",
             "openquake_gq": "GlobalQuake地震预警",
             "openquake_nmefc": "国家海洋环境预报中心海啸预警",
             "openquake_nmefc_wave": "国家海洋环境预报中心海浪警报",
             "openquake_nmefc_surge": "国家海洋环境预报中心风暴潮警报",
             "openquake_cma": "中国气象局气象预警",
             "hko": "香港天文台",
-            "fanstudio_typhoon": "台风实时与历史数据",
+            "jian_typhoon": "实时台风",
+            "whews_typhoon": "实时台风",
+            "typhoon": "实时台风",
             "usgs": "美国地质调查局",
             "sa": "美国ShakeAlert地震预警",
             "emsc": "欧洲地中海地震中心",
@@ -2937,6 +3072,8 @@ class Config:
             "tmd": "泰国地震局",
             "early_est": "Early-est",
             "jma_volcano": "日本气象厅火山情报",
+            "usgs_volcano": "美国地质调查局火山警戒",
+            "usgs_tsunami": "NOAA/USGS 海啸预警",
             "eqsc": "EQSC",
             "eqsc_jma_eew": "日本气象厅（EQSC）",
             "eqsc_jma_report": "日本气象厅地震情报（EQSC）",
@@ -2952,23 +3089,38 @@ class Config:
             "ptwc": "太平洋海啸预警中心 (PTWC)",
             "ntwc": "美国国家海啸预警中心 (NTWC)",
             "incois": "印度海啸早期预警中心 (INCOIS)",
+            "cat_tsunami": "墨西哥海啸预警中心 (CAT)",
+            "cwa_tsunami": "台湾气象署海啸信息",
             "jma_tsunami": "日本气象厅海啸预警",
-            "phivolcs": "菲律宾火山地震研究所",
+            "cmt_usgs": "USGS 矩心矩张量解",
+            "cmt_emsc": "EMSC 矩心矩张量解",
+            "cmt_cenc": "中国地震台网中心矩心矩张量解",
+            "cmt_ingv": "INGV 矩心矩张量解",
+            "phivolcs": "菲律宾火山与地震研究所",
             "sgc": "哥伦比亚地质服务局",
-            "ga": "澳大利亚地球科学局",
+            "ga": "澳大利亚地质局",
             "cenais": "古巴国家地震研究中心",
-            "gsras": "希腊地震研究与监测中心",
+            "gsras": "俄罗斯地球物理局",
             "bgs": "英国地质调查局",
-            "ipma": "葡萄牙海洋与大气研究所",
-            "ssn": "墨西哥国家地震局",
+            "ipma": "葡萄牙气象局",
+            "ssn": "墨西哥国家地震服务",
             "afad": "土耳其灾害和应急管理总局",
-            "sed": "瑞士地震局",
-            "noa": "挪威地震阵列",
-            "scsn": "南加州地震网络",
+            "sed": "瑞士地震服务中心",
+            "noa": "希腊国家天文台",
+            "scsn": "南加州地震数据中心",
+            "ipgp": "巴黎地球物理研究所",
+            "infp": "罗马尼亚国家地球物理研究所",
+            "isc": "国际地震中心",
+            "knmi": "荷兰皇家气象研究所",
+            "ncedc": "北加州地震数据中心",
+            "lmu": "慕尼黑大学地震服务",
+            "koeri": "土耳其坎迪利天文台",
+            "csn": "智利国家地震中心",
+            "igepn": "厄瓜多尔地球物理研究所",
+            "peru": "秘鲁地球物理研究所",
             "iag": "阿根廷国家地震研究所",
             "igp": "秘鲁地质矿产与金属研究所",
             "nepal": "尼泊尔地震局",
-            "typhoon": "台风实况",
         }
         
         return organization_name_mapping.get(source_name, source_name)

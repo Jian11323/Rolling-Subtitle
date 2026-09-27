@@ -32,13 +32,31 @@ def event_coordinates(parsed_data: Dict[str, Any]) -> Optional[tuple]:
     return lat, lon
 
 
+def _is_non_quake_report(parsed_data: Dict[str, Any]) -> bool:
+    """海啸 / 台风等非地震速报（不受速报震级阈值约束）。"""
+    if not isinstance(parsed_data, dict):
+        return False
+    return bool(
+        parsed_data.get("is_tsunami")
+        or parsed_data.get("is_typhoon")
+        or parsed_data.get("jian_typhoon")
+    )
+
+
 def passes_magnitude_filter(parsed_data: Dict[str, Any], config: Any, message_type: str) -> bool:
-    """震级过滤：0 表示不启用。预警/气象不受震级限制。"""
+    """
+    速报震级过滤：0 表示不启用。
+    仅约束地震速报；预警 / 气象 / 火山 / 海啸 / 台风不受限。
+    """
     mc = getattr(config, "message_config", None)
     if mc is None:
         return True
-    if message_type in ("warning", "weather"):
-        return True  # 预警与气象预警不受震级过滤限制
+    if message_type in ("warning", "weather", "volcano"):
+        return True
+    if message_type != "report":
+        return True
+    if _is_non_quake_report(parsed_data):
+        return True
     try:
         min_mag = float(getattr(mc, "min_report_magnitude", 0) or 0)
     except (TypeError, ValueError):
@@ -48,18 +66,38 @@ def passes_magnitude_filter(parsed_data: Dict[str, Any], config: Any, message_ty
     try:
         mag = float(parsed_data.get("magnitude") or 0)
     except (TypeError, ValueError):
-        return True
+        return False  # 启用阈值后无法解析震级 → 不放行
     return mag >= min_mag
 
 
-def passes_geo_filter(parsed_data: Dict[str, Any], config: Any) -> bool:
-    """距离过滤：未启用或缺少坐标时放行。"""
+def passes_geo_filter(
+    parsed_data: Dict[str, Any],
+    config: Any,
+    message_type: Optional[str] = None,
+) -> bool:
+    """
+    关注区域（圆心+半径）过滤。
+    仅作用于地震速报 / 预警；气象走「气象地区过滤」；海啸/台风/火山无坐标时放行。
+    启用后地震消息缺坐标 → 拒绝（避免「圈外静默漏进」）。
+    """
     mc = getattr(config, "message_config", None)
     if mc is None or not getattr(mc, "geo_filter_enabled", False):
         return True
+
+    mt = (message_type or parsed_data.get("type") or "report") if isinstance(parsed_data, dict) else "report"
+    # 气象预警有独立地区过滤，不套用圆心半径
+    if mt == "weather" or (
+        isinstance(parsed_data, dict) and parsed_data.get("source_type") == "weatheralarm"
+    ):
+        return True
+
     coords = event_coordinates(parsed_data)
     if coords is None:
+        # 地震速报/预警缺坐标：启用区域过滤后应丢弃
+        if mt in ("report", "warning") and not _is_non_quake_report(parsed_data or {}):
+            return False
         return True
+
     try:
         center_lat = float(getattr(mc, "geo_filter_latitude", 0))
         center_lon = float(getattr(mc, "geo_filter_longitude", 0))
@@ -97,17 +135,37 @@ _LEVEL_CN = {
     "橙色": "orange",
     "红": "red",
     "红色": "red",
+    # 台风白色预警图中央台无独立白图，过滤语义按蓝色处理
+    "白": "blue",
+    "白色": "blue",
 }
 _LEVEL_EN = {
     "blue": "blue",
     "yellow": "yellow",
     "orange": "orange",
     "red": "red",
+    "white": "blue",
 }
 _LEVEL_PATTERN = re.compile(
-    r"(红色|橙色|黄色|蓝色|白色|red|orange|yellow|blue)",
+    r"(红色|橙色|黄色|蓝色|白色|red|orange|yellow|blue|white)",
     re.IGNORECASE,
 )
+# 中央台图标码末位：1红 2橙 3黄 4蓝（见 weather.cma.cn/assets/img/alarm/p00…）
+_CMA_P00_LEVEL = {
+    "1": "red",
+    "2": "orange",
+    "3": "yellow",
+    "4": "blue",
+}
+_CMA_P00_RE = re.compile(r"\bp00\d{4}([1-4])\b", re.IGNORECASE)
+# 天气网四位短码末位：1蓝 2黄 3橙 4红（与中央台末位相反）
+_NMC_SHORT_LEVEL = {
+    "1": "blue",
+    "2": "yellow",
+    "3": "orange",
+    "4": "red",
+}
+_NMC_SHORT_RE = re.compile(r"\b\d{3}([1-4])\b")
 
 
 def _parse_region_keywords(raw: str) -> List[str]:
@@ -165,6 +223,23 @@ def _weather_search_text(parsed_data: Dict[str, Any]) -> str:
     return " ".join(str(p).strip() for p in parts if p)
 
 
+def _level_from_cma_code(text: str) -> Optional[str]:
+    """从中央台 p00… 图标码或天气网四位短码解析等级。"""
+    if not text:
+        return None
+    m = _CMA_P00_RE.search(text)
+    if m:
+        return _CMA_P00_LEVEL.get(m.group(1))
+    # 避免把年份等四位数字误判：仅当整体像告警短码时匹配
+    m2 = re.search(r"(?:^|[\s_/\-])(\d{3}[1-4])(?:$|[\s_/\-])", text)
+    if m2:
+        return _NMC_SHORT_LEVEL.get(m2.group(1)[-1])
+    m3 = _NMC_SHORT_RE.fullmatch(text.strip())
+    if m3:
+        return _NMC_SHORT_LEVEL.get(m3.group(1))
+    return None
+
+
 def extract_weather_level(parsed_data: Dict[str, Any]) -> Optional[str]:
     """
     从气象预警数据提取等级：blue / yellow / orange / red。
@@ -174,6 +249,7 @@ def extract_weather_level(parsed_data: Dict[str, Any]) -> Optional[str]:
         return None
     raw = parsed_data.get("raw_data") if isinstance(parsed_data.get("raw_data"), dict) else {}
     candidates = [
+        parsed_data.get("weather_level"),
         parsed_data.get("warning_type"),
         parsed_data.get("warning_level"),
         parsed_data.get("severity"),
@@ -185,13 +261,19 @@ def extract_weather_level(parsed_data: Dict[str, Any]) -> Optional[str]:
         raw.get("headline"),
         raw.get("title"),
         raw.get("description"),
+        raw.get("level"),
     ]
     text = " ".join(str(c).strip() for c in candidates if c)
     if not text:
         return None
 
+    # 中央台图标码 / 天气网短码（优先于英文单词，避免误伤）
+    coded = _level_from_cma_code(text)
+    if coded:
+        return coded
+
     # type 编码常见形式：11B20_yellow / xxx_orange
-    m_code = re.search(r"(?:_|/|-)?(blue|yellow|orange|red)\b", text, re.I)
+    m_code = re.search(r"(?:_|/|-)?(blue|yellow|orange|red|white)\b", text, re.I)
     if m_code:
         return _LEVEL_EN.get(m_code.group(1).lower())
 
@@ -237,6 +319,9 @@ def passes_weather_filter(parsed_data: Dict[str, Any], config: Any, message_type
     """气象预警地区/等级过滤；非气象消息直接放行。"""
     if message_type != "weather" and parsed_data.get("source_type") != "weatheralarm":
         return True
+    # 台风列表等非「颜色预警」不套用气象等级/地区过滤
+    if parsed_data.get("is_typhoon"):
+        return True
     mc = getattr(config, "message_config", None)
     if mc is None:
         return True
@@ -249,11 +334,12 @@ def passes_weather_filter(parsed_data: Dict[str, Any], config: Any, message_type
             if not any(_region_matches(kw, haystack) for kw in keywords):
                 return False
 
-    # 等级档位：不过滤 / 黄及以上 / 橙及以上 / 仅红；无法识别等级时放行
+    # 等级档位：不过滤 / 黄及以上 / 橙及以上 / 仅红
+    # 启用过滤后无法识别等级 → 丢弃（与设置页提示一致）
     allowed = _allowed_weather_levels(mc)
     if allowed is not None:
         level = extract_weather_level(parsed_data)
-        if level is not None and level not in allowed:
+        if level is None or level not in allowed:
             return False
 
     return True
@@ -267,7 +353,7 @@ def should_accept_message(
     """综合震级、区域与气象预警过滤。"""
     if not passes_magnitude_filter(parsed_data, config, message_type):
         return False
-    if not passes_geo_filter(parsed_data, config):
+    if not passes_geo_filter(parsed_data, config, message_type):
         return False
     if not passes_weather_filter(parsed_data, config, message_type):
         return False

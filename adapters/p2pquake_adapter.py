@@ -141,8 +141,8 @@ class P2PQuakeAdapter(BaseAdapter):
             latitude = self._safe_float(hypocenter.get('latitude'), 0.0)
             longitude = self._safe_float(hypocenter.get('longitude'), 0.0)
             depth_raw = self._safe_float(hypocenter.get('depth'), None)
-            # P2PQuake：depth=-1 表示不明；0 表示ごく浅い，保留 0
-            depth = 10.0 if depth_raw is None or depth_raw < 0 else depth_raw
+            # P2PQuake：depth=-1 表示不明 → 不写字段；0 表示ごく浅い，保留 0
+            depth = None if depth_raw is None or depth_raw < 0 else depth_raw
             place_name = hypocenter.get('name', '未知地区')
             
             # 提取时间（日本气象厅 API 为 JST）
@@ -177,13 +177,14 @@ class P2PQuakeAdapter(BaseAdapter):
                 'magnitude': magnitude,
                 'latitude': latitude,
                 'longitude': longitude,
-                'depth': depth,
                 'place_name': place_name,
                 'shock_time': shock_time,
                 'organization': organization,
                 'event_id': event_id,
                 'raw_data': item,
             }
+            if depth is not None:
+                result['depth'] = depth
             
             if max_scale_int is not None and max_scale_int >= 0:
                 result['max_scale'] = max_scale_int

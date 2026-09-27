@@ -1,6 +1,6 @@
 # 地震情报实况栏
 
-当前版本：**v2.8.5**
+当前版本：**v2.8.6**
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,9 +18,9 @@
 
 - 介绍页（安装包 / 便携版）：[sismotide.top/rolling-subtitle](https://sismotide.top/rolling-subtitle)
 - 安装包：https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe
-- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.8.5.zip
-- GitHub Release：[v2.8.5](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.8.5)
-- Gitee Release：[v2.8.5](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.8.5)
+- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.8.6.zip
+- GitHub Release：[v2.8.6](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.8.6)
+- Gitee Release：[v2.8.6](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.8.6)
 
 ## 功能
 
@@ -31,8 +31,8 @@
 ### 数据接入
 
 - **主数据源（三选一）**：Fan Studio、WeJet、Jian Project（默认）；切换主数据源后自动清空消息缓冲并重新订阅；保存后按所选主源启用连接。
-- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、OpenQuakeAPI、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。P2PQuake 地震情报（551）与主数据源 JMA 情报互斥。
-- **气象预警源（三选一）**：Fan Studio、WeJet、OpenQuakeAPI单独选用，避免同类信息重复推送。
+- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、PancakesAPI、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。P2PQuake 地震情报（551）与主数据源 JMA 情报互斥。
+- **气象预警源（互斥）**：Jian / Fan Studio / WeJet / PancakesAPI 单独选用，避免同类信息重复推送。
 - **国际及地区机构速报**：支持 USGS、EMSC、HKO、GFZ、USP、CWA、KMA、BMKG、GeoNet、INGV、PTWC 等机构信息，经主聚合服务或辅助通道接入。
 
 ### 界面与告警反馈
@@ -86,7 +86,7 @@
 | 模式 | 渲染 | 数据源与解析 | 告警反馈 |
 |------|------|--------------|----------|
 | **低性能** | CPU 软件渲染，30 fps | 仅保留主聚合源；关闭 Wolfx、Jian Project、P2PQuake、Nowquake 等辅助连接；精简国际速报解析；HTTP 轮询间隔约 2.5 倍 | 默认关闭音效 / TTS |
-| **中性能** | CPU 软件渲染，30 fps | 主聚合源 + 台风 HTTP、OpenQuakeAPI 等常用辅助源；解析开关恢复程序默认 | 跟随默认设置 |
+| **中性能** | CPU 软件渲染，30 fps | 主聚合源 + 台风 HTTP、PancakesAPI 等常用辅助源；解析开关恢复程序默认 | 跟随默认设置 |
 | **高性能** | OpenGL 硬件渲染，30 fps | 启用全部可选 WebSocket / HTTP 源（含 Jian Project、Wolfx、P2PQuake、Nowquake 等）及完整解析 | 开启预警音效 |
 | **极致** | OpenGL 硬件渲染，60 fps，2× MSAA | 与高性能相同的数据源与解析范围 | 开启预警音效与 Toast 通知 |
 

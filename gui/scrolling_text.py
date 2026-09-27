@@ -1077,7 +1077,8 @@ class _ScrollingTextMixin:
             if self.current_text:
                 total_width += self._cached_text_width
         lead_w = self._get_lead_badge_width()
-        if total_width > 0 and self.x_position + lead_w + total_width < 0:
+        # 宽度为 0 时也必须完成一轮，否则永远不 emit → 黑屏卡住
+        if total_width <= 0 or self.x_position + lead_w + total_width < 0:
             with self._scrolling_lock:
                 self._is_scrolling = False
             self.scroll_completed.emit()
@@ -1119,6 +1120,11 @@ class _ScrollingTextMixin:
                     return self.current_color
                 return self._get_validated_color('#FFF500', message_type)
             elif message_type == 'report':
+                if parsed_data and parsed_data.get('is_tsunami'):
+                    from utils.message_processor import MessageProcessor
+                    processor = MessageProcessor()
+                    color_str = processor.get_message_color('report', parsed_data)
+                    return self._get_validated_color(color_str, message_type)
                 return self._get_validated_color(self.config.message_config.report_color, message_type)
             elif message_type == 'warning':
                 return self._get_validated_color(self.config.message_config.warning_color, message_type)

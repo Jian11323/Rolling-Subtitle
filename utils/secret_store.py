@@ -28,6 +28,8 @@ SECRET_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("WS_CONFIG", "whews_token"),
     ("WS_CONFIG", "whews_cea_app_secret"),
     ("WS_CONFIG", "eqsc_login_token"),
+    ("WS_CONFIG", "jian_login_token"),
+    ("WS_CONFIG", "jian_refresh_token"),
     ("TRANSLATION_CONFIG", "baidu_secret"),
 )
 

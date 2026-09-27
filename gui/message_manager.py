@@ -16,112 +16,176 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-# 数据源优先级定义（数字越小优先级越高）
-# 注意：这是速报消息的优先级，预警消息（除气象预警外）永远优先于速报
-# 速报播放顺序：气象预警、海啸信息、cenc、省级局、cwa、p2pquake…、国际速报
-SOURCE_PRIORITY: Dict[str, int] = {
-    'weatheralarm': 1,
-    'fanstudio_typhoon': 2,
-    'tsunami': 3,
-    '海啸信息': 3,
-    'ntwc': 3,
-    'ptwc': 3,
-    'incois': 3,
-    'jma_tsunami': 3,
-    
-    # 速报数据源 - 按指定顺序设置优先级
-    'cenc': 4,
-    'cenc-ir': 4,
-    'ningxia': 5,
-    'guangxi': 6,
-    'shanxi': 7,
-    'beijing': 8,
-    'yunnan': 9,
-    'fujian': 10,
-    'sichuan': 11,
-    'shaanxi': 12,
-    'hubei': 13,
-    'cwa': 14,
-    'jma_eq': 15,  # 主源（WeJet/Jian）日本气象厅地震情报
-    'p2pquake': 15,  # P2P日本气象厅地震情报
-    'p2pquake_tsunami': 16,  # P2P日本气象厅海啸预报
-    'jma_volcano': 17,  # JMA 火山情报
-    'hko': 18,
-    'usgs': 19,
-    'emsc': 20,
-    'bcsf': 21,
-    'gfz': 22,
-    'usp': 23,
-    'kma': 24,
-    'bmkg': 25,
-    'geonet': 26,
-    'ingv': 27,
-    'tmd': 28,
-    'mmd': 29,
-    'nrcan': 30,
-    'phivolcs': 30,
-    'sgc': 30,
-    'ga': 30,
-    'cenais': 30,
-    'fssn': 32,
-    'fssn-cmt': 33,
-    # 地震预警数据源 - 保持高优先级（优先级0，最高）
-    'cea': 0,
-    'cea-pr': 0,
-    'cwa-eew': 0,
-    'jma': 0,
-    'sa': 0,
-    'kma-eew': 0,
-    # Wolfx 聚合预警
-    'wolfx_jma_eew': 0,
-    'wolfx_sc_eew': 0,
-    'wolfx_fj_eew': 0,
-    'wolfx_cenc_eew': 0,
-    'wolfx_cq_eew': 0,
-    'wolfx_cwa_eew': 0,
-    # EQSC 预警
-    'eqsc_jma_eew': 0,
-    'p2pquake_eew': 0,
-    # Wolfx 列表速报
-    'wolfx_cenc': 4,
-    'wolfx_jma_eqlist': 11,
-    'eqsc_cenc': 4,
-    'eqsc_cenc_ir': 4,
-    'eqsc_jma_report': 15,
-    'eqsc_jma_tsunami': 3,
-    'eqsc_cwa': 14,
-    'eqsc_hko': 18,
-    'eqsc_usgs': 19,
-    'eqsc_emsc': 20,
-    'eqsc_typhoon': 2,
-    'eqsc_volcano': 17,
-    'early_est': 0,
-    # 默认优先级（未知数据源）
-    'default': 99,
-}
+# 数据源优先级定义（数字越小越靠前）
+# 预警仍为 0（进 warning 缓冲）；速报轮播对齐 Jian /all 快照键序（见 api/all.php）
+# /all：weather → nmefc-tsunami → cea… → … → jma-volcano → usgs-volcano → usgs-tsunami
+# 台风不在 /all，放队尾
 
-# 固定 source 排序索引（用于同优先级内稳定轮播，避免顺序抖动）
-SOURCE_FIXED_ORDER: List[str] = [
-    # 地震预警（priority=0）
-    'cea', 'cea-pr', 'cwa-eew', 'jma', 'sa', 'kma-eew',
-    'wolfx_jma_eew', 'wolfx_sc_eew', 'wolfx_fj_eew', 'wolfx_cenc_eew', 'wolfx_cq_eew', 'wolfx_cwa_eew',
-    'eqsc_jma_eew',
-    'p2pquake_eew',
-    'early_est',
-    # 速报
-    'weatheralarm', 'fanstudio_typhoon', 'eqsc_typhoon',
-    'tsunami', '海啸信息', 'ntwc', 'ptwc', 'incois', 'jma_tsunami', 'eqsc_jma_tsunami',
-    'cenc', 'cenc-ir', 'wolfx_cenc', 'eqsc_cenc', 'eqsc_cenc_ir',
-    'ningxia', 'guangxi', 'shanxi', 'beijing', 'yunnan',
-    'fujian', 'sichuan', 'shaanxi', 'hubei',
-    'cwa', 'eqsc_cwa',
-    'jma_eq', 'p2pquake', 'wolfx_jma_eqlist', 'eqsc_jma_report', 'p2pquake_tsunami', 'jma_volcano', 'eqsc_volcano',
-    'hko', 'eqsc_hko', 'usgs', 'eqsc_usgs', 'emsc', 'eqsc_emsc',
-    'bcsf', 'gfz', 'usp', 'kma',
-    'bmkg', 'geonet', 'ingv', 'tmd', 'mmd', 'nrcan', 'phivolcs', 'sgc', 'ga', 'cenais', 'fssn', 'fssn-cmt',
+# Jian /all 全数据流顺序（短名 → 已映射为内部 source_type）
+_ALL_STREAM_ORDER: List[str] = [
+    # 灾害/气象（报告缓冲）
+    "weatheralarm",  # weather
+    "tsunami",  # nmefc-tsunami
+    # 地震预警（warning 缓冲，priority=0）
+    "cea",
+    "cwa-eew",
+    "jma",  # jma-eew
+    "sa",
+    "kma-eew",
+    "early_est",  # early-est
+    # 国内/地区速报
+    "cenc",
+    "ningxia",
+    "yunnan",
+    "shanxi",
+    "beijing",
+    "cwa",
+    "cwa_tsunami",
+    "jma_eq",  # jma
+    "jma_tsunami",
+    "hko",
+    # 国际速报（与 /all 键序一致）
+    "tmd",
+    "mmd",
+    "bmkg",
+    "geonet",
+    "usgs",
+    "emsc",
+    "gfz",
+    "bcsf",
+    "ingv",
+    "usp",
+    "nrcan",
+    "afad",
+    "ipma",
+    "noa",
+    "sed",
+    "scsn",
+    "ipgp",
+    "infp",
+    "isc",
+    "knmi",
+    "ncedc",
+    "lmu",
+    "kma",
+    "koeri",
+    "gsras",
+    "csn",
+    "phivolcs",
+    "ssn",
+    "ga",
+    "igepn",
+    "peru",
+    "jma_volcano",
+    "usgs_volcano",
+    "usgs_tsunami",
 ]
+
+# 不在 /all、但客户端会播的源：插在语义相邻位置，或队尾
+_ALL_STREAM_EXTRAS: List[str] = [
+    "海啸信息", "ntwc", "ptwc", "incois", "cat_tsunami", "eqsc_jma_tsunami",
+    "cenc-ir", "wolfx_cenc", "eqsc_cenc", "eqsc_cenc_ir",
+    "guangxi", "fujian", "sichuan", "shaanxi", "hubei",
+    "eqsc_cwa",
+    "p2pquake", "wolfx_jma_eqlist", "eqsc_jma_report", "p2pquake_tsunami",
+    "eqsc_volcano",
+    "eqsc_hko", "eqsc_usgs", "eqsc_emsc",
+    "sgc", "cenais",
+    "fssn", "fssn-cmt",
+    "cmt_usgs", "cmt_emsc", "cmt_cenc", "cmt_ingv",
+    # 台风：不在 /all，放最后
+    "jian_typhoon", "eqsc_typhoon", "whews_typhoon",
+]
+
+_WARNING_SOURCES = frozenset({
+    "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
+    "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
+    "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "p2pquake_eew",
+})
+
+
+def _build_all_stream_priority_and_order() -> tuple:
+    """由 /all 键序生成 SOURCE_PRIORITY 与 SOURCE_FIXED_ORDER。"""
+    fixed: List[str] = []
+    # 预警先列（缓冲分离，顺序仅作同组稳定）
+    for s in (
+        "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
+        "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
+        "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "p2pquake_eew",
+    ):
+        if s not in fixed:
+            fixed.append(s)
+
+    # /all 正文序（跳过已在预警区的）
+    for s in _ALL_STREAM_ORDER:
+        if s not in fixed:
+            fixed.append(s)
+
+    # 邻近插入：cenc-ir 紧跟 cenc；省局跟在北京后；p2p 跟 jma_eq 等
+    def _insert_after(anchor: str, item: str) -> None:
+        if item in fixed:
+            return
+        if anchor in fixed:
+            fixed.insert(fixed.index(anchor) + 1, item)
+        else:
+            fixed.append(item)
+
+    _insert_after("tsunami", "海啸信息")
+    _insert_after("海啸信息", "ntwc")
+    _insert_after("ntwc", "ptwc")
+    _insert_after("ptwc", "incois")
+    _insert_after("incois", "cat_tsunami")
+    _insert_after("jma_tsunami", "eqsc_jma_tsunami")
+    _insert_after("jma_tsunami", "p2pquake_tsunami")
+    _insert_after("cenc", "cenc-ir")
+    _insert_after("cenc-ir", "wolfx_cenc")
+    _insert_after("wolfx_cenc", "eqsc_cenc")
+    _insert_after("eqsc_cenc", "eqsc_cenc_ir")
+    _insert_after("beijing", "guangxi")
+    _insert_after("guangxi", "fujian")
+    _insert_after("fujian", "sichuan")
+    _insert_after("sichuan", "shaanxi")
+    _insert_after("shaanxi", "hubei")
+    _insert_after("cwa", "eqsc_cwa")
+    _insert_after("jma_eq", "p2pquake")
+    _insert_after("p2pquake", "wolfx_jma_eqlist")
+    _insert_after("wolfx_jma_eqlist", "eqsc_jma_report")
+    _insert_after("hko", "eqsc_hko")
+    _insert_after("usgs", "eqsc_usgs")
+    _insert_after("emsc", "eqsc_emsc")
+    _insert_after("usgs_volcano", "eqsc_volcano")
+    _insert_after("phivolcs", "sgc")
+    _insert_after("ga", "cenais")
+
+    for s in _ALL_STREAM_EXTRAS:
+        if s not in fixed:
+            fixed.append(s)
+
+    priority: Dict[str, int] = {}
+    report_rank = 1
+    for s in fixed:
+        if s in _WARNING_SOURCES:
+            priority[s] = 0
+        else:
+            priority[s] = report_rank
+            report_rank += 1
+    priority["default"] = 999
+    return priority, fixed
+
+
+SOURCE_PRIORITY, SOURCE_FIXED_ORDER = _build_all_stream_priority_and_order()
 SOURCE_FIXED_ORDER_INDEX: Dict[str, int] = {
     source: idx for idx, source in enumerate(SOURCE_FIXED_ORDER)
+}
+
+# 淘汰缓冲时的优先级覆盖（越小越不易被挤掉）。台风播最后，但尽量留在缓冲里。
+_EVICT_PRIORITY_OVERRIDE: Dict[str, int] = {
+    "jian_typhoon": 20,
+    "eqsc_typhoon": 20,
+    "whews_typhoon": 20,
+    "weatheralarm": 1,
+    "tsunami": 2,
+    "海啸信息": 2,
 }
 
 
@@ -340,6 +404,8 @@ class MessageBuffer:
         self._message_add_order: Dict[int, int] = {}
         # 记录当前正在显示的消息ID，用于排序后重新定位
         self._current_displaying_msg_id: Optional[int] = None
+        # 本轮已播过的 source：中途插入的更高优先级（如气象）不会被跳到下一轮才播
+        self._shown_sources_this_round: set = set()
 
     def set_max_size(self, new_max: int) -> None:
         """热调整缓冲上限，并剔除超出容量的低优先级项。"""
@@ -766,7 +832,9 @@ class MessageBuffer:
 
         def removal_key(msg: MessageItem) -> tuple:
             """缓冲区溢出时的移除排序键：低优先级、较旧的消息优先淘汰。"""
-            priority = get_source_priority(msg.source)
+            priority = _EVICT_PRIORITY_OVERRIDE.get(
+                msg.source, get_source_priority(msg.source)
+            )
             add_order = self._message_add_order.get(id(msg), float('inf'))
             # 先按优先级降序，低优先级先被移除；同优先级内先移除最旧消息
             return (-priority, add_order)
@@ -776,6 +844,9 @@ class MessageBuffer:
         msg_id = id(removed_msg)
         if msg_id in self._message_add_order:
             del self._message_add_order[msg_id]
+        # 被挤出缓冲后允许本轮稍后再播同 source 的新条目
+        if removed_msg.source:
+            self._shown_sources_this_round.discard(removed_msg.source)
 
         if self.current_index > remove_index:
             self.current_index -= 1
@@ -872,6 +943,26 @@ class MessageBuffer:
             # 按优先级轮播
             return self._get_next_by_priority()
 
+    def mark_source_shown(self, source: str) -> None:
+        """标记某 source 已在本轮播过（首条上屏、同事件待更新重显时调用）。"""
+        if not source:
+            return
+        with self._lock:
+            self._shown_sources_this_round.add(source)
+
+    def begin_round_with(self, message: MessageItem) -> None:
+        """从预警切到速报等场景：新开一轮并从该消息起算已播。"""
+        with self._lock:
+            self._shown_sources_this_round.clear()
+            if message is not None and message.source:
+                self._shown_sources_this_round.add(message.source)
+            if message is not None:
+                self._current_displaying_msg_id = id(message)
+                for i, msg in enumerate(self.buffer):
+                    if id(msg) == id(message):
+                        self.current_index = i
+                        break
+
     def get_next_excluding_sources(self, exclude_sources: List[str]) -> Optional[MessageItem]:
         """
         获取下一条消息（按优先级轮播），但跳过 source 在 exclude_sources 中的消息。
@@ -882,24 +973,48 @@ class MessageBuffer:
                 self._current_displaying_msg_id = None
                 return None
             exclude_set = set(exclude_sources)
-            self._sort_by_priority()
-            current_msg_index = -1
-            if self._current_displaying_msg_id is not None:
+            if self.use_priority:
+                self._sort_by_priority()
+                prev_source = "None"
+                if self._current_displaying_msg_id is not None:
+                    for msg in self.buffer:
+                        if id(msg) == self._current_displaying_msg_id:
+                            prev_source = msg.source
+                            break
                 for i, msg in enumerate(self.buffer):
-                    if id(msg) == self._current_displaying_msg_id:
-                        current_msg_index = i
-                        break
-            start_index = (current_msg_index + 1) % len(self.buffer) if current_msg_index >= 0 else 0
-            first_excluded_msg = None
-            for _ in range(len(self.buffer)):
-                msg = self.buffer[start_index]
-                if msg.source not in exclude_set:
-                    self.current_index = start_index
+                    if msg.source in exclude_set:
+                        continue
+                    if msg.source in self._shown_sources_this_round:
+                        continue
+                    self.current_index = i
                     self._current_displaying_msg_id = id(msg)
+                    self._shown_sources_this_round.add(msg.source)
+                    logger.debug(
+                        f"轮播顺序: {prev_source}(p={get_source_priority(prev_source) if prev_source != 'None' else -1}) -> "
+                        f"{msg.source}(p={get_source_priority(msg.source)}, idx={i})"
+                    )
+                    return msg
+                # 本轮非排除源均已播完：开新一轮
+                self._shown_sources_this_round.clear()
+                logger.debug("完成一轮轮播，从气象预警开始重复轮播")
+                for i, msg in enumerate(self.buffer):
+                    if msg.source in exclude_set:
+                        continue
+                    self.current_index = i
+                    self._current_displaying_msg_id = id(msg)
+                    self._shown_sources_this_round.add(msg.source)
+                    return msg
+            first_excluded_msg = None
+            for msg in self.buffer:
+                if msg.source not in exclude_set:
+                    for i, m in enumerate(self.buffer):
+                        if id(m) == id(msg):
+                            self.current_index = i
+                            self._current_displaying_msg_id = id(m)
+                            break
                     return msg
                 if first_excluded_msg is None:
                     first_excluded_msg = msg
-                start_index = (start_index + 1) % len(self.buffer)
             if first_excluded_msg is not None:
                 for i, m in enumerate(self.buffer):
                     if id(m) == id(first_excluded_msg):
@@ -912,59 +1027,56 @@ class MessageBuffer:
 
     def _get_next_by_priority(self) -> Optional[MessageItem]:
         """
-        按优先级轮播消息
-        
-        策略：严格按照优先级顺序轮播，缓冲区已经按优先级排序
-        无论什么时候，都基于当前显示的消息找到下一条，确保顺序正确
-        轮播结束后自动从气象预警开始重复轮播
-        速报轮播顺序：气象预警、cenc, ningxia, guangxi, shanxi, beijing, cwa, p2pquake, hko, usgs, emsc, bcsf, gfz, usp, kma, fssn
+        按优先级轮播消息。
+
+        策略：缓冲区按优先级排序后，取「本轮尚未播过」的第一条。
+        这样中途插入的更高优先级（如气象预警）会在当前条滚完后立刻插入播放，
+        而不会被跳到整轮结束后才出现。
+        本轮全部播完后清空已播集合，从队首（通常为气象）重新开始。
         """
         if not self.buffer:
             self._current_displaying_msg_id = None
             return None
         
-        # 确保缓冲区按优先级排序（每次轮播前都检查，确保顺序正确）
         self._sort_by_priority()
-        
-        # 找到当前正在显示的消息在缓冲区中的位置
+
+        prev_source = "None"
         current_msg_index = -1
         if self._current_displaying_msg_id is not None:
             for i, msg in enumerate(self.buffer):
                 if id(msg) == self._current_displaying_msg_id:
                     current_msg_index = i
+                    prev_source = msg.source
                     break
-        
-        # 如果找到了当前消息，从下一条开始；否则从第一条开始（气象预警）
-        if current_msg_index >= 0:
-            # 找到当前消息，从下一条开始轮播
-            next_index = (current_msg_index + 1) % len(self.buffer)
-            # 如果回到索引0，说明完成了一轮轮播，从气象预警开始
-            if next_index == 0:
-                logger.debug("完成一轮轮播，从气象预警开始重复轮播")
-        else:
-            # 没找到当前消息（可能是新消息或排序后丢失），从第一条开始（气象预警）
-            next_index = 0
-            logger.debug("未找到当前消息，从气象预警开始轮播")
-        
-        # 确保索引有效
-        if next_index >= len(self.buffer) or next_index < 0:
-            next_index = 0
-            logger.debug(f"索引超出范围，重置为0（从气象预警开始）")
-        
-        # 更新索引和当前显示的消息ID
-        self.current_index = next_index
-        msg = self.buffer[next_index]
-        prev_source = self.buffer[current_msg_index].source if current_msg_index >= 0 else "None"
+
+        # 本轮尚未播过的第一条（按已排序缓冲）
+        for i, msg in enumerate(self.buffer):
+            if msg.source in self._shown_sources_this_round:
+                continue
+            self.current_index = i
+            self._current_displaying_msg_id = id(msg)
+            self._shown_sources_this_round.add(msg.source)
+            priority = get_source_priority(msg.source)
+            prev_priority = get_source_priority(prev_source) if prev_source != "None" else -1
+            logger.debug(
+                f"轮播顺序: {prev_source}(p={prev_priority}, idx={current_msg_index}) -> "
+                f"{msg.source}(p={priority}, idx={i})"
+            )
+            return msg
+
+        # 全部播完：新开一轮
+        self._shown_sources_this_round.clear()
+        logger.debug("完成一轮轮播，从气象预警开始重复轮播")
+        msg = self.buffer[0]
+        self.current_index = 0
         self._current_displaying_msg_id = id(msg)
-        
-        # 调试日志：显示轮播顺序
+        self._shown_sources_this_round.add(msg.source)
         priority = get_source_priority(msg.source)
         prev_priority = get_source_priority(prev_source) if prev_source != "None" else -1
         logger.debug(
             f"轮播顺序: {prev_source}(p={prev_priority}, idx={current_msg_index}) -> "
-            f"{msg.source}(p={priority}, idx={next_index})"
+            f"{msg.source}(p={priority}, idx=0)"
         )
-        
         return msg
     
     def size(self) -> int:
@@ -993,6 +1105,8 @@ class MessageBuffer:
                     self._message_add_order.pop(msg_id, None)
                     if self._current_displaying_msg_id == msg_id:
                         self._current_displaying_msg_id = None
+                    if msg.source:
+                        self._shown_sources_this_round.discard(msg.source)
                     removed += 1
                     continue
                 kept.append(msg)
@@ -1019,6 +1133,7 @@ class MessageBuffer:
             self._message_add_order.clear()
             self._add_order_counter = 0
             self._current_displaying_msg_id = None
+            self._shown_sources_this_round.clear()
 
 
 def _normalize_warning_text(text: str) -> str:

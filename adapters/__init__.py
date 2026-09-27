@@ -14,7 +14,7 @@ from typing import Any, Dict, Tuple
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseAdapter": (".base_adapter", "BaseAdapter"),
     "FanStudioAdapter": (".fanstudio_adapter", "FanStudioAdapter"),
-    "FanStudioHttpAdapter": (".fanstudio_http_adapter", "FanStudioHttpAdapter"),
+    "JianTyphoonHttpAdapter": (".jian_typhoon_http_adapter", "JianTyphoonHttpAdapter"),
     "P2PQuakeAdapter": (".p2pquake_adapter", "P2PQuakeAdapter"),
     "P2PQuakeTsunamiAdapter": (".p2pquake_tsunami_adapter", "P2PQuakeTsunamiAdapter"),
     "P2PQuakeWebSocketAdapter": (".p2pquake_ws_adapter", "P2PQuakeWebSocketAdapter"),
