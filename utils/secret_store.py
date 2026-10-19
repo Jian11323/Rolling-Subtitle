@@ -24,7 +24,6 @@ _ENC_PREFIX = "enc:v1:"
 
 # (section, field) — 需保护的敏感键
 SECRET_FIELDS: Tuple[Tuple[str, str], ...] = (
-    ("WS_CONFIG", "fanstudio_api_key"),
     ("WS_CONFIG", "whews_token"),
     ("WS_CONFIG", "whews_cea_app_secret"),
     ("WS_CONFIG", "eqsc_login_token"),

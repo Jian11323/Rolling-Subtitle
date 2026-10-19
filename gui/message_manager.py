@@ -100,7 +100,7 @@ _ALL_STREAM_EXTRAS: List[str] = [
 _WARNING_SOURCES = frozenset({
     "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
     "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
-    "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "p2pquake_eew",
+    "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew",
 })
 
 
@@ -111,7 +111,7 @@ def _build_all_stream_priority_and_order() -> tuple:
     for s in (
         "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
         "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
-        "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew", "p2pquake_eew",
+        "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew",
     ):
         if s not in fixed:
             fixed.append(s)

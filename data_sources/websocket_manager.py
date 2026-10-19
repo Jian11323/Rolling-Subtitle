@@ -23,8 +23,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config  # 读取全局配置与开关
 from config import (
-    FANSTUDIO_ALL_URLS,
-    fanstudio_ws_url,
     WHEWS_WS_URLS,
     is_whews_url,
     is_whews_dedicated_endpoint,
@@ -38,6 +36,9 @@ from config import (
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
     NOWQUAKE_CENCINT_WSS_URL,
+    FSSN_ALL_URL,
+    FSSN_FSSN_URL,
+    FSSN_CMT_URL,
     EQSC_WS_URL,
     P2PQUAKE_HISTORY_AGGREGATE_URL,
     OPENQUAKE_WS_ALL_URL,
@@ -46,18 +47,14 @@ from config import (
 )
 from utils.logger import get_logger
 from utils.message_processor import warning_shock_validity_remaining_seconds
-from utils.fanstudio_credentials import (
-    build_fanstudio_auth_message,
-    parse_fanstudio_auth_response,
-)
 
 logger = get_logger()
 
-# P2PQuake HTTP 聚合接口：551 地震情报 / 552 津波预报 / 556 緊急地震速报
+# P2PQuake HTTP 聚合接口：551 地震情报 / 552 津波预报
 P2PQUAKE_HISTORY_URL = P2PQUAKE_HISTORY_AGGREGATE_URL
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
-    "fanstudio": 45,
+    "fssn": 60,
     "whews": 90,
     "jian": 90,
     "wolfx": 90,
@@ -237,9 +234,7 @@ class WebSocketManager:
         self._running = True  # 全局运行标志
         self._connect_error_log: Dict[str, tuple] = {}  # 连接错误降噪记录
         # Fan Studio /all：已发鉴权、等待 auth_success 期间，跳过鉴权前的精简 initial_all
-        self._fanstudio_awaiting_auth: Dict[str, bool] = {}
         # Fan Studio /all 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
-        self._fanstudio_auth_status: Dict[str, Tuple[str, str]] = {}
         # EQSC 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
         self._eqsc_auth_status: Dict[str, Tuple[str, str]] = {}
         # WeJet CEA App 鉴权：url -> 状态；accessToken；续票任务
@@ -258,8 +253,10 @@ class WebSocketManager:
     def _get_source_kind(self, url: str) -> str:
         """按 URL 识别数据源类型（用于心跳策略）"""
         normalized = (url or "").strip().lower().rstrip("/")
+        if "fssn-api.fanstudio.tech" in normalized:
+            return "fssn"
         if "fanstudio.tech" in normalized:
-            return "fanstudio"
+            return "other"
         if is_whews_url(normalized):
             return "whews"
         if is_jian_project_url(normalized):
@@ -344,7 +341,7 @@ class WebSocketManager:
         entry["timeout_count"] = int(entry.get("timeout_count", 0) or 0) + 1
         source_kind = entry.get("source_kind", "other")
         # EQSC 需回显服务端 heartbeat，不发客户端 ping
-        if source_kind not in ("fanstudio", "wolfx", "whews"):
+        if source_kind not in ("fssn", "jian", "wolfx", "whews"):
             return
         # 防止超时后每个循环都发送 ping：最短间隔取阈值一半，至少 10 秒
         min_retry_gap = max(10, timeout_seconds // 2)
@@ -352,7 +349,7 @@ class WebSocketManager:
         if last_auto_ping > 0 and (now - last_auto_ping) < min_retry_gap:
             return
         try:
-            if source_kind == "whews":
+            if source_kind in ("whews", "jian"):
                 await websocket.send(json.dumps({"type": "ping"}))
             else:
                 await websocket.send("ping")
@@ -410,18 +407,17 @@ class WebSocketManager:
             adapter = JianProjectAdapter("jian", url)
             adapter._manager_source_type = "jian_all"
             return adapter
-        # 检查是否为Fan Studio数据源（公开版仅允许 /all）
-        if 'fanstudio.tech' in url:
-            from adapters.fanstudio_adapter import FanStudioAdapter
-            parts = url.split('/')
-            source_type = parts[-1] if parts[-1] else parts[-2]
-            if (source_type or '').lower() != 'all':
-                logger.warning(f"已拒绝连接已下线的 Fan Studio 路径（仅保留 /all）: {url}")
-                return None
-            adapter = FanStudioAdapter(source_type, url)
-            adapter._manager_source_type = source_type
+        # FSSN
+        if "fssn-api.fanstudio.tech" in (url or "").lower():
+            from adapters.fssn_adapter import FssnAdapter
+            adapter = FssnAdapter("fssn", url)
+            adapter._manager_source_type = "fssn"
             return adapter
-        # P2PQuake WebSocket（解析 551 / 552 / 556）
+        # 旧 Fan Studio 聚合 API 已移除
+        if "fanstudio.tech" in (url or "").lower():
+            logger.warning(f"已拒绝连接已下线的 Fan Studio 主源: {url}")
+            return None
+        # P2PQuake WebSocket（解析 551 / 552）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
             from adapters.p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
             adapter = P2PQuakeWebSocketAdapter('p2pquake_ws', url)
@@ -476,20 +472,22 @@ class WebSocketManager:
             if source_type:
                 if parsed_data.get('whews'):
                     return source_type
+                if parsed_data.get('fssn') and source_type:
+                    return source_type
                 if parsed_data.get('jian') and source_type:
                     return source_type
                 if parsed_data.get('openquake') and source_type:
                     return source_type
-                return config.get_source_name(fanstudio_ws_url(source_type))
+                return source_type
             
             # 尝试从raw_data中获取数据源信息
             raw_data = parsed_data.get('raw_data', {})
             if 'source' in raw_data:
                 source = raw_data['source']
-                return config.get_source_name(fanstudio_ws_url(source))
+                return source
             elif '_update_source' in raw_data:
                 source = raw_data['_update_source']
-                return config.get_source_name(fanstudio_ws_url(source))
+                return source
             
             # 根据organization推断
             organization = parsed_data.get('organization', '')
@@ -523,7 +521,7 @@ class WebSocketManager:
                 "自然资源部海啸预警中心": "tsunami",
             }
             source = org_mapping.get(organization, default_source)
-            return config.get_source_name(fanstudio_ws_url(source)) if source != default_source else default_source
+            return source if source != default_source else default_source
         except Exception as e:
             logger.error(f"获取数据源名称失败: {e}")
             return default_source
@@ -599,34 +597,6 @@ class WebSocketManager:
                     self._mark_heartbeat_received(url, source_name)
                     logger.debug(f"[{source_name}] 收到 P2PQuake 心跳(code=555)")
                     return
-                auth_ok, auth_msg = parse_fanstudio_auth_response(data)
-                if auth_ok is True:
-                    self._fanstudio_awaiting_auth[url] = False
-                    self._fanstudio_auth_status[url] = (
-                        "ok",
-                        auth_msg or "鉴权成功，已接入数据流。",
-                    )
-                    logger.info(f"[{source_name}] Fan Studio 鉴权成功: {auth_msg}")
-                    return
-                if auth_ok is False and msg_type == "error":
-                    was_awaiting = self._fanstudio_awaiting_auth.pop(url, False)
-                    # 鉴权失败或其它服务端错误
-                    if was_awaiting or "鉴权" in auth_msg or "auth" in auth_msg.lower() or "key" in auth_msg.lower() or "appid" in auth_msg.lower():
-                        self._fanstudio_auth_status[url] = (
-                            "failed",
-                            auth_msg or "鉴权失败",
-                        )
-                        logger.warning(f"[{source_name}] Fan Studio 鉴权失败: {auth_msg}")
-                    else:
-                        logger.warning(f"[{source_name}] Fan Studio 错误: {auth_msg}")
-                    return
-                # 已发 Key 鉴权、尚未收到结果：跳过鉴权前的精简 initial_all，等完整流
-                if self._fanstudio_awaiting_auth.get(url) and msg_type == "initial_all":
-                    logger.debug(
-                        f"[{source_name}] 等待 Fan Studio 鉴权完成，暂缓处理鉴权前的 initial_all"
-                    )
-                    return
-            
             cfg = Config()
             if not is_ws_url_enabled(cfg, url):
                 logger.debug(f"[{source_name}] 该 WebSocket 已在配置中关闭，跳过业务消息: {url}")
@@ -680,6 +650,15 @@ class WebSocketManager:
                         _dispatch_parsed_message(
                             self, parsed_data, actual_source, source_name
                         )
+                # 首连聚合快照入队后再放行轮播，避免 FSSN 等先到的低优先级源抢先上屏
+                if isinstance(data, dict) and msg_type == "all":
+                    try:
+                        self.message_callback(
+                            "__order_gate__",
+                            {"_order_gate": "jian_snapshot"},
+                        )
+                    except Exception as gate_err:
+                        logger.debug(f"[{source_name}] 通知轮播顺序就绪失败: {gate_err}")
             else:
                 # 普通解析（包括 update 类型、NIED、P2PQuake、自定义源）
                 if is_custom_data_source_url(url, cfg) and hasattr(adapter, "parse_all"):
@@ -697,8 +676,34 @@ class WebSocketManager:
                         )
                     return
 
-                parsed_data = await asyncio.to_thread(adapter.parse, data)
-                if parsed_data:
+                parsed = await asyncio.to_thread(adapter.parse, data)
+                suppress_tts = False
+                if isinstance(parsed, list):
+                    batch = [item for item in parsed if isinstance(item, dict) and item]
+                    if isinstance(data, dict):
+                        list_type = str(data.get("type") or "").strip().lower()
+                        if list_type in (
+                            "fssnlist_response",
+                            "cmtlist_response",
+                            "initial_all",
+                        ):
+                            suppress_tts = True
+                    if batch and suppress_tts:
+                        logger.info(
+                            f"[{source_name}] 收到列表响应，共 {len(batch)} 条"
+                        )
+                        _emit_bulk_parse_status(self, batch, source_name)
+                        batch = _apply_bulk_dispatch_limit(batch)
+                elif isinstance(parsed, dict):
+                    batch = [parsed]
+                else:
+                    batch = []
+                if not batch:
+                    logger.debug(f"[{source_name}] 数据无效或被过滤")
+                    return
+                for parsed_data in batch:
+                    if suppress_tts:
+                        parsed_data["_suppress_tts"] = True
                     # EQSC 烈度列表：详情失败则丢弃薄事件，不入队
                     if (
                         parsed_data.get("eqsc_need_intensity_detail")
@@ -724,13 +729,12 @@ class WebSocketManager:
                                 )
                                 parsed_data = None
                     if not parsed_data:
-                        return
+                        continue
                     # Wolfx / P2PQuake / EMSC / Nowquake / EQSC / PancakesAPI：用 parsed_data 的 source_type
                     pt = parsed_data.get('source_type', '')
                     direct_sources = WOLFX_DIRECT_SOURCE_TYPES + (
                         'p2pquake',
                         'p2pquake_tsunami',
-                        'p2pquake_eew',
                         'emsc',
                         'cenc-ir',
                     )
@@ -746,6 +750,8 @@ class WebSocketManager:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif parsed_data.get("jian") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
+                    elif parsed_data.get("fssn") and pt:
+                        actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif parsed_data.get("openquake") and pt:
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
@@ -753,8 +759,6 @@ class WebSocketManager:
                     else:
                         actual_source = source_name
                     _dispatch_parsed_message(self, parsed_data, actual_source, source_name)
-                else:
-                    logger.debug(f"[{source_name}] 数据无效或被过滤")
         except Exception as e:
             logger.error(f"[{source_name}] 处理消息时出错: {e}", exc_info=True)
     
@@ -1035,8 +1039,16 @@ class WebSocketManager:
                     if is_whews_url(url or ""):
                         await self._maybe_send_whews_auth(websocket, url, source_name)
 
-                    # Fan Studio /all：连接后发送鉴权（未填 API Key 则仅公开精简流）
-                    await self._maybe_send_fanstudio_auth(websocket, url, source_name)
+                    # FSSN：建连后拉取列表
+                    if "fssn-api.fanstudio.tech" in (url or "").lower():
+                        from adapters.fssn_adapter import FssnAdapter
+                        if isinstance(adapter, FssnAdapter):
+                            for cmd in adapter.on_open_commands():
+                                try:
+                                    await websocket.send(cmd)
+                                    logger.info(f"[{source_name}] 已发送 FSSN 指令: {cmd}")
+                                except Exception as e:
+                                    logger.warning(f"[{source_name}] 发送 FSSN 指令失败: {e}")
 
                     # Wolfx：all_eew 错峰查询 EEW+列表；CWA 仅走独立端点
                     if norm_url == WOLFX_ALL_EEW_URL:
@@ -1223,9 +1235,6 @@ class WebSocketManager:
         if url in self.connections:
             del self.connections[url]
             logger.debug(f"[{source_name}] 已从connections字典移除，当前连接数: {len(self.connections)}")
-        self._fanstudio_awaiting_auth.pop(url, None)
-        if self._is_fanstudio_all_url(url):
-            self._fanstudio_auth_status[url] = ("none", "连接已断开")
         if self._is_eqsc_url(url):
             self._eqsc_auth_status[url] = ("none", "连接已断开")
         self._cancel_whews_cea_refresh(url)
@@ -1335,7 +1344,7 @@ class WebSocketManager:
         在启用 P2PQuake WebSocket 时，启动阶段先通过 HTTP 拉取一次最新地震与海啸情报。
         """
         try:
-            logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸/EEW 情报（聚合 551/552/556）")
+            logger.info("P2PQuake WSS 启动前，先通过 HTTP 拉取一次最新地震/海啸情报（聚合 551/552）")
 
             async def _fetch_history():
                 """异步拉取 P2PQuake 历史 HTTP 接口并逐条解析推送。"""
@@ -1365,18 +1374,14 @@ class WebSocketManager:
 
                 from adapters.p2pquake_adapter import P2PQuakeAdapter
                 from adapters.p2pquake_tsunami_adapter import P2PQuakeTsunamiAdapter
-                from adapters.p2pquake_eew_adapter import P2PQuakeEEWAdapter
                 eq_adapter = P2PQuakeAdapter("p2pquake", P2PQUAKE_HISTORY_URL)
                 tsu_adapter = P2PQuakeTsunamiAdapter("p2pquake_tsunami", P2PQUAKE_HISTORY_URL)
-                eew_adapter = P2PQuakeEEWAdapter("p2pquake_eew", P2PQUAKE_HISTORY_URL)
                 eq_count = 0
                 tsu_count = 0
-                eew_count = 0
 
                 msg_cfg = config.message_config
                 parse_551 = getattr(msg_cfg, "p2pquake_parse_551", False)
                 parse_552 = getattr(msg_cfg, "p2pquake_parse_552", True)
-                parse_556 = getattr(msg_cfg, "p2pquake_parse_556", True)
                 for item in data:
                     if not isinstance(item, dict):
                         continue
@@ -1409,22 +1414,9 @@ class WebSocketManager:
                             parsed["_suppress_tts"] = True
                             self.message_callback("p2pquake_tsunami", parsed)
                             tsu_count += 1
-                    elif code == 556:
-                        if not parse_556:
-                            continue
-                        try:
-                            parsed = eew_adapter.parse_single_item(item)
-                        except Exception as e:
-                            logger.error(f"[p2pquake_eew] 启动前 HTTP 解析 EEW 单条失败: {e}", exc_info=True)
-                            continue
-                        if parsed:
-                            parsed["_suppress_tts"] = True
-                            self.message_callback("p2pquake_eew", parsed)
-                            eew_count += 1
-
                 logger.info(
                     f"[p2pquake] 启动前 HTTP 推送 {eq_count} 条地震情报, "
-                    f"{tsu_count} 条海啸情报, {eew_count} 条緊急地震速报；"
+                    f"{tsu_count} 条海啸情报；"
                     "后续由 WSS 长连接接收实时更新"
                 )
 
@@ -1446,14 +1438,6 @@ class WebSocketManager:
             return (order.get(n, 50), u or "")
 
         return sorted(urls, key=_key)
-
-    @staticmethod
-    def _is_fanstudio_all_url(url: str) -> bool:
-        """判断是否为 Fan Studio /all 聚合通道。"""
-        normalized = (url or "").strip().lower().rstrip("/")
-        if normalized in {u.rstrip("/").lower() for u in FANSTUDIO_ALL_URLS}:
-            return True
-        return normalized.endswith("/all") and "fanstudio" in normalized
 
     @staticmethod
     def _is_eqsc_url(url: str) -> bool:
@@ -1644,48 +1628,23 @@ class WebSocketManager:
                 return status
         return ("none", "")
 
-    async def _maybe_send_fanstudio_auth(self, websocket: Any, url: str, source_name: str) -> None:
-        """
-        Fan Studio /all 建连后发送鉴权。
-
-        未配置 API Key 时不发送：服务器仅返回公开精简数据（如 fssn / fssn-cmt）。
-        配置了 Key 后发送 {"type":"auth","appId":"...","key":"sk-..."}。
-        """
-        if not self._is_fanstudio_all_url(url):
-            return
-        api_key = (getattr(Config().ws_config, "fanstudio_api_key", "") or "").strip()
-        if not api_key:
-            self._fanstudio_awaiting_auth.pop(url, None)
-            self._fanstudio_auth_status[url] = ("none", "未配置 API Key")
-            logger.info(
-                f"[{source_name}] 未配置 Fan Studio API Key，跳过鉴权"
-                "（将仅接收公开精简数据流）"
-            )
-            return
-        try:
-            auth_msg = build_fanstudio_auth_message(api_key)
-            self._fanstudio_awaiting_auth[url] = True
-            self._fanstudio_auth_status[url] = ("pending", "正在连接并鉴权…")
-            await websocket.send(auth_msg)
-            logger.info(f"[{source_name}] 已发送 Fan Studio 鉴权请求")
-        except Exception as e:
-            self._fanstudio_awaiting_auth.pop(url, None)
-            self._fanstudio_auth_status[url] = ("failed", f"发送鉴权失败: {e}")
-            logger.warning(f"[{source_name}] 发送 Fan Studio 鉴权失败: {e}")
 
     def _classify_startup_group(self, url: str) -> str:
         """
         启动分组：
-        1) fanstudio(all)
-        2) whews
-        3) p2pquake(wss)
-        4) wolfx(all_eew)
-        5) eqsc
-        6) 其他
+        1) whews
+        2) p2pquake(wss)
+        3) wolfx(all_eew)
+        4) eqsc
+        5) 其他
         """
         normalized_url = (url or "").strip().lower().rstrip("/")
-        if normalized_url in FANSTUDIO_ALL_URLS:
-            return "fanstudio"
+        if "fssn-api.fanstudio.tech" in normalized_url:
+            return "fssn"
+        if "sismotide.top" in normalized_url or "jian://" in normalized_url:
+            return "jian"
+        if "ws.fanstudio.tech" in normalized_url:
+            return "other"  # 旧主源已停用
         if is_whews_url(normalized_url) or any(
             normalized_url == u.rstrip("/").lower() for u in WHEWS_WS_URLS
         ):
@@ -1725,8 +1684,8 @@ class WebSocketManager:
             config._disable_whews_dedicated_endpoints()
         enabled_urls = []
         for url in config.ws_urls:
-            if "fanstudio" in (url or "").lower() and not (url or "").rstrip("/").lower().endswith("/all"):
-                logger.warning(f"跳过已移除的 Fan Studio 路径: {url}")
+            if "fanstudio.tech" in (url or "").lower() and "fssn-api" not in (url or "").lower():
+                logger.warning(f"跳过已移除的 Fan Studio 主源: {url}")
                 continue
             if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
                 logger.debug(f"跳过已废弃的 WeJet 专用端点: {url}")
@@ -1758,7 +1717,8 @@ class WebSocketManager:
         
         # 创建所有连接任务
         grouped_urls: Dict[str, list] = {
-            "fanstudio": [],
+                        "fssn": [],
+            "jian": [],
             "whews": [],
             "p2pquake": [],
             "wolfx": [],
@@ -1769,8 +1729,8 @@ class WebSocketManager:
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：fanstudio -> whews -> p2pquake -> wolfx -> eqsc -> openquake -> other
-        startup_stages = ("fanstudio", "whews", "p2pquake", "wolfx", "eqsc", "openquake", "other")
+        # 启动阶段顺序固定：whews -> p2pquake -> wolfx -> eqsc -> openquake -> other
+        startup_stages = ("whews", "jian", "fssn", "p2pquake", "wolfx", "eqsc", "openquake", "other")
         tasks = []
         urls_for_tasks = []
         stagger = float(getattr(config.ws_config, "startup_stagger_seconds", 1.5) or 0.0)
@@ -1892,7 +1852,6 @@ class WebSocketManager:
 
         # 与冷启动一致：分组顺序 + Wolfx all_eew 优先于 cwa_eew
         stage_order = {
-            "fanstudio": 0,
             "whews": 1,
             "p2pquake": 2,
             "wolfx": 3,
@@ -1992,59 +1951,7 @@ class WebSocketManager:
             logger.error(f"添加消息到发送队列失败: {e}")
             return False
 
-    def send_fanstudio_auth(self, api_key: str) -> bool:
-        """
-        向已连接的 Fan Studio /all 发送鉴权。
 
-        鉴权成功后服务器会自动下发完整数据流，无需重连或重启。
-
-        Returns:
-            是否成功将鉴权消息加入发送队列（连接不存在时返回 False）
-        """
-        key = (api_key or "").strip()
-        if not key:
-            logger.warning("Fan Studio API Key 为空，无法发送鉴权")
-            return False
-        target_url = None
-        for url in list(self.connections.keys()):
-            if self._is_fanstudio_all_url(url):
-                target_url = url
-                break
-        if not target_url:
-            logger.info("Fan Studio /all 尚未连接，鉴权将在下次建连时自动发送")
-            return False
-        try:
-            auth_msg = build_fanstudio_auth_message(key)
-            self._fanstudio_awaiting_auth[target_url] = True
-            self._fanstudio_auth_status[target_url] = ("pending", "正在连接并鉴权…")
-            ok = self.send_message(target_url, auth_msg)
-            if ok:
-                logger.info(f"已向 Fan Studio /all 热发送鉴权请求: {target_url}")
-            else:
-                self._fanstudio_awaiting_auth.pop(target_url, None)
-                self._fanstudio_auth_status[target_url] = ("failed", "鉴权消息发送失败")
-            return ok
-        except Exception as e:
-            if target_url:
-                self._fanstudio_awaiting_auth.pop(target_url, None)
-                self._fanstudio_auth_status[target_url] = ("failed", f"热发送鉴权失败: {e}")
-            logger.error(f"热发送 Fan Studio 鉴权失败: {e}")
-            return False
-
-    def get_fanstudio_auth_status(self) -> Tuple[str, str]:
-        """
-        返回 Fan Studio /all 当前鉴权状态。
-
-        Returns:
-            (state, message)：state 为 none/pending/ok/failed
-        """
-        for url in list(self.connections.keys()):
-            if self._is_fanstudio_all_url(url):
-                return self._fanstudio_auth_status.get(url, ("none", ""))
-        for url, status in self._fanstudio_auth_status.items():
-            if self._is_fanstudio_all_url(url):
-                return status
-        return ("none", "")
 
     def update_enabled_sources(self, enabled_sources: Dict[str, bool]):
         """

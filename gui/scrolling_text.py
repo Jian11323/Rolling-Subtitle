@@ -998,7 +998,7 @@ class _ScrollingTextMixin:
             rgb = (color.red(), color.green(), color.blue())
             draw.text((pad_h // 2, pad_v // 2), text, fill=rgb, font=pil_font)
             img_bytes = img.tobytes("raw", "RGBA")
-            qimg = QImage(img_bytes, text_width, text_height, QImage.Format_RGBA8888)
+            qimg = QImage(img_bytes, text_width, text_height, QImage.Format_RGBA8888).copy()
             pixmap = QPixmap.fromImage(qimg)
             with self._text_texture_cache_lock:
                 self._text_texture_cache[cache_key] = pixmap

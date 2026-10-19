@@ -202,12 +202,15 @@ def _iter_shindo_candidates(parsed_data: Dict[str, Any]) -> Iterable[Any]:
         for key in ("epiIntensity", "epi_intensity", "intensity", "maxIntensity", "MaxIntensity"):
             if key in raw:
                 yield raw.get(key)
-        wa = raw.get("WarnArea")
+        wa = raw.get("WarnArea") or raw.get("warnArea")
         items = wa if isinstance(wa, list) else ([wa] if isinstance(wa, dict) else [])
         for item in items:
             if not isinstance(item, dict):
                 continue
-            for key in ("Shindo1", "Shindo2", "shindo1", "shindo2"):
+            for key in (
+                "Shindo1", "Shindo2", "shindo1", "shindo2",
+                "intensityFrom", "intensityTo", "intensity",
+            ):
                 if key in item:
                     yield item.get(key)
 

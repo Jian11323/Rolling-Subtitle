@@ -30,7 +30,6 @@ from config import (
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     p2pquake_master_enabled,
-    FANSTUDIO_ALL_URL,
     JIAN_TYPHOON_HTTP,
     JIAN_SUB_SOURCE_SPECS,
     JIAN_SHORT_TO_PARSE_FLAG,
@@ -41,9 +40,11 @@ from config import (
     WHEWS_WS_URLS,
     WHEWS_HOST_PRIMARY,
     WHEWS_HOST_BACKUP,
-    DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_JIAN,
+    FSSN_ALL_URL,
+    FSSN_MASTER_KEY,
+    FSSN_DOCS_URL,
     normalize_data_provider,
     wolfx_master_enabled,
     aux_sources_enabled,
@@ -596,10 +597,6 @@ STYLE_AUDIO_FILE_BTN = f"""
     QPushButton:pressed {{ background-color: #EFF6FF; }}
 """
 
-_AUDIO_TIER_SOUND = (
-    ('tier_felt_cb', 'felt_sound_enabled'),
-    ('tier_critical_cb', 'critical_sound_enabled'),
-)
 _AUDIO_TIER_TTS = (
     ('tier_report_cb', 'report_tts_enabled'),
     ('tier_weather_cb', 'weather_tts_enabled'),
@@ -631,7 +628,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
     """设置窗口"""
 
     # 后台线程鉴权结果回主线程（勿在非 GUI 线程直接改控件）
-    fanstudio_auth_test_finished = pyqtSignal(bool, str, str)
     eqsc_auth_test_finished = pyqtSignal(bool, str, str)
     jian_auth_test_finished = pyqtSignal(bool, str, str, float)  # ok, message, refresh_token, expire_at
 
@@ -661,7 +657,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self._status_cards_empty_label: Optional[QLabel] = None
         self._status_cards_stretch_item = None
         self.individual_source_urls = []  # 存储所有单项数据源的URL
-        self.fanstudio_source_urls = []  # 存储所有Fan Studio单项数据源的URL（不包括All源）
         self._updating_mutual_exclusion = False  # 防止回调循环的标志
         self._is_all_selected = False  # 标记当前是否处于全选状态
         # 初始化基础URL（必须在初始化列表之后调用，因为创建标签页时会使用这些列表）
@@ -669,12 +664,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         # 设置UI（只在初始化时调用一次）
         self._settings_dirty = False
-        self._fanstudio_auth_testing = False
         self._eqsc_auth_testing = False
         self._defer_secondary_tabs = bool(defer_secondary_tabs)
         self._secondary_tabs_ready = not self._defer_secondary_tabs
         self.auto_save_settings_cb = None
-        self.fanstudio_auth_test_finished.connect(self._on_fanstudio_auth_test_finished)
         self.eqsc_auth_test_finished.connect(self._on_eqsc_auth_test_finished)
         self.jian_auth_test_finished.connect(self._on_jian_auth_test_finished)
         self._setup_ui()
@@ -687,8 +680,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self._auto_save_timer.timeout.connect(self._perform_auto_save)
 
     def _update_base_urls(self):
-        """更新基础 URL（固定使用 Fan Studio /all）"""
-        self.all_source_url = FANSTUDIO_ALL_URL
+        """旧 Fan Studio /all 已移除，保留空占位以免旧保存逻辑写空键。"""
+        self.all_source_url = ""
 
     def _apply_window_chrome(self) -> None:
         """应用设置窗调色板与样式表（宜在控件树建完后再调用，避免布局插入时反复 polish）。"""
@@ -830,7 +823,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self._status_refresh_timer.start()
             if index == self._data_source_tab_index:
                 self._update_parse_status_labels()
-                self._sync_fanstudio_auth_status_label()
                 self._sync_whews_cea_auth_status_label()
                 self._sync_eqsc_auth_status_label()
             else:
@@ -852,7 +844,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         current_index = self.notebook.currentIndex()
         if current_index == self._data_source_tab_index:
             self._update_parse_status_labels()
-            self._sync_fanstudio_auth_status_label()
             self._sync_whews_cea_auth_status_label()
             self._sync_eqsc_auth_status_label()
         elif current_index == self._data_source_status_tab_index:
@@ -878,7 +869,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 connected_text, disconnected_text, tooltip = status_texts
                 lbl.setToolTip(tooltip)
                 # 「已启用/未启用」表示开关；「已解析/未解析」表示本会话是否收到过可解析数据
-                # （含 Fan Studio initial_all；过期未上屏也会记为已解析）
                 if connected_text == "已启用" or disconnected_text == "未启用":
                     cb = self.source_vars.get(key) or getattr(self, f"{key}_cb", None)
                     if cb is not None and hasattr(cb, "isChecked"):
@@ -966,7 +956,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if not self._status_refresh_timer.isActive():
                 self._status_refresh_timer.start()
             self._update_parse_status_labels()
-            self._sync_fanstudio_auth_status_label()
             self._sync_whews_cea_auth_status_label()
             self._sync_eqsc_auth_status_label()
         elif self.notebook.currentIndex() == self._data_source_status_tab_index:
@@ -1071,15 +1060,13 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             w.valueChanged.connect(_mark)
 
     def _wire_weather_source_mutex(self) -> None:
-        """气象预警源互斥：Jian / Fan Studio / WeJet / PancakesAPI 仅能开启一个。"""
         self._weather_mutex_sync = False
         specs = [
             ("jian_parse_weather_cb", "jian_parse_weather"),
-            ("fanstudio_parse_weatheralarm_cb", "fanstudio_parse_weatheralarm"),
             ("whews_parse_weatheralarm_cb", "whews_parse_weatheralarm"),
             ("openquake_parse_cma_cb", "openquake_parse_cma"),
         ]
-        tip = "气象预警全局仅能启用一个数据源（Jian / Fan Studio / WeJet / PancakesAPI 互斥）"
+        tip = "气象预警全局仅能启用一个数据源（Jian / WeJet / PancakesAPI 互斥）"
         for cb_attr, _flag in specs:
             cb = getattr(self, cb_attr, None)
             if cb is None:
@@ -1362,10 +1349,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if hasattr(self, 'source_vars'):
                 for url, cb in self.source_vars.items():
                     cb.setChecked(self.config.enabled_sources.get(url, True))
-            if hasattr(self, 'fanstudio_api_key_entry'):
-                self.fanstudio_api_key_entry.setText(
-                    getattr(self.config.ws_config, 'fanstudio_api_key', '') or ''
-                )
             if hasattr(self, 'eqsc_login_token_entry'):
                 self.eqsc_login_token_entry.setText(
                     getattr(self.config.ws_config, 'eqsc_login_token', '') or ''
@@ -1378,30 +1361,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                     self._refresh_jian_auth_status_label(force=True)
                 self._refresh_eqsc_auth_status_label(force=True)
             for attr, cfg_name in [
-                ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
-                ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
-                ('fanstudio_parse_cwa_eew_cb', 'fanstudio_parse_cwa_eew'),
-                ('fanstudio_parse_jma_cb', 'fanstudio_parse_jma'),
-                ('fanstudio_parse_sa_cb', 'fanstudio_parse_sa'),
-                ('fanstudio_parse_kma_eew_cb', 'fanstudio_parse_kma_eew'),
-                ('fanstudio_parse_cenc_cb', 'fanstudio_parse_cenc'),
-                ('fanstudio_parse_ningxia_cb', 'fanstudio_parse_ningxia'),
-                ('fanstudio_parse_guangxi_cb', 'fanstudio_parse_guangxi'),
-                ('fanstudio_parse_shanxi_cb', 'fanstudio_parse_shanxi'),
-                ('fanstudio_parse_beijing_cb', 'fanstudio_parse_beijing'),
-                ('fanstudio_parse_yunnan_cb', 'fanstudio_parse_yunnan'),
-                ('fanstudio_parse_cwa_cb', 'fanstudio_parse_cwa'),
-                ('fanstudio_parse_hko_cb', 'fanstudio_parse_hko'),
-                ('fanstudio_parse_usgs_cb', 'fanstudio_parse_usgs'),
-                ('fanstudio_parse_emsc_cb', 'fanstudio_parse_emsc'),
-                ('fanstudio_parse_bcsf_cb', 'fanstudio_parse_bcsf'),
-                ('fanstudio_parse_gfz_cb', 'fanstudio_parse_gfz'),
-                ('fanstudio_parse_usp_cb', 'fanstudio_parse_usp'),
-                ('fanstudio_parse_kma_cb', 'fanstudio_parse_kma'),
-                ('fanstudio_parse_fssn_cb', 'fanstudio_parse_fssn'),
-                ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
-                ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
-                ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
                 ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
                 ('whews_parse_jma_cb', 'whews_parse_jma'),
                 ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
@@ -1456,6 +1415,14 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('whews_parse_cmt_cenc_cb', 'whews_parse_cmt_cenc'),
                 ('whews_parse_cmt_ingv_cb', 'whews_parse_cmt_ingv'),
                 ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
+                ('whews_parse_cenc_int_cb', 'whews_parse_cenc_int'),
+                ('whews_parse_cmt_gfz_cb', 'whews_parse_cmt_gfz'),
+                ('whews_parse_funvisis_cb', 'whews_parse_funvisis'),
+                ('whews_parse_cheji_cb', 'whews_parse_cheji'),
+                ('whews_parse_nea_cb', 'whews_parse_nea'),
+                ('whews_parse_jma_okiai_cb', 'whews_parse_jma_okiai'),
+                ('fssn_parse_fssn_cb', 'fssn_parse_fssn'),
+                ('fssn_parse_fssn_cmt_cb', 'fssn_parse_fssn_cmt'),
                 ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ]:
                 cb = getattr(self, attr, None)
@@ -1480,8 +1447,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self.p2pquake_parse_551_cb.setChecked(getattr(mc, 'p2pquake_parse_551', False))
             if hasattr(self, 'p2pquake_parse_552_cb'):
                 self.p2pquake_parse_552_cb.setChecked(getattr(mc, 'p2pquake_parse_552', True))
-            if hasattr(self, 'p2pquake_parse_556_cb'):
-                self.p2pquake_parse_556_cb.setChecked(getattr(mc, 'p2pquake_parse_556', True))
             for attr, cfg_name, default in [
                 ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew', True),
                 ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report', True),
@@ -1510,6 +1475,13 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if hasattr(self, "openquake_connect_cb"):
                 self.openquake_connect_cb.setChecked(
                     openquake_master_enabled(self.config.enabled_sources)
+                )
+            if hasattr(self, "fssn_connect_cb"):
+                self.fssn_connect_cb.setChecked(
+                    bool(
+                        self.config.enabled_sources.get(FSSN_MASTER_KEY, False)
+                        or self.config.enabled_sources.get(FSSN_ALL_URL, False)
+                    )
                 )
             if hasattr(self, 'radio_custom_text') and hasattr(self, 'radio_report'):
                 use_custom = getattr(mc, 'use_custom_text', False)
@@ -2709,12 +2681,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "显示")
 
-    def _audio_is_sound_mode(self) -> bool:
-        """当前音频反馈方式是否为预设提示音（非 TTS）。"""
-        av = getattr(self, 'audio_vars', {}) or {}
-        radio = av.get('feedback_sound_radio')
-        return radio is None or radio.isChecked()
-
     def _sync_eew_master_checkbox(self) -> None:
         """同步「地震预警」总开关与有感/强震 TTS 子开关状态。"""
         av = getattr(self, 'audio_vars', {}) or {}
@@ -2733,146 +2699,24 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         """从 Config.alert_config 回填各分级复选框的勾选状态。"""
         av = getattr(self, 'audio_vars', {}) or {}
         ac = self.config.alert_config
-        for ui_key, attr in _AUDIO_TIER_SOUND:
-            cb = av.get(ui_key)
-            if cb is not None:
-                cb.setChecked(bool(getattr(ac, attr, True)))
         for ui_key, attr in _AUDIO_TIER_TTS:
             cb = av.get(ui_key)
             if cb is not None:
-                default = True
-                cb.setChecked(bool(getattr(ac, attr, default)))
+                cb.setChecked(bool(getattr(ac, attr, True)))
         self._sync_eew_master_checkbox()
 
     def _write_tier_cbs_to_config(self) -> None:
         """将分级复选框当前状态写回 Config.alert_config。"""
         av = getattr(self, 'audio_vars', {}) or {}
         ac = self.config.alert_config
-        if self._audio_is_sound_mode():
-            for ui_key, attr in _AUDIO_TIER_SOUND:
-                cb = av.get(ui_key)
-                if cb is not None:
-                    setattr(ac, attr, bool(cb.isChecked()))
-        else:
-            eew_cb = av.get('tier_eew_cb')
-            eew_on = bool(eew_cb.isChecked()) if eew_cb is not None else False
-            ac.felt_tts_enabled = eew_on
-            ac.critical_tts_enabled = eew_on
-            for ui_key, attr in _AUDIO_TIER_TTS:
-                cb = av.get(ui_key)
-                if cb is not None:
-                    setattr(ac, attr, bool(cb.isChecked()))
-
-    def _sync_audio_tier_checkboxes(self, is_sound: bool, *, from_user_switch: bool = False) -> None:
-        """切换反馈方式时，互斥同步「预警分级开关」复选框。"""
-        av = getattr(self, 'audio_vars', {}) or {}
-        if from_user_switch:
-            if is_sound:
-                for ui_key, _attr in _AUDIO_TIER_SOUND:
-                    cb = av.get(ui_key)
-                    if cb is not None:
-                        cb.setChecked(True)
-                for ui_key, _attr in _AUDIO_TIER_TTS:
-                    cb = av.get(ui_key)
-                    if cb is not None:
-                        cb.setChecked(False)
-                eew_cb = av.get('tier_eew_cb')
-                if eew_cb is not None:
-                    eew_cb.setChecked(False)
-            else:
-                for ui_key, _attr in _AUDIO_TIER_SOUND:
-                    cb = av.get(ui_key)
-                    if cb is not None:
-                        cb.setChecked(False)
-                for ui_key, _attr in _AUDIO_TIER_TTS:
-                    cb = av.get(ui_key)
-                    if cb is not None:
-                        cb.setChecked(True)
-                eew_cb = av.get('tier_eew_cb')
-                if eew_cb is not None:
-                    eew_cb.setChecked(True)
-        else:
-            self._apply_tier_cb_from_config()
-
-    def _on_audio_feedback_mode_changed(self) -> None:
-        """用户切换「提示音 / TTS」时同步分级开关与控件可用性。"""
-        av = getattr(self, 'audio_vars', {}) or {}
-        sound_radio = av.get('feedback_sound_radio')
-        if sound_radio is None:
-            return
-        self._sync_audio_tier_checkboxes(bool(sound_radio.isChecked()), from_user_switch=True)
-        self._update_audio_mode_ui()
-
-    def _update_audio_mode_ui(self) -> None:
-        """根据反馈方式启用/禁用预设音与 TTS 控件组。"""
-        av = getattr(self, 'audio_vars', {}) or {}
-        sound_radio = av.get('feedback_sound_radio')
-        if sound_radio is None:
-            return
-        is_sound = bool(sound_radio.isChecked())
-        sound_keys = (
-            'felt_path_btn', 'felt_repeat_spin', 'critical_path_btn', 'critical_repeat_spin',
-            'nhk_path_btn', 'nhk_repeat_spin',
-            'jma_eew_path_btn', 'jma_eew_repeat_spin',
-        )
-        tts_keys = (
-            'tts_rate_spin', 'warning_tts_repeat_spin',
-            'report_tts_repeat_spin', 'weather_tts_repeat_spin', 'tsunami_tts_repeat_spin',
-            'tts_policy_combo', 'tts_cooldown_spin',
-            'warning_tts_test_btn', 'report_tts_test_btn',
-            'weather_tts_test_btn', 'tsunami_tts_test_btn',
-        )
-        for key in sound_keys:
-            w = av.get(key)
-            if w is not None:
-                w.setEnabled(is_sound)
-        for ui_key, _attr in _AUDIO_TIER_SOUND:
-            w = av.get(ui_key)
-            if w is not None:
-                w.setEnabled(is_sound)
-                if not is_sound:
-                    w.blockSignals(True)
-                    w.setChecked(False)
-                    w.blockSignals(False)
-        for ui_key, _attr in _AUDIO_TIER_TTS:
-            w = av.get(ui_key)
-            if w is not None:
-                w.setEnabled(not is_sound)
-                if is_sound:
-                    w.blockSignals(True)
-                    w.setChecked(False)
-                    w.blockSignals(False)
         eew_cb = av.get('tier_eew_cb')
-        if eew_cb is not None:
-            eew_cb.setEnabled(not is_sound)
-            if is_sound:
-                eew_cb.blockSignals(True)
-                eew_cb.setChecked(False)
-                eew_cb.blockSignals(False)
-        for key in tts_keys:
-            w = av.get(key)
-            if w is not None:
-                w.setEnabled(not is_sound)
-        nhk_cb = av.get('nhk_news_bell_cb')
-        if nhk_cb is not None:
-            nhk_cb.setEnabled(True)
-        for key in ('nhk_path_btn', 'nhk_repeat_spin'):
-            w = av.get(key)
-            if w is not None:
-                w.setEnabled(is_sound and (bool(nhk_cb.isChecked()) if nhk_cb is not None else True))
-        nhk_test = av.get('nhk_test_btn')
-        if nhk_test is not None:
-            nhk_test.setEnabled(is_sound)
-        jma_eew_cb = av.get('jma_eew_alert_cb')
-        if jma_eew_cb is not None:
-            jma_eew_cb.setEnabled(True)
-        for key in ('jma_eew_path_btn', 'jma_eew_repeat_spin'):
-            w = av.get(key)
-            if w is not None:
-                w.setEnabled(is_sound and (bool(jma_eew_cb.isChecked()) if jma_eew_cb is not None else True))
-        jma_test = av.get('jma_eew_test_btn')
-        if jma_test is not None:
-            jma_test.setEnabled(is_sound)
+        eew_on = bool(eew_cb.isChecked()) if eew_cb is not None else False
+        ac.felt_tts_enabled = eew_on
+        ac.critical_tts_enabled = eew_on
+        for ui_key, attr in _AUDIO_TIER_TTS:
+            cb = av.get(ui_key)
+            if cb is not None:
+                setattr(ac, attr, bool(cb.isChecked()))
 
     def _refresh_audio_tab_from_config(self) -> None:
         """从磁盘配置刷新音频标签页全部控件。"""
@@ -2880,20 +2724,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if not av:
             return
         ac = self.config.alert_config
-        mode = str(getattr(ac, 'alert_feedback_mode', 'sound') or 'sound')
-        sound_radio = av.get('feedback_sound_radio')
-        tts_radio = av.get('feedback_tts_radio')
-        if sound_radio is not None and tts_radio is not None:
-            sound_radio.blockSignals(True)
-            tts_radio.blockSignals(True)
-            sound_radio.setChecked(mode != 'tts')
-            tts_radio.setChecked(mode == 'tts')
-            sound_radio.blockSignals(False)
-            tts_radio.blockSignals(False)
         self._apply_tier_cb_from_config()
         spin_map = (
-            ('felt_repeat_spin', 'felt_sound_repeat'),
-            ('critical_repeat_spin', 'critical_sound_repeat'),
             ('warning_tts_repeat_spin', 'felt_tts_repeat'),
             ('report_tts_repeat_spin', 'report_tts_repeat'),
             ('weather_tts_repeat_spin', 'weather_tts_repeat'),
@@ -2915,8 +2747,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             idx = combo.findData(policy)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
         for btn_key, path_attr, default_rel in (
-            ('felt_path_btn', 'felt_sound_path', 'media/eewalert.wav'),
-            ('critical_path_btn', 'critical_sound_path', 'media/eewcritical.wav'),
             ('nhk_path_btn', 'nhk_news_bell_path', 'media/NHK一級ニュースベル.wav'),
             ('jma_eew_path_btn', 'jma_eew_alert_sound_path', 'media/NHK緊急地震速報の音.wav'),
         ):
@@ -2924,8 +2754,8 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if btn is not None:
                 path_val = getattr(ac, path_attr, '') or ''
                 btn.setProperty('_sound_path', path_val)
-                name = os.path.basename((path_val or default_rel).replace('\\', '/'))
-                btn.setToolTip(name)
+                name = os.path.basename(str(path_val or default_rel).replace(chr(92), '/'))
+                btn.setToolTip(path_val or default_rel)
                 avail = max(40, btn.width() - 12) if btn.width() > 0 else 120
                 btn.setText(QFontMetrics(btn.font()).elidedText(name, Qt.ElideMiddle, avail))
         nhk_cb = av.get('nhk_news_bell_cb')
@@ -2934,16 +2764,19 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         jma_eew_cb = av.get('jma_eew_alert_cb')
         if jma_eew_cb is not None:
             jma_eew_cb.setChecked(bool(getattr(ac, 'jma_eew_alert_sound_enabled', True)))
-        jma_eew_spin = av.get('jma_eew_repeat_spin')
-        if jma_eew_spin is not None:
-            try:
-                jma_eew_spin.setValue(int(getattr(ac, 'jma_eew_alert_sound_repeat', 2) or 2))
-            except RuntimeError:
-                pass
-        self._update_audio_mode_ui()
+        for spin_key, attr, default in (
+            ('nhk_repeat_spin', 'nhk_news_bell_repeat', 1),
+            ('jma_eew_repeat_spin', 'jma_eew_alert_sound_repeat', 2),
+        ):
+            spin = av.get(spin_key)
+            if spin is not None:
+                try:
+                    spin.setValue(int(getattr(ac, attr, default) or default))
+                except RuntimeError:
+                    pass
 
     def _create_audio_tab(self):
-        """创建音频与语音播报设置标签页。"""
+        """创建音频设置标签页：NHK / JMA 警報音 + TTS。"""
         scroll_area = _FittingScrollArea()
         scrollable_widget = QWidget()
         _prepare_scroll_body(scrollable_widget)
@@ -2956,48 +2789,36 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _tts_field_gap = 12
         _tts_field_x = _tts_lbl_w + _tts_field_gap
         _tts_repeat_col_gap = 24
-        # 需容纳 STYLE_SPINBOX 左右 padding + 上下箭头，过窄会只剩按钮看不见数字
         _spin_w = 64
-        _test_w = 72
 
         mode_group = QGroupBox("音频设置")
         _prep_groupbox(mode_group)
         mode_layout = QVBoxLayout(mode_group)
         mode_layout.setContentsMargins(*GROUP_MARGINS)
         mode_layout.setSpacing(4)
-        mode_hint = QLabel("提示音与语音播报二选一。")
+        mode_hint = QLabel(
+            "有感/强震内置音已移除。通用预警/速报反馈为 TTS；"
+            "NHK 一级新闻铃与 JMA 警報音可单独启用。"
+        )
         _set_widget_style(mode_hint, STYLE_HINT)
         mode_hint.setWordWrap(True)
         mode_layout.addWidget(mode_hint)
-        feedback_sound_radio = QRadioButton("预设提示音（WAV）")
-        feedback_tts_radio = QRadioButton("语音播报（TTS / Windows SAPI）")
-        _set_widget_style(feedback_sound_radio, STYLE_RADIO)
-        _set_widget_style(feedback_tts_radio, STYLE_RADIO)
-        current_mode = str(getattr(ac, 'alert_feedback_mode', 'sound') or 'sound')
-        feedback_sound_radio.setChecked(current_mode != 'tts')
-        feedback_tts_radio.setChecked(current_mode == 'tts')
-        mode_layout.addWidget(feedback_sound_radio)
-        mode_layout.addWidget(feedback_tts_radio)
         main_layout.addWidget(mode_group)
 
-        tier_group = QGroupBox("预警分级开关")
+        tier_group = QGroupBox("语音播报开关")
         _prep_groupbox(tier_group)
         tier_grid = QGridLayout(tier_group)
         tier_grid.setContentsMargins(*GROUP_MARGINS)
         tier_grid.setHorizontalSpacing(8)
         tier_grid.setVerticalSpacing(10)
         tier_grid.setColumnStretch(0, 1)
-        tier_grid.setColumnStretch(2, 1)
-        tier_grid.setColumnMinimumWidth(1, 2)
 
         def _tier_event_label(text: str) -> QLabel:
-            """创建分级表格左侧事件类型标签。"""
             lbl = QLabel(text)
             _set_widget_style(lbl, STYLE_LABEL)
             return lbl
 
         def _tier_half_row(label_text: str, cb: QCheckBox) -> QWidget:
-            """创建「标签 + 复选框」半行布局容器。"""
             row = QWidget()
             lay = QHBoxLayout(row)
             lay.setContentsMargins(0, 0, 0, 0)
@@ -3007,14 +2828,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             lay.addWidget(cb)
             return row
 
-        tier_felt_cb = QCheckBox()
-        tier_critical_cb = QCheckBox()
-        nhk_news_bell_cb = QCheckBox()
-        nhk_news_bell_cb.setChecked(bool(getattr(ac, 'nhk_news_bell_enabled', False)))
-        nhk_news_bell_cb.setToolTip("仅地震情报：震度 6 弱及以上时播放（不含预警）。")
-        jma_eew_alert_cb = QCheckBox()
-        jma_eew_alert_cb.setChecked(bool(getattr(ac, 'jma_eew_alert_sound_enabled', True)))
-        jma_eew_alert_cb.setToolTip("JMA 緊急地震速報由「予報」升级为「警報」时播放。")
         tier_eew_cb = QCheckBox()
         tier_eew_cb.setToolTip("同时控制有感地震与强震预警的语音播报。")
         tier_report_cb = QCheckBox()
@@ -3023,150 +2836,78 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         tier_tsunami_cb = QCheckBox()
         tier_tsunami_cb.setToolTip("朗读内容与滚动字幕一致。")
 
-        divider = QFrame()
-        divider.setFrameShape(QFrame.VLine)
-        divider.setFrameShadow(QFrame.Sunken)
-        divider.setFixedWidth(2)
-
-        left_panel = _prep_card_block()
-        left_lay = QVBoxLayout(left_panel)
-        left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(10)
-        left_lay.addStretch()
-        left_lay.addWidget(_tier_half_row("有感地震", tier_felt_cb))
-        left_lay.addWidget(_tier_half_row("强震预警", tier_critical_cb))
-        left_lay.addWidget(_tier_half_row("NHK 一级新闻铃", nhk_news_bell_cb))
-        left_lay.addWidget(_tier_half_row("JMA 警報音", jma_eew_alert_cb))
-        left_lay.addStretch()
-
-        tier_grid.addWidget(left_panel, 0, 0, 4, 1)
-        tier_grid.addWidget(divider, 0, 1, 4, 1)
-        tier_grid.addWidget(_tier_half_row("地震预警", tier_eew_cb), 0, 2)
-        tier_grid.addWidget(_tier_half_row("地震速报", tier_report_cb), 1, 2)
-        tier_grid.addWidget(_tier_half_row("气象预警", tier_weather_cb), 2, 2)
-        tier_grid.addWidget(_tier_half_row("海啸预警", tier_tsunami_cb), 3, 2)
+        tier_grid.addWidget(_tier_half_row("地震预警", tier_eew_cb), 0, 0)
+        tier_grid.addWidget(_tier_half_row("地震速报", tier_report_cb), 1, 0)
+        tier_grid.addWidget(_tier_half_row("气象预警", tier_weather_cb), 2, 0)
+        tier_grid.addWidget(_tier_half_row("海啸预警", tier_tsunami_cb), 3, 0)
         main_layout.addWidget(tier_group)
 
-        sound_group = QGroupBox("预设提示音")
-        _prep_groupbox(sound_group)
-        sound_outer = QVBoxLayout(sound_group)
-        sound_outer.setContentsMargins(*GROUP_MARGINS)
-        sound_outer.setSpacing(8)
+        _sound_title_w = 56
+        _sound_path_w = 160
+        _repeat_lbl_w = 40
+        _test_w = 72
 
-        _sound_title_w = 72
-        _sound_path_w = 132
-        _sound_row_h = 34
-        _repeat_lbl_w = 36
+        def _apply_sound_btn_label(btn: QPushButton, path_val: str, default_rel: str) -> None:
+            btn.setProperty('_sound_path', path_val or '')
+            name = os.path.basename(str((path_val or default_rel) or '').replace(chr(92), '/'))
+            btn.setToolTip(path_val or default_rel)
+            avail = max(40, btn.width() - 12) if btn.width() > 0 else max(40, _sound_path_w - 16)
+            btn.setText(QFontMetrics(btn.font()).elidedText(name or '选择提示音', Qt.ElideMiddle, avail))
 
-        def _sound_basename(path: str, default_rel: str) -> str:
-            """取提示音文件路径的 basename 用于按钮展示。"""
-            p = (path or "").strip() or default_rel.replace("\\", "/")
-            return os.path.basename(p.replace("\\", "/"))
-
-        def _update_sound_btn_text(btn: QPushButton, path: str, default_rel: str) -> None:
-            """更新提示音选择按钮的省略文件名与 tooltip。"""
-            name = _sound_basename(path, default_rel)
-            btn.setToolTip(name)
-            avail = max(40, btn.width() - 12)
-            btn.setText(QFontMetrics(btn.font()).elidedText(name, Qt.ElideMiddle, avail))
-
-        sound_grid = QGridLayout()
-        sound_grid.setContentsMargins(0, 0, 0, 0)
-        sound_grid.setHorizontalSpacing(6)
-        sound_grid.setVerticalSpacing(12)
-        sound_grid.setColumnMinimumWidth(0, _sound_title_w)
-        sound_grid.setColumnMinimumWidth(1, _sound_path_w)
-        sound_grid.setColumnMinimumWidth(2, _repeat_lbl_w)
-        sound_grid.setColumnMinimumWidth(3, _spin_w)
-        sound_grid.setColumnMinimumWidth(4, _test_w)
-
-        def _build_sound_row(
-            row, title, tooltip, path_value, default_rel, repeat_value, tier,
-            grid=sound_grid, test_callback=None,
-        ):
-            """构建预设提示音一行：标题、文件选择、重复次数与测试按钮。"""
+        def _build_sound_row(row, title, tooltip, current_path, default_rel, repeat, grid, test_callback=None):
             title_lbl = QLabel(title)
             _set_widget_style(title_lbl, STYLE_LABEL)
             title_lbl.setToolTip(tooltip)
-            title_lbl.setFixedWidth(_sound_title_w)
             path_btn = QPushButton()
-            path_btn.setCursor(Qt.PointingHandCursor)
             _set_widget_style(path_btn, STYLE_AUDIO_FILE_BTN)
-            path_btn.setFixedWidth(_sound_path_w)
-            path_btn.setFixedHeight(_sound_row_h)
-            path_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            path_btn.setProperty("_sound_path", path_value or "")
-            path_btn.setProperty("_sound_default", default_rel)
+            path_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            _apply_sound_btn_label(path_btn, current_path, default_rel)
 
-            def _refresh_path_btn():
-                """刷新路径按钮上的省略文件名显示。"""
-                _update_sound_btn_text(
-                    path_btn,
-                    str(path_btn.property("_sound_path") or ""),
-                    str(path_btn.property("_sound_default") or default_rel),
+            def _pick_sound() -> None:
+                start = (path_btn.property('_sound_path') or '').strip()
+                start_dir = os.path.dirname(start) if start else ''
+                path, _filt = QFileDialog.getOpenFileName(
+                    self, '选择提示音', start_dir,
+                    '音频文件 (*.wav *.mp3);;所有文件 (*.*)',
                 )
-
-            def _pick_sound():
-                """打开文件对话框选择自定义提示音 WAV/MP3。"""
-                start_dir = ""
-                cur = (path_btn.property("_sound_path") or "").strip()
-                if cur and os.path.isfile(cur):
-                    start_dir = os.path.dirname(cur)
-                elif get_resource_path(default_rel).is_file():
-                    start_dir = str(get_resource_path(default_rel).parent)
-                picked, _ = QFileDialog.getOpenFileName(
-                    self, f"选择{title}", start_dir,
-                    "音频文件 (*.wav *.mp3);;所有文件 (*.*)",
-                )
-                if picked:
-                    path_btn.setProperty("_sound_path", picked)
-                    _refresh_path_btn()
+                if path:
+                    _apply_sound_btn_label(path_btn, path, default_rel)
 
             path_btn.clicked.connect(_pick_sound)
-            _refresh_path_btn()
-            repeat_lbl = QLabel("重复")
+            repeat_lbl = QLabel('重复')
             _set_widget_style(repeat_lbl, STYLE_LABEL)
-            repeat_lbl.setFixedWidth(_repeat_lbl_w)
-            repeat_lbl.setAlignment(Qt.AlignCenter)
-            repeat_spin = QSpinBox()
-            repeat_spin.setRange(1, 10)
-            repeat_spin.setValue(max(1, min(10, int(repeat_value or 1))))
-            repeat_spin.setFixedWidth(_spin_w)
-            repeat_spin.setFixedHeight(_sound_row_h)
-            _set_widget_style(repeat_spin, STYLE_SPINBOX)
-            test_btn = QPushButton("测试")
-            test_btn.setFixedWidth(_test_w)
-            test_btn.setFixedHeight(_sound_row_h)
+            spin = QSpinBox()
+            spin.setRange(1, 10)
+            spin.setValue(max(1, min(10, int(repeat or 1))))
+            spin.setFixedWidth(_spin_w)
+            _set_widget_style(spin, STYLE_SPINBOX)
+            test_btn = QPushButton('测试')
             _set_widget_style(test_btn, STYLE_AUDIO_COMPACT_BTN)
-
-            def _test_sound():
-                """保存设置后播放当前行对应分级的测试提示音。"""
-                self._save_audio_settings()
-                if test_callback is not None:
-                    test_callback()
-                    return
-                from utils.audio_alert import play_alert_sound
-                play_alert_sound(self.config, "warning", tier=tier, force=True)
-
-            test_btn.clicked.connect(_test_sound)
-            grid.addWidget(title_lbl, row, 0, Qt.AlignVCenter)
+            test_btn.setFixedWidth(_test_w)
+            if test_callback is not None:
+                test_btn.clicked.connect(test_callback)
+            grid.addWidget(title_lbl, row, 0)
             grid.addWidget(path_btn, row, 1)
-            grid.addWidget(repeat_lbl, row, 2, Qt.AlignVCenter)
-            grid.addWidget(repeat_spin, row, 3)
+            grid.addWidget(repeat_lbl, row, 2)
+            grid.addWidget(spin, row, 3)
             grid.addWidget(test_btn, row, 4)
-            return path_btn, repeat_spin, test_btn
+            grid.setColumnStretch(1, 1)
+            return path_btn, spin, test_btn
 
-        felt_path_btn, felt_repeat_spin, _ = _build_sound_row(
-            0, "有感预警", "震级低于 4.8 且报文烈度低于 7（或无报文烈度）时播放。",
-            getattr(ac, 'felt_sound_path', '') or '', "media/eewalert.wav",
-            int(getattr(ac, 'felt_sound_repeat', 1) or 1), "felt",
-        )
-        critical_path_btn, critical_repeat_spin, _ = _build_sound_row(
-            1, "强震预警", "震级不低于 4.8 或报文烈度不低于 7 时播放。",
-            getattr(ac, 'critical_sound_path', '') or '', "media/eewcritical.wav",
-            int(getattr(ac, 'critical_sound_repeat', 1) or 1), "critical",
-        )
-        sound_outer.addLayout(sound_grid)
+        sound_tier_row = QHBoxLayout()
+        sound_tier_row.setSpacing(16)
+        nhk_news_bell_cb = QCheckBox("NHK 一级新闻铃")
+        nhk_news_bell_cb.setChecked(bool(getattr(ac, 'nhk_news_bell_enabled', False)))
+        nhk_news_bell_cb.setToolTip("仅地震情报：震度 6 弱及以上时播放（不含预警）。")
+        _set_widget_style(nhk_news_bell_cb, STYLE_CHECKBOX_SOURCE)
+        jma_eew_alert_cb = QCheckBox("JMA 警報音")
+        jma_eew_alert_cb.setChecked(bool(getattr(ac, 'jma_eew_alert_sound_enabled', True)))
+        jma_eew_alert_cb.setToolTip("JMA 緊急地震速報由「予報」升级为「警報」时播放。")
+        _set_widget_style(jma_eew_alert_cb, STYLE_CHECKBOX_SOURCE)
+        sound_tier_row.addWidget(nhk_news_bell_cb)
+        sound_tier_row.addWidget(jma_eew_alert_cb)
+        sound_tier_row.addStretch()
+        main_layout.addLayout(sound_tier_row)
 
         nhk_group = QGroupBox()
         _prep_groupbox(nhk_group)
@@ -3181,7 +2922,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         nhk_desc_lbl.setWordWrap(True)
         nhk_outer.addWidget(nhk_title_lbl)
         nhk_outer.addWidget(nhk_desc_lbl)
-
         nhk_sound_grid = QGridLayout()
         nhk_sound_grid.setContentsMargins(0, 0, 0, 0)
         nhk_sound_grid.setHorizontalSpacing(6)
@@ -3191,25 +2931,19 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         nhk_sound_grid.setColumnMinimumWidth(2, _repeat_lbl_w)
         nhk_sound_grid.setColumnMinimumWidth(3, _spin_w)
         nhk_sound_grid.setColumnMinimumWidth(4, _test_w)
-        nhk_path_btn, nhk_repeat_spin, nhk_test_btn = _build_sound_row(
-            0, "提示音", "仅 P2PQuake 日本气象厅地震情报（code 551），不含緊急地震速報。",
-            getattr(ac, 'nhk_news_bell_path', '') or '', "media/NHK一級ニュースベル.wav",
-            int(getattr(ac, 'nhk_news_bell_repeat', 1) or 1), "nhk",
-            grid=nhk_sound_grid,
-        )
 
         def _test_nhk_bell():
             from utils.audio_alert import play_nhk_news_bell
             self._save_audio_settings()
             play_nhk_news_bell(self.config, force=True)
 
-        try:
-            nhk_test_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        nhk_test_btn.clicked.connect(_test_nhk_bell)
+        nhk_path_btn, nhk_repeat_spin, nhk_test_btn = _build_sound_row(
+            0, "提示音", "仅 P2PQuake 日本气象厅地震情报（code 551），不含緊急地震速報。",
+            getattr(ac, 'nhk_news_bell_path', '') or '', "media/NHK一級ニュースベル.wav",
+            int(getattr(ac, 'nhk_news_bell_repeat', 1) or 1),
+            grid=nhk_sound_grid, test_callback=_test_nhk_bell,
+        )
         nhk_outer.addLayout(nhk_sound_grid)
-        main_layout.addWidget(sound_group)
         main_layout.addWidget(nhk_group)
 
         jma_eew_group = QGroupBox()
@@ -3219,13 +2953,12 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         jma_eew_outer.setSpacing(8)
         jma_eew_title_lbl = QLabel("JMA 紧急地震速报警报音")
         _set_widget_style(jma_eew_title_lbl, STYLE_SECTION_TITLE)
-        jma_eew_desc_lbl = QLabel("予報升为警報时播放（含首报即为警報）。")
+        jma_eew_desc_lbl = QLabel("予报升为警报时播放（含首报即为警报）。")
         jma_eew_desc_lbl.setToolTip("与 NHK 一级新闻铃无关；一级新闻铃仅用于地震情报。")
         _set_widget_style(jma_eew_desc_lbl, STYLE_HINT)
         jma_eew_desc_lbl.setWordWrap(True)
         jma_eew_outer.addWidget(jma_eew_title_lbl)
         jma_eew_outer.addWidget(jma_eew_desc_lbl)
-
         jma_eew_sound_grid = QGridLayout()
         jma_eew_sound_grid.setContentsMargins(0, 0, 0, 0)
         jma_eew_sound_grid.setHorizontalSpacing(6)
@@ -3235,16 +2968,17 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         jma_eew_sound_grid.setColumnMinimumWidth(2, _repeat_lbl_w)
         jma_eew_sound_grid.setColumnMinimumWidth(3, _spin_w)
         jma_eew_sound_grid.setColumnMinimumWidth(4, _test_w)
+
         def _test_jma_eew_alert():
             from utils.audio_alert import play_jma_eew_alert_sound
+            self._save_audio_settings()
             play_jma_eew_alert_sound(self.config, force=True)
 
         jma_eew_path_btn, jma_eew_repeat_spin, jma_eew_test_btn = _build_sound_row(
             0, "提示音", "JMA / Wolfx JMA 緊急地震速報升级为警報时播放。",
             getattr(ac, 'jma_eew_alert_sound_path', '') or '', "media/NHK緊急地震速報の音.wav",
-            int(getattr(ac, 'jma_eew_alert_sound_repeat', 2) or 2), "jma_eew_alert",
-            grid=jma_eew_sound_grid,
-            test_callback=_test_jma_eew_alert,
+            int(getattr(ac, 'jma_eew_alert_sound_repeat', 2) or 2),
+            grid=jma_eew_sound_grid, test_callback=_test_jma_eew_alert,
         )
         jma_eew_outer.addLayout(jma_eew_sound_grid)
         main_layout.addWidget(jma_eew_group)
@@ -3261,7 +2995,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         tts_outer.addWidget(tts_hint)
 
         def _form_row(label_text: str, widget: QWidget, parent: QWidget) -> QWidget:
-            """TTS 设置区：固定宽度标签 + 控件的单行表单。"""
             row = QWidget(parent)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
@@ -3290,7 +3023,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         tts_repeat_grid.setColumnStretch(2, 1)
 
         def _add_tts_repeat_cell(parent, label, value):
-            """TTS 连播区：标签 + SpinBox 单元格，返回容器与 spin 引用。"""
             cell = QWidget(parent)
             cell_layout = QHBoxLayout(cell)
             cell_layout.setContentsMargins(0, 0, 0, 0)
@@ -3410,7 +3142,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         tts_test_v.addLayout(tts_test_row2)
 
         def _test_tts_kind(kind: str, label: str) -> None:
-            """保存音频设置后，用内置样例测试 TTS。"""
             from utils.tts_alert import test_tts_from_latest
             self._save_audio_settings()
             if not test_tts_from_latest(self.config, kind):
@@ -3420,26 +3151,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                     f"暂无{label}样例，请稍后再试。",
                 )
 
-        def _test_tts_warning():
-            """测试预警类 TTS。"""
-            _test_tts_kind("warning", "预警")
-
-        def _test_tts_report():
-            """测试速报类 TTS。"""
-            _test_tts_kind("report", "速报")
-
-        def _test_tts_weather():
-            """测试气象预警 TTS。"""
-            _test_tts_kind("weather", "气象")
-
-        def _test_tts_tsunami():
-            """测试海啸预警 TTS。"""
-            _test_tts_kind("tsunami", "海啸")
-
-        warning_tts_test_btn.clicked.connect(_test_tts_warning)
-        report_tts_test_btn.clicked.connect(_test_tts_report)
-        weather_tts_test_btn.clicked.connect(_test_tts_weather)
-        tsunami_tts_test_btn.clicked.connect(_test_tts_tsunami)
+        warning_tts_test_btn.clicked.connect(lambda: _test_tts_kind("warning", "预警"))
+        report_tts_test_btn.clicked.connect(lambda: _test_tts_kind("report", "速报"))
+        weather_tts_test_btn.clicked.connect(lambda: _test_tts_kind("weather", "气象"))
+        tsunami_tts_test_btn.clicked.connect(lambda: _test_tts_kind("tsunami", "海啸"))
         tts_test_row = QWidget(tts_group)
         tts_test_row_layout = QHBoxLayout(tts_test_row)
         tts_test_row_layout.setContentsMargins(0, 0, 0, 0)
@@ -3455,18 +3170,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         main_layout.addWidget(tts_group)
 
         self.audio_vars = {
-            'feedback_sound_radio': feedback_sound_radio,
-            'feedback_tts_radio': feedback_tts_radio,
-            'tier_felt_cb': tier_felt_cb,
-            'tier_critical_cb': tier_critical_cb,
             'tier_eew_cb': tier_eew_cb,
             'tier_report_cb': tier_report_cb,
             'tier_weather_cb': tier_weather_cb,
             'tier_tsunami_cb': tier_tsunami_cb,
-            'felt_path_btn': felt_path_btn,
-            'felt_repeat_spin': felt_repeat_spin,
-            'critical_path_btn': critical_path_btn,
-            'critical_repeat_spin': critical_repeat_spin,
             'nhk_news_bell_cb': nhk_news_bell_cb,
             'nhk_path_btn': nhk_path_btn,
             'nhk_repeat_spin': nhk_repeat_spin,
@@ -3487,12 +3194,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'weather_tts_test_btn': weather_tts_test_btn,
             'tsunami_tts_test_btn': tsunami_tts_test_btn,
         }
-        feedback_sound_radio.toggled.connect(lambda _: self._on_audio_feedback_mode_changed())
-        feedback_tts_radio.toggled.connect(lambda _: self._on_audio_feedback_mode_changed())
-        nhk_news_bell_cb.toggled.connect(lambda _: self._update_audio_mode_ui())
-        jma_eew_alert_cb.toggled.connect(lambda _: self._update_audio_mode_ui())
         self._apply_tier_cb_from_config()
-        self._update_audio_mode_ui()
 
         button_frame = QFrame()
         button_layout = QHBoxLayout(button_frame)
@@ -3516,21 +3218,15 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if not av:
             return
         ac = self.config.alert_config
-        tts_radio = av.get('feedback_tts_radio')
-        if tts_radio is not None and tts_radio.isChecked():
-            ac.alert_feedback_mode = 'tts'
-        else:
-            ac.alert_feedback_mode = 'sound'
+        ac.alert_feedback_mode = 'tts'
         self._write_tier_cbs_to_config()
         for btn_key, attr in (
-            ('felt_path_btn', 'felt_sound_path'),
-            ('critical_path_btn', 'critical_sound_path'),
             ('nhk_path_btn', 'nhk_news_bell_path'),
             ('jma_eew_path_btn', 'jma_eew_alert_sound_path'),
         ):
             btn = av.get(btn_key)
             if btn is not None:
-                setattr(ac, attr, (btn.property("_sound_path") or "").strip())
+                setattr(ac, attr, (btn.property('_sound_path') or '').strip())
         nhk_cb = av.get('nhk_news_bell_cb')
         if nhk_cb is not None:
             ac.nhk_news_bell_enabled = bool(nhk_cb.isChecked())
@@ -3538,8 +3234,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         if jma_eew_cb is not None:
             ac.jma_eew_alert_sound_enabled = bool(jma_eew_cb.isChecked())
         for spin_key, attr, lo, hi in (
-            ('felt_repeat_spin', 'felt_sound_repeat', 1, 10),
-            ('critical_repeat_spin', 'critical_sound_repeat', 1, 10),
             ('nhk_repeat_spin', 'nhk_news_bell_repeat', 1, 10),
             ('jma_eew_repeat_spin', 'jma_eew_alert_sound_repeat', 1, 10),
             ('warning_tts_repeat_spin', 'felt_tts_repeat', 1, 10),
@@ -3583,7 +3277,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         ]
         jian_sources = list(JIAN_SUB_SOURCE_SPECS)
 
-        # 顶部：主数据源三选一
+        # 顶部：主数据源二选一
         group_provider = QGroupBox("主数据源")
         _prep_groupbox(group_provider)
         gp_layout = QVBoxLayout(group_provider)
@@ -3592,130 +3286,24 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         provider_row = QHBoxLayout()
         provider_row.setSpacing(24)
         self.data_provider_group = QButtonGroup(self)
-        self.radio_provider_fanstudio = QRadioButton("Fan Studio")
         self.radio_provider_whews = QRadioButton("WeJet")
         self.radio_provider_jian = QRadioButton("Jian Project")
-        for rb in (self.radio_provider_fanstudio, self.radio_provider_whews, self.radio_provider_jian):
+        for rb in (self.radio_provider_whews, self.radio_provider_jian):
             _set_widget_style(rb, STYLE_PROVIDER_RADIO)
             provider_row.addWidget(rb)
-        self.data_provider_group.addButton(self.radio_provider_fanstudio, 0)
-        self.data_provider_group.addButton(self.radio_provider_whews, 1)
-        self.data_provider_group.addButton(self.radio_provider_jian, 2)
+        self.data_provider_group.addButton(self.radio_provider_whews, 0)
+        self.data_provider_group.addButton(self.radio_provider_jian, 1)
         provider_row.addStretch()
         gp_layout.addLayout(provider_row)
-        provider_hint = QLabel("三者择一；选中并保存后启用该主源连接，并清空缓冲重连。")
+        provider_hint = QLabel("二者择一；选中并保存后启用该主源连接，并清空缓冲重连。")
         provider_hint.setToolTip(
             "保存后仅连接当前主提供者。"
-            "Wolfx / EQSC / P2PQuake / PancakesAPI 为辅助源；可用总开关整体启停，开启后各分区全部展示。"
+            "FSSN / Wolfx / EQSC / P2PQuake / PancakesAPI 为辅助源；可用总开关整体启停（FSSN 独立于总开关）。"
         )
         _set_widget_style(provider_hint, STYLE_HINT)
         provider_hint.setWordWrap(True)
         gp_layout.addWidget(provider_hint)
         scroll_layout.addWidget(group_provider)
-
-        # ---------- Fan Studio 面板 ----------
-        self.ds_panel_fanstudio = QWidget()
-        apply_light_palette(self.ds_panel_fanstudio, COLOR_PAGE_BG, COLOR_TEXT)
-        self.ds_panel_fanstudio.setAttribute(Qt.WA_StyledBackground, True)
-        _set_widget_style(self.ds_panel_fanstudio, f"background-color: {COLOR_PAGE_BG};")
-        fs_panel_layout = QVBoxLayout(self.ds_panel_fanstudio)
-        fs_panel_layout.setContentsMargins(0, 0, 0, 0)
-        fs_panel_layout.setSpacing(SPACING_BLOCK)
-
-        group_warning = QGroupBox("Fan Studio")
-        _prep_groupbox(group_warning)
-        gw_layout = QVBoxLayout(group_warning)
-        gw_layout.setContentsMargins(*GROUP_MARGINS)
-        gw_layout.setSpacing(GROUP_SPACING)
-        fs_apply_hint = QLabel(
-            '需 API Key 鉴权。<a href="https://api.fanstudio.tech/dev-platform/" style="color: #3B82F6;">前往申请</a>'
-        )
-        fs_apply_hint.setToolTip("应用列表选择「地震情报实况栏」，填写信息等待审核。")
-        fs_apply_hint.setOpenExternalLinks(True)
-        _set_widget_style(fs_apply_hint, STYLE_HINT)
-        fs_apply_hint.setWordWrap(True)
-        gw_layout.addWidget(fs_apply_hint)
-        fs_hint = QLabel("鉴权后接入完整数据流；下方子源决定解析范围。")
-        fs_hint.setToolTip("未鉴权仅返回公开精简数据。主数据源选中 Fan Studio 并保存后即连接。")
-        _set_widget_style(fs_hint, STYLE_HINT)
-        fs_hint.setWordWrap(True)
-        gw_layout.addWidget(fs_hint)
-
-        api_key_label = QLabel("Fan Studio API Key：")
-        _set_widget_style(api_key_label, STYLE_LABEL)
-        gw_layout.addWidget(api_key_label)
-        api_key_row = QHBoxLayout()
-        api_key_row.setSpacing(8)
-        self.fanstudio_api_key_entry = QLineEdit()
-        self.fanstudio_api_key_entry.setPlaceholderText("sk- 开头的 API 密钥")
-        self.fanstudio_api_key_entry.setEchoMode(QLineEdit.Password)
-        self.fanstudio_api_key_entry.setText(
-            getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
-        )
-        _set_widget_style(self.fanstudio_api_key_entry, STYLE_LINEEDIT)
-        self.fanstudio_api_key_entry.setToolTip(
-            "连接 /all 后发送鉴权；未填写时仍可连接，但仅接收公开精简数据流。"
-        )
-        self.fanstudio_api_key_entry.textChanged.connect(
-            lambda _text: self._refresh_fanstudio_auth_status_label(force=True)
-        )
-        api_key_row.addWidget(self.fanstudio_api_key_entry, 1)
-        self.fanstudio_auth_btn = QPushButton("连接")
-        _set_widget_style(self.fanstudio_auth_btn, STYLE_AUDIO_COMPACT_BTN)
-        self.fanstudio_auth_btn.setToolTip("测试 API Key 鉴权（发送 auth 并等待 auth_success / error）")
-        self.fanstudio_auth_btn.clicked.connect(self._on_fanstudio_auth_test_clicked)
-        api_key_row.addWidget(self.fanstudio_auth_btn)
-        gw_layout.addLayout(api_key_row)
-        self.fanstudio_auth_status_label = QLabel("请输入 Key")
-        _set_widget_style(self.fanstudio_auth_status_label, STYLE_HINT)
-        self.fanstudio_auth_status_label.setWordWrap(True)
-        gw_layout.addWidget(self.fanstudio_auth_status_label)
-        self._refresh_fanstudio_auth_status_label(force=True)
-
-        def _fs_cb(cfg_name: str, text: str) -> QCheckBox:
-            """创建 Fan Studio 子源复选框行（含解析状态标签）。"""
-            cb = QCheckBox(text)
-            cb.setChecked(getattr(self.config.message_config, cfg_name, True))
-            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
-            status_label = QLabel("未解析")
-            _set_widget_style(status_label, STYLE_STATUS_NEUTRAL)
-            status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            status_label.setToolTip("解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
-            self.source_parse_labels[cfg_name] = status_label
-            self.source_status_texts[cfg_name] = ("已解析", "未解析", "解析状态：本会话已解析到该源数据（含 initial_all；过期未上屏也算） / 尚未解析")
-            row_layout = QHBoxLayout()
-            row_layout.addWidget(cb)
-            row_layout.addStretch()
-            row_layout.addWidget(status_label)
-            gw_layout.addLayout(row_layout)
-            return cb
-
-        self.fanstudio_parse_cea_cb = _fs_cb('fanstudio_parse_cea', "中国地震预警网")
-        self.fanstudio_parse_cea_pr_cb = _fs_cb('fanstudio_parse_cea_pr', "中国地震预警省网")
-        self.fanstudio_parse_cwa_eew_cb = _fs_cb('fanstudio_parse_cwa_eew', "台湾气象署地震预警")
-        self.fanstudio_parse_jma_cb = _fs_cb('fanstudio_parse_jma', "日本气象厅地震预警")
-        self.fanstudio_parse_sa_cb = _fs_cb('fanstudio_parse_sa', "美国ShakeAlert地震预警")
-        self.fanstudio_parse_kma_eew_cb = _fs_cb('fanstudio_parse_kma_eew', "韩国气象厅地震预警")
-        self.fanstudio_parse_weatheralarm_cb = _fs_cb('fanstudio_parse_weatheralarm', "中国气象局气象预警")
-        self.fanstudio_parse_tsunami_cb = _fs_cb('fanstudio_parse_tsunami', "自然资源部海啸预警中心")
-        self.fanstudio_parse_cenc_cb = _fs_cb('fanstudio_parse_cenc', "中国地震台网中心")
-        self.fanstudio_parse_ningxia_cb = _fs_cb('fanstudio_parse_ningxia', "宁夏回族自治区地震局")
-        self.fanstudio_parse_guangxi_cb = _fs_cb('fanstudio_parse_guangxi', "广西壮族自治区地震局")
-        self.fanstudio_parse_shanxi_cb = _fs_cb('fanstudio_parse_shanxi', "山西省地震局")
-        self.fanstudio_parse_beijing_cb = _fs_cb('fanstudio_parse_beijing', "北京市地震局")
-        self.fanstudio_parse_yunnan_cb = _fs_cb('fanstudio_parse_yunnan', "云南省地震局")
-        self.fanstudio_parse_cwa_cb = _fs_cb('fanstudio_parse_cwa', "台湾气象署速报")
-        self.fanstudio_parse_hko_cb = _fs_cb('fanstudio_parse_hko', "香港天文台速报")
-        self.fanstudio_parse_usgs_cb = _fs_cb('fanstudio_parse_usgs', "美国地质调查局速报")
-        self.fanstudio_parse_emsc_cb = _fs_cb('fanstudio_parse_emsc', "欧洲地中海地震中心速报")
-        self.fanstudio_parse_bcsf_cb = _fs_cb('fanstudio_parse_bcsf', "法国中央地震研究所速报")
-        self.fanstudio_parse_gfz_cb = _fs_cb('fanstudio_parse_gfz', "德国地学研究中心速报")
-        self.fanstudio_parse_usp_cb = _fs_cb('fanstudio_parse_usp', "巴西圣保罗大学速报")
-        self.fanstudio_parse_kma_cb = _fs_cb('fanstudio_parse_kma', "韩国气象厅速报")
-        self.fanstudio_parse_fssn_cb = _fs_cb('fanstudio_parse_fssn', "FSSN")
-        self.fanstudio_parse_fssn_cmt_cb = _fs_cb('fanstudio_parse_fssn_cmt', "FSSN 矩心矩张量解")
-        fs_panel_layout.addWidget(group_warning)
-        scroll_layout.addWidget(self.ds_panel_fanstudio)
 
         # ---------- WeJet 面板 ----------
         self.ds_panel_whews = QWidget()
@@ -3881,6 +3469,24 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.whews_parse_cmt_emsc_cb = _wh_cb("whews_parse_cmt_emsc", "EMSC 矩心矩张量解")
         self.whews_parse_cmt_cenc_cb = _wh_cb("whews_parse_cmt_cenc", "中国地震台网中心矩心矩张量解")
         self.whews_parse_cmt_ingv_cb = _wh_cb("whews_parse_cmt_ingv", "INGV 矩心矩张量解")
+        self.whews_parse_cenc_int_cb = _wh_cb(
+            "whews_parse_cenc_int", "CENC 烈度速报"
+        )
+        self.whews_parse_cmt_gfz_cb = _wh_cb(
+            "whews_parse_cmt_gfz", "CMT GFZ 矩张量"
+        )
+        self.whews_parse_funvisis_cb = _wh_cb(
+            "whews_parse_funvisis", "FUNVISIS 速报"
+        )
+        self.whews_parse_cheji_cb = _wh_cb(
+            "whews_parse_cheji", "自然资源部灾害风险预警"
+        )
+        self.whews_parse_nea_cb = _wh_cb(
+            "whews_parse_nea", "新加坡 NEA"
+        )
+        self.whews_parse_jma_okiai_cb = _wh_cb(
+            "whews_parse_jma_okiai", "JMA 冲合海啸观测"
+        )
         self.whews_parse_typhoon_cb = _wh_cb(
             "whews_parse_typhoon", "台风实况（/ws/typhoon）", default=False
         )
@@ -4161,7 +3767,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             "p2pquake_parse_551", "P2PQuake 日本气象厅 地震情報", default=False
         )
         self.p2pquake_parse_552_cb = _p2p_parse_row("p2pquake_parse_552", "P2PQuake 日本气象厅 津波予報")
-        self.p2pquake_parse_556_cb = _p2p_parse_row("p2pquake_parse_556", "P2PQuake 日本气象厅 緊急地震速報")
         ap_layout.addWidget(group_history)
 
         # CENC 烈度速报（Nowquake）
@@ -4431,6 +4036,43 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         aux_container_layout.addWidget(self.aux_panel_openquake)
         scroll_layout.addWidget(self.aux_panels_container)
         scroll_layout.addWidget(group_cenc_ir)
+
+        # FSSN WebSocket（fssn-api.fanstudio.tech，独立于已停运的 FAN Studio API）
+        group_fssn = QGroupBox("FSSN")
+        _prep_groupbox(group_fssn)
+        gf_layout = QVBoxLayout(group_fssn)
+        gf_layout.setContentsMargins(*GROUP_MARGINS)
+        gf_layout.setSpacing(GROUP_SPACING)
+        fssn_hint = QLabel(
+            f'独立地震信息源。文档：<a href="{FSSN_DOCS_URL}" style="color: #3B82F6;">fssn-api.fanstudio.tech</a>'
+        )
+        fssn_hint.setOpenExternalLinks(True)
+        fssn_hint.setToolTip("连接 wss://fssn-api.fanstudio.tech/all，与主数据源无关。")
+        _set_widget_style(fssn_hint, STYLE_HINT)
+        fssn_hint.setWordWrap(True)
+        gf_layout.addWidget(fssn_hint)
+        self.fssn_connect_cb = QCheckBox("启用 FSSN 连接")
+        self.fssn_connect_cb.setChecked(
+            bool(
+                self.config.enabled_sources.get(FSSN_MASTER_KEY, False)
+                or self.config.enabled_sources.get(FSSN_ALL_URL, False)
+            )
+        )
+        _set_widget_style(self.fssn_connect_cb, STYLE_CHECKBOX_SOURCE)
+        gf_layout.addWidget(self.fssn_connect_cb)
+
+        def _fssn_cb(flag: str, label: str):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(getattr(self.config.message_config, flag, True)))
+            _set_widget_style(cb, STYLE_CHECKBOX_SOURCE)
+            setattr(self, f"{flag}_cb", cb)
+            gf_layout.addWidget(cb)
+            return cb
+
+        self.fssn_parse_fssn_cb = _fssn_cb("fssn_parse_fssn", "FSSN 地震信息")
+        self.fssn_parse_fssn_cmt_cb = _fssn_cb("fssn_parse_fssn_cmt", "FSSN 矩心矩张量解")
+
+        scroll_layout.addWidget(group_fssn)
         scroll_layout.addWidget(group_typhoon)
 
         provider = normalize_data_provider(
@@ -4438,14 +4080,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         )
         if provider == DATA_PROVIDER_WHEWS:
             self.radio_provider_whews.setChecked(True)
-        elif provider == DATA_PROVIDER_JIAN:
-            self.radio_provider_jian.setChecked(True)
         else:
-            self.radio_provider_fanstudio.setChecked(True)
+            self.radio_provider_jian.setChecked(True)
 
         def _update_data_provider_panels_visible():
-            """切换主数据源时显示/隐藏 Fan Studio / WeJet / Jian Project 面板。"""
-            self.ds_panel_fanstudio.setVisible(self.radio_provider_fanstudio.isChecked())
+            """切换主数据源时显示/隐藏 WeJet / Jian Project 面板。"""
             self.ds_panel_whews.setVisible(self.radio_provider_whews.isChecked())
             self.ds_panel_jian.setVisible(self.radio_provider_jian.isChecked())
 
@@ -4467,7 +4106,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
 
         self._update_aux_panels_visible = _update_aux_panels_visible
 
-        self.radio_provider_fanstudio.toggled.connect(lambda _: _update_data_provider_panels_visible())
         self.radio_provider_whews.toggled.connect(lambda _: _update_data_provider_panels_visible())
         self.radio_provider_jian.toggled.connect(lambda _: _update_data_provider_panels_visible())
         self.aux_sources_master_cb.toggled.connect(lambda _: _update_aux_panels_visible())
@@ -4600,13 +4238,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return DATA_PROVIDER_JIAN
         if hasattr(self, "radio_provider_whews") and self.radio_provider_whews.isChecked():
             return DATA_PROVIDER_WHEWS
-        if hasattr(self, "radio_provider_fanstudio") and self.radio_provider_fanstudio.isChecked():
-            return DATA_PROVIDER_FANSTUDIO
         return DATA_PROVIDER_JIAN
 
     def _apply_main_provider_connection_flags(self) -> None:
         """
-        按顶部主数据源三选一写入连接开关：选中者启用，另两者关闭。
+        按顶部主数据源二选一写入连接开关：选中者启用，另两者关闭。
         不再依赖面板内单独的 /all 勾选框。
         """
         self._update_base_urls()
@@ -4620,11 +4256,9 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.config.enabled_sources[u] = False
         if hasattr(self.config, "_disable_whews_dedicated_endpoints"):
             self.config._disable_whews_dedicated_endpoints()
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            self.config.enabled_sources[all_url] = True
-        elif provider == DATA_PROVIDER_WHEWS:
+        if provider == DATA_PROVIDER_WHEWS:
             self.config.enabled_sources[WHEWS_MASTER_KEY] = True
-        elif provider == DATA_PROVIDER_JIAN:
+        else:
             self.config.enabled_sources[JIAN_MASTER_KEY] = True
 
     def _make_http_poll_spinbox(self, url: str) -> QSpinBox:
@@ -4724,34 +4358,20 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         with_poll_interval: bool = False,
     ):
         """添加数据源复选框"""
-        # 特殊处理：fanstudio_warning和fanstudio_report（仅用勾选控制解析范围，不写入单项 URL）
-        if url in ["fanstudio_warning", "fanstudio_report"]:
-            if url == "fanstudio_warning":
-                initial_value = getattr(self.config.message_config, 'fanstudio_parse_warning', True)
-            elif url == "fanstudio_report":
-                initial_value = getattr(self.config.message_config, 'fanstudio_parse_report', True)
-            else:
-                initial_value = True
+        config_value = self.config.enabled_sources.get(url)
+        # 仅用于复选框初始显示；勿在打开设置页时写回 enabled_sources。
+        if config_value is None:
+            initial_value = default_value
         else:
-            config_value = self.config.enabled_sources.get(url)
-            # 仅用于复选框初始显示；勿在打开设置页时写回 enabled_sources。
-            # 否则「缺键」会被误写成默认值，用户只保存其他标签也会把错误连接开关固化进配置文件。
-            if config_value is None:
-                initial_value = default_value
-            else:
-                initial_value = config_value
+            initial_value = config_value
 
         checkbox = QCheckBox(name, parent)  # 数据源连接/解析开关
         checkbox.setChecked(initial_value)
         _set_widget_style(checkbox, STYLE_CHECKBOX_SOURCE)
         self.source_vars[url] = checkbox  # 以 URL 为键保存，供保存/全选时使用
-        
-        # 如果不是All源，记录到单项数据源列表
-        if not is_all_source and url and url not in ["fanstudio_warning", "fanstudio_report"]:
+
+        if not is_all_source and url:
             self.individual_source_urls.append(url)
-            # 仅 Fan Studio WebSocket 计入 fanstudio_source_urls（台风 HTTP 为全局源）
-            if url.startswith(("ws://", "wss://")) and "fanstudio.tech" in url:
-                self.fanstudio_source_urls.append(url)
 
         if status_key:
             status_label = QLabel(status_connected_text if initial_value else status_disconnected_text)
@@ -4816,32 +4436,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         for url, checkbox in self.source_vars.items():
             if url and url != self.all_source_url:  # 跳过空URL和all数据源
                 checkbox.setChecked(True)
-        # Fan Studio / 无界科技细粒度子源也一起全选
         for attr in [
-            'fanstudio_parse_cea_cb',
-            'fanstudio_parse_cea_pr_cb',
-            'fanstudio_parse_cwa_eew_cb',
-            'fanstudio_parse_jma_cb',
-            'fanstudio_parse_sa_cb',
-            'fanstudio_parse_kma_eew_cb',
-            'fanstudio_parse_cenc_cb',
-            'fanstudio_parse_ningxia_cb',
-            'fanstudio_parse_guangxi_cb',
-            'fanstudio_parse_shanxi_cb',
-            'fanstudio_parse_beijing_cb',
-            'fanstudio_parse_yunnan_cb',
-            'fanstudio_parse_cwa_cb',
-            'fanstudio_parse_hko_cb',
-            'fanstudio_parse_usgs_cb',
-            'fanstudio_parse_emsc_cb',
-            'fanstudio_parse_bcsf_cb',
-            'fanstudio_parse_gfz_cb',
-            'fanstudio_parse_usp_cb',
-            'fanstudio_parse_kma_cb',
-            'fanstudio_parse_fssn_cb',
-            'fanstudio_parse_fssn_cmt_cb',
-            'fanstudio_parse_weatheralarm_cb',
-            'fanstudio_parse_tsunami_cb',
             'whews_parse_jma_eew_cb',
             'whews_parse_jma_cb',
             'whews_parse_jma_volcano_cb',
@@ -4899,7 +4494,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'whews_parse_weatheralarm_cb',
             'p2pquake_parse_551_cb',
             'p2pquake_parse_552_cb',
-            'p2pquake_parse_556_cb',
             'eqsc_parse_jma_eew_cb',
             'eqsc_parse_jma_report_cb',
             'eqsc_parse_jma_tsunami_cb',
@@ -4947,32 +4541,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 self._update_aux_panels_visible()
         if hasattr(self, "p2pquake_connect_cb"):
             self.p2pquake_connect_cb.setChecked(p2pquake_master_enabled(self.config.enabled_sources))
-        # Fan Studio / 无界科技细粒度子源：恢复为配置值
         for attr, cfg_name in [
-            ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
-            ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
-            ('fanstudio_parse_cwa_eew_cb', 'fanstudio_parse_cwa_eew'),
-            ('fanstudio_parse_jma_cb', 'fanstudio_parse_jma'),
-            ('fanstudio_parse_sa_cb', 'fanstudio_parse_sa'),
-            ('fanstudio_parse_kma_eew_cb', 'fanstudio_parse_kma_eew'),
-            ('fanstudio_parse_cenc_cb', 'fanstudio_parse_cenc'),
-            ('fanstudio_parse_ningxia_cb', 'fanstudio_parse_ningxia'),
-            ('fanstudio_parse_guangxi_cb', 'fanstudio_parse_guangxi'),
-            ('fanstudio_parse_shanxi_cb', 'fanstudio_parse_shanxi'),
-            ('fanstudio_parse_beijing_cb', 'fanstudio_parse_beijing'),
-            ('fanstudio_parse_yunnan_cb', 'fanstudio_parse_yunnan'),
-            ('fanstudio_parse_cwa_cb', 'fanstudio_parse_cwa'),
-            ('fanstudio_parse_hko_cb', 'fanstudio_parse_hko'),
-            ('fanstudio_parse_usgs_cb', 'fanstudio_parse_usgs'),
-            ('fanstudio_parse_emsc_cb', 'fanstudio_parse_emsc'),
-            ('fanstudio_parse_bcsf_cb', 'fanstudio_parse_bcsf'),
-            ('fanstudio_parse_gfz_cb', 'fanstudio_parse_gfz'),
-            ('fanstudio_parse_usp_cb', 'fanstudio_parse_usp'),
-            ('fanstudio_parse_kma_cb', 'fanstudio_parse_kma'),
-            ('fanstudio_parse_fssn_cb', 'fanstudio_parse_fssn'),
-            ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
-            ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
-            ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
             ('whews_parse_jma_cb', 'whews_parse_jma'),
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
@@ -5027,10 +4596,17 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_cmt_cenc_cb', 'whews_parse_cmt_cenc'),
             ('whews_parse_cmt_ingv_cb', 'whews_parse_cmt_ingv'),
             ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
+                ('whews_parse_cenc_int_cb', 'whews_parse_cenc_int'),
+                ('whews_parse_cmt_gfz_cb', 'whews_parse_cmt_gfz'),
+                ('whews_parse_funvisis_cb', 'whews_parse_funvisis'),
+                ('whews_parse_cheji_cb', 'whews_parse_cheji'),
+                ('whews_parse_nea_cb', 'whews_parse_nea'),
+                ('whews_parse_jma_okiai_cb', 'whews_parse_jma_okiai'),
+                ('fssn_parse_fssn_cb', 'fssn_parse_fssn'),
+                ('fssn_parse_fssn_cmt_cb', 'fssn_parse_fssn_cmt'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('p2pquake_parse_551_cb', 'p2pquake_parse_551'),
             ('p2pquake_parse_552_cb', 'p2pquake_parse_552'),
-            ('p2pquake_parse_556_cb', 'p2pquake_parse_556'),
             ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
             ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
             ('eqsc_parse_jma_tsunami_cb', 'eqsc_parse_jma_tsunami'),
@@ -5727,7 +5303,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         _set_widget_style(data_source_label, STYLE_SECTION_TITLE)
         layout.addWidget(data_source_label)
         for name in [
-            "Fan Studio API",
             "WeJet无界科技",
             "Jian Project",
             "Wolfx Open API",
@@ -6028,8 +5603,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return "EMSC"
         if "nowquake.cn" in low:
             return "CENC烈度"
-        if "ws.fanstudio.tech/all" in low:
-            return "Fan Studio"
         if "api.2v8.cn/ws/all" in low or "api.beecld.com/ws/all" in low:
             return "WeJet all"
         return source_name or url
@@ -6400,8 +5973,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         """将数据源页控件写入内存 Config（不写盘、不重启）。"""
         self._update_base_urls()
         self._apply_main_provider_connection_flags()
-        if hasattr(self, "fanstudio_api_key_entry"):
-            self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        # FSSN 独立开关
+        if hasattr(self, "fssn_connect_cb"):
+            on = bool(self.fssn_connect_cb.isChecked())
+            self.config.enabled_sources[FSSN_MASTER_KEY] = on
+            self.config.enabled_sources[FSSN_ALL_URL] = on
         if hasattr(self, "eqsc_login_token_entry"):
             self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "jian_login_token_entry"):
@@ -6424,30 +6000,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             if cb is not None:
                 setattr(self.config.message_config, flag, cb.isChecked())
         for attr, cfg_name in [
-            ('fanstudio_parse_cea_cb', 'fanstudio_parse_cea'),
-            ('fanstudio_parse_cea_pr_cb', 'fanstudio_parse_cea_pr'),
-            ('fanstudio_parse_cwa_eew_cb', 'fanstudio_parse_cwa_eew'),
-            ('fanstudio_parse_jma_cb', 'fanstudio_parse_jma'),
-            ('fanstudio_parse_sa_cb', 'fanstudio_parse_sa'),
-            ('fanstudio_parse_kma_eew_cb', 'fanstudio_parse_kma_eew'),
-            ('fanstudio_parse_cenc_cb', 'fanstudio_parse_cenc'),
-            ('fanstudio_parse_ningxia_cb', 'fanstudio_parse_ningxia'),
-            ('fanstudio_parse_guangxi_cb', 'fanstudio_parse_guangxi'),
-            ('fanstudio_parse_shanxi_cb', 'fanstudio_parse_shanxi'),
-            ('fanstudio_parse_beijing_cb', 'fanstudio_parse_beijing'),
-            ('fanstudio_parse_yunnan_cb', 'fanstudio_parse_yunnan'),
-            ('fanstudio_parse_cwa_cb', 'fanstudio_parse_cwa'),
-            ('fanstudio_parse_hko_cb', 'fanstudio_parse_hko'),
-            ('fanstudio_parse_usgs_cb', 'fanstudio_parse_usgs'),
-            ('fanstudio_parse_emsc_cb', 'fanstudio_parse_emsc'),
-            ('fanstudio_parse_bcsf_cb', 'fanstudio_parse_bcsf'),
-            ('fanstudio_parse_gfz_cb', 'fanstudio_parse_gfz'),
-            ('fanstudio_parse_usp_cb', 'fanstudio_parse_usp'),
-            ('fanstudio_parse_kma_cb', 'fanstudio_parse_kma'),
-            ('fanstudio_parse_fssn_cb', 'fanstudio_parse_fssn'),
-            ('fanstudio_parse_fssn_cmt_cb', 'fanstudio_parse_fssn_cmt'),
-            ('fanstudio_parse_weatheralarm_cb', 'fanstudio_parse_weatheralarm'),
-            ('fanstudio_parse_tsunami_cb', 'fanstudio_parse_tsunami'),
             ('whews_parse_jma_eew_cb', 'whews_parse_jma_eew'),
             ('whews_parse_jma_cb', 'whews_parse_jma'),
             ('whews_parse_jma_volcano_cb', 'whews_parse_jma_volcano'),
@@ -6502,6 +6054,14 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_cmt_cenc_cb', 'whews_parse_cmt_cenc'),
             ('whews_parse_cmt_ingv_cb', 'whews_parse_cmt_ingv'),
             ('whews_parse_typhoon_cb', 'whews_parse_typhoon'),
+                ('whews_parse_cenc_int_cb', 'whews_parse_cenc_int'),
+                ('whews_parse_cmt_gfz_cb', 'whews_parse_cmt_gfz'),
+                ('whews_parse_funvisis_cb', 'whews_parse_funvisis'),
+                ('whews_parse_cheji_cb', 'whews_parse_cheji'),
+                ('whews_parse_nea_cb', 'whews_parse_nea'),
+                ('whews_parse_jma_okiai_cb', 'whews_parse_jma_okiai'),
+                ('fssn_parse_fssn_cb', 'fssn_parse_fssn'),
+                ('fssn_parse_fssn_cmt_cb', 'fssn_parse_fssn_cmt'),
             ('whews_parse_weatheralarm_cb', 'whews_parse_weatheralarm'),
             ('eqsc_parse_jma_eew_cb', 'eqsc_parse_jma_eew'),
             ('eqsc_parse_jma_report_cb', 'eqsc_parse_jma_report'),
@@ -6538,8 +6098,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             self.config.message_config.p2pquake_parse_551 = self.p2pquake_parse_551_cb.isChecked()
         if hasattr(self, 'p2pquake_parse_552_cb'):
             self.config.message_config.p2pquake_parse_552 = self.p2pquake_parse_552_cb.isChecked()
-        if hasattr(self, 'p2pquake_parse_556_cb'):
-            self.config.message_config.p2pquake_parse_556 = self.p2pquake_parse_556_cb.isChecked()
         if hasattr(self, "openquake_gq_min_magnitude_spin"):
             self.config.message_config.openquake_gq_min_magnitude = float(
                 self.openquake_gq_min_magnitude_spin.value()
@@ -6794,8 +6352,11 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             return
         self._update_base_urls()  # 确保 all_source_url 与当前域名一致
         self._apply_main_provider_connection_flags()
-        if hasattr(self, "fanstudio_api_key_entry"):
-            self.config.ws_config.fanstudio_api_key = self.fanstudio_api_key_entry.text().strip()
+        # FSSN 独立开关
+        if hasattr(self, "fssn_connect_cb"):
+            on = bool(self.fssn_connect_cb.isChecked())
+            self.config.enabled_sources[FSSN_MASTER_KEY] = on
+            self.config.enabled_sources[FSSN_ALL_URL] = on
         if hasattr(self, "eqsc_login_token_entry"):
             self.config.ws_config.eqsc_login_token = self.eqsc_login_token_entry.text().strip()
         if hasattr(self, "jian_login_token_entry"):

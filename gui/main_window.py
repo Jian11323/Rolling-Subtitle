@@ -27,7 +27,7 @@ from config import (
     APP_VERSION,
     CHANGELOG_TEXT,
     APP_DECLARATION_TEXT,
-    FANSTUDIO_ALL_URL,
+    JIAN_MASTER_KEY,
     JIAN_TYPHOON_HTTP,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
@@ -37,7 +37,8 @@ from config import (
     EQSC_HTTP_MASTER,
     EQSC_HTTP_SOURCE_KEYS,
     OPENQUAKE_WS_ALL_URL,
-    DATA_PROVIDER_FANSTUDIO,
+    FSSN_MASTER_KEY,
+    FSSN_ALL_URL,
     DATA_PROVIDER_WHEWS,
     wolfx_master_enabled,
     openquake_master_enabled,
@@ -57,7 +58,7 @@ from utils.message_processor import (
 from utils.logger import get_logger
 from utils import timezone_utils
 from utils.geo_utils import should_accept_message
-from utils.audio_alert import play_alert_sound, play_jma_eew_alert_sound, play_nhk_news_bell
+from utils.audio_alert import play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import set_tray_icon_provider, show_event_notification
 
@@ -80,7 +81,6 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "p2pquake",
     "p2pquake_ws",
     "p2pquake_tsunami",
-    "p2pquake_eew",
     # EQSC 各子源（全局辅助 HTTP）
     "eqsc_jma_eew",
     "eqsc_jma_report",
@@ -103,18 +103,10 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "custom",
     "globalquake",
 }
-# 仅 Fan Studio 聚合通道会出现的子源（无界/官方直连不会产出）
-_FANSTUDIO_ONLY_SOURCES: Set[str] = {
-    "guangxi",
-    "shanxi",
-    "fssn",
-    "fssn-cmt",
-    "海啸信息",
-}
 # 入队时始终保留的溯源字段（避免速报不存 parsed_data 导致切换后无法识别归属）
 _MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
     "source_type",
-    "fanstudio",
+    "fssn",
     "whews",
     "eqsc",
     "jian",
@@ -184,6 +176,9 @@ class MainWindow(QMainWindow):
         self.initialized = False
         self.current_display_type = None
         self._switching_to_report = False
+        # Jian 聚合快照未入缓冲前不开始速报轮播，字幕保持加载提示
+        self._jian_snapshot_seen = False
+        self._report_order_ready = not self._should_wait_jian_order()
         # 当前正在显示的消息（用于检查更新）
         self._current_displaying_message: Optional[MessageItem] = None
         # 待更新的消息（如果当前显示的消息收到更新，等滚动完成后替换）
@@ -208,7 +203,7 @@ class MainWindow(QMainWindow):
         # 右键菜单缓存（避免每次右键点击时重新创建）
         self.context_menu = None
         self._tray_icon: Optional[QSystemTrayIcon] = None
-        # 本会话已成功解析过的设置页状态键（如 fanstudio_parse_cea）
+        # 本会话已成功解析过的设置页状态键
         self._parsed_status_keys: Set[str] = set()
         
         # 窗口大小变更防抖：拖拽结束后再写入配置
@@ -258,7 +253,6 @@ class MainWindow(QMainWindow):
                 self._data_source_hot_snapshot = (
                     _data_source_snapshot(self.config),
                     (
-                        (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
                         (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
                         (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
                         tuple(sorted((self.config.http_poll_intervals or {}).items())),
@@ -791,7 +785,6 @@ class MainWindow(QMainWindow):
             snapshot = _data_source_snapshot(self.config)
             # 附带鉴权相关字段，令牌/Key 变更也触发重载或热鉴权
             auth_part = (
-                (getattr(self.config.ws_config, "fanstudio_api_key", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_token", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_host", "") or "").strip(),
                 (getattr(self.config.ws_config, "whews_cea_app_id", "") or "").strip(),
@@ -818,16 +811,6 @@ class MainWindow(QMainWindow):
                 def _after_ws_reload(f):
                     try:
                         f.result()
-                        # 仅当前主源为 Fan Studio 时热发鉴权；切到 WeJet/Jian 时勿误报「尚未连接」
-                        if (
-                            self.config.get_active_data_provider() == DATA_PROVIDER_FANSTUDIO
-                            and self.ws_manager is not None
-                        ):
-                            fs_key = (
-                                getattr(self.config.ws_config, "fanstudio_api_key", "") or ""
-                            ).strip()
-                            if fs_key:
-                                self.ws_manager.send_fanstudio_auth(fs_key)
                         logger.info("数据源连接已按配置热重载")
                     except Exception as e_ws:
                         logger.error(f"热重载 WebSocket 连接失败: {e_ws}")
@@ -910,6 +893,8 @@ class MainWindow(QMainWindow):
                 f"热切换提供者：已清空全部缓冲，等待新数据源拉取 "
                 f"(速报={removed_report}, 预警={removed_warning})"
             )
+            self._jian_snapshot_seen = False
+            self._report_order_ready = not self._should_wait_jian_order()
             return
 
         def _should_remove(msg: MessageItem) -> bool:
@@ -1247,7 +1232,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _display_mode_like_report_for_incoming_warning(t: Optional[str]) -> bool:
         """与速报轮播相同、收到真预警时可打断的模式（含 ``test`` 模拟态）。"""
-        if t is None:
+        if t is None or t == "loading":
             return True
         if isinstance(t, str):
             return t.lower() in ("report", "test")
@@ -1367,6 +1352,9 @@ class MainWindow(QMainWindow):
                                 f"to source={next_msg.source}, type={next_msg.message_type}, event_id={next_msg.event_id}"
                             )
             elif self.report_buffer.size() > 0:
+                if not self._report_order_ready:
+                    self._hold_loading_until_order_ready()
+                    return
                 # 预警缓冲区已空、轮播切到速报：同步关闪烁（含模拟 test、过期后仍亮条）
                 if self._display_type_is_warning_or_test(self.current_display_type):
                     self._stop_alert_flash_sync()
@@ -1731,9 +1719,43 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"回落非空显示失败: {e}", exc_info=True)
 
+    def _should_wait_jian_order(self) -> bool:
+        """启用 Jian 且不是自定义文本时，等聚合快照入队后再按优先级开播。"""
+        if getattr(self.config.message_config, "use_custom_text", False):
+            return False
+        return bool(self.config.enabled_sources.get(JIAN_MASTER_KEY, False))
+
+    def _hold_loading_until_order_ready(self) -> None:
+        """顺序未就绪：继续滚动加载提示，不切到已入队的低优先级源。"""
+        if self.scrolling_text is None or not hasattr(self.scrolling_text, "show_loading_message"):
+            return
+        if self.current_display_type == "loading" and self.scrolling_text.is_scrolling():
+            return
+        self.scrolling_text.show_loading_message()
+        self._current_displaying_message = None
+        self.current_display_type = "loading"
+
+    def _maybe_open_report_order(self) -> None:
+        """Jian 快照消息已全部进入速报缓冲后，从优先级最高的一条开始轮播。"""
+        if self._report_order_ready or not self._jian_snapshot_seen:
+            return
+        if self._should_wait_jian_order() and self.message_queue.qsize() > 0:
+            return
+        self._report_order_ready = True
+        logger.info("轮播顺序已就绪，从优先级最高的一条开始")
+        scrolling = self.scrolling_text is not None and self.scrolling_text.is_scrolling()
+        if scrolling:
+            return
+        if self.current_display_type in (None, "loading"):
+            self._on_scroll_completed()
+
     def _switch_to_report_mode(self):
         """切换到轮播模式"""
         try:
+            if not self._report_order_ready:
+                self._hold_loading_until_order_ready()
+                self._switching_to_report = False
+                return
             if self._display_type_is_warning_or_test(self.current_display_type):
                 # 从预警模式（含设置页 test 模拟态）切换到速报模式，应该从第一条消息开始
                 # 防止重复调用
@@ -1903,22 +1925,12 @@ class MainWindow(QMainWindow):
             text = f"【模拟】{place_name}附近发生{magnitude:.1f}级地震（最大烈度 {lv}）"
             color = self.config.message_config.warning_color
 
-            ac = self.config.alert_config
-            feedback_mode = str(getattr(ac, "alert_feedback_mode", "sound") or "sound").strip().lower()
-            if feedback_mode == "tts":
-                trigger_alert_feedback(
-                    self.config,
-                    "warning",
-                    parsed,
-                    display_text=text,
-                )
-            else:
-                play_alert_sound(
-                    self.config,
-                    "warning",
-                    parsed_data=parsed,
-                    force=True,
-                )
+            trigger_alert_feedback(
+                self.config,
+                "warning",
+                parsed,
+                display_text=text,
+            )
 
             if self.alert_controller.trigger(parsed, None, text, color, simulate=True):
                 self.current_display_type = "test"
@@ -1959,7 +1971,7 @@ class MainWindow(QMainWindow):
         sn = source_name or ""
         provider = self.config.get_active_data_provider()
 
-        # 气象预警：全局仅允许一个数据源（Jian / Fan Studio / WeJet / PancakesAPI）
+        # 气象预警：全局仅允许一个数据源（Jian / WeJet / PancakesAPI）
         weather_provider = weather_provider_for_parsed(parsed_data)
         if weather_provider:
             active_weather = active_weather_source(mc)
@@ -1992,22 +2004,26 @@ class MainWindow(QMainWindow):
             or source_name == "jian_typhoon"
             or bool(parsed_data.get("jian_typhoon"))
         )
-        # Fan Studio 专属子源：无标记时也按名称门控，防止旧缓冲窜屏
-        if (st in _FANSTUDIO_ONLY_SOURCES or sn in _FANSTUDIO_ONLY_SOURCES) and provider != DATA_PROVIDER_FANSTUDIO:
-            logger.debug(f"已忽略消息：Fan Studio 专属源「{st or sn}」不属于当前提供者")
-            return False
-        if parsed_data.get("fanstudio") and provider != DATA_PROVIDER_FANSTUDIO and not is_typhoon:
-            logger.debug("已忽略消息：当前非 Fan Studio 提供者")
+        # FSSN 辅助源：不受主提供者门控，但受辅助总开关与 FSSN 开关约束
+        is_fssn = (
+            bool(parsed_data.get("fssn"))
+            or st in ("fssn", "fssn-cmt")
+            or sn in ("fssn", "fssn-cmt")
+        )
+        if is_fssn:
+            from config import aux_sources_enabled
+            if not aux_sources_enabled(es):
+                logger.debug("已忽略消息：辅助数据源总开关已关闭（FSSN）")
+                return False
+            if not (es.get(FSSN_MASTER_KEY, False) or es.get(FSSN_ALL_URL, False)):
+                logger.debug("已忽略消息：FSSN 已关闭")
+                return False
+        elif parsed_data.get("fanstudio") and not is_typhoon:
+            logger.debug("已忽略消息：Fan Studio 主源已下线")
             return False
         if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
             logger.debug("已忽略消息：当前非 WeJet 提供者")
             return False
-
-        fanstudio_all_url = FANSTUDIO_ALL_URL
-        if not es.get(fanstudio_all_url, True):
-            if parsed_data.get("fanstudio") and not is_typhoon:
-                logger.debug("已忽略消息：Fan Studio 聚合连接（All）已关闭")
-                return False
 
         # 烈度速报（Nowquake）：未勾选时丢弃
         if source_name == "cenc-ir" or st == "cenc-ir":
@@ -2031,13 +2047,6 @@ class MainWindow(QMainWindow):
             url = EQSC_PARSE_FLAG_TO_URL.get(flag or "")
             if url and not es.get(url, False):
                 logger.debug(f"已忽略消息：EQSC HTTP 源已关闭: {url}")
-                return False
-
-        if parsed_data.get("fanstudio") and st:
-            from adapters.fanstudio_adapter import FanStudioAdapter
-            flag = FanStudioAdapter.FANSTUDIO_SOURCE_FLAG_FIELD.get(st)
-            if flag and not getattr(mc, flag, True):
-                logger.debug(f"已忽略消息：Fan Studio 子源「{st}」解析已关闭（{flag}=False）")
                 return False
 
         if parsed_data.get("whews"):
@@ -2074,8 +2083,8 @@ class MainWindow(QMainWindow):
             or sn.startswith("openquake")
             or st.startswith("wolfx_")
             or sn.startswith("wolfx_")
-            or st in ("p2pquake", "p2pquake_tsunami", "p2pquake_eew", "wolfx_cenc", "wolfx_jma_eqlist")
-            or sn in ("p2pquake", "p2pquake_ws", "p2pquake_tsunami", "p2pquake_eew")
+            or st in ("p2pquake", "p2pquake_tsunami", "wolfx_cenc", "wolfx_jma_eqlist")
+            or sn in ("p2pquake", "p2pquake_ws", "p2pquake_tsunami")
         )
         if is_aux_msg and not aux_sources_enabled(es):
             logger.debug("已忽略消息：辅助数据源总开关已关闭")
@@ -2123,12 +2132,7 @@ class MainWindow(QMainWindow):
             or st == "p2pquake_tsunami"
             or ("api.p2pquake.net" in sn and "tsunami" in sn.lower())
         )
-        is_p2p_eew = (
-            source_name == "p2pquake_eew"
-            or st == "p2pquake_eew"
-            or ("api.p2pquake.net" in sn and "556" in sn)
-        )
-        if is_p2p_eq or is_p2p_tsu or is_p2p_eew:
+        if is_p2p_eq or is_p2p_tsu:
             # 与设置页一致：总开关关闭则既不连 WSS 也不投递 HTTP 拉取结果
             if not p2p_on:
                 logger.debug("已忽略消息：P2PQuake 总开关已关闭")
@@ -2139,8 +2143,9 @@ class MainWindow(QMainWindow):
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
                 logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
                 return False
-            if is_p2p_eew and not getattr(mc, "p2pquake_parse_556", True):
-                logger.debug("已忽略消息：P2PQuake 緊急地震速報解析已关闭")
+            # code 556 已移除，丢弃残留
+            if source_name == "p2pquake_eew" or st == "p2pquake_eew" or ("api.p2pquake.net" in sn and "556" in sn):
+                logger.debug("已忽略消息：P2PQuake 緊急地震速報（556）已移除")
                 return False
 
         # PancakesAPI 辅助源
@@ -2185,6 +2190,11 @@ class MainWindow(QMainWindow):
     def _process_message_received(self, source_name: str, parsed_data: Dict[str, Any]):
         """在主线程中处理数据源消息"""
         try:
+            if isinstance(parsed_data, dict) and parsed_data.get("_order_gate") == "jian_snapshot":
+                self._jian_snapshot_seen = True
+                logger.info("Jian 聚合快照已下发，等待缓冲排空后按优先级开播")
+                self._maybe_open_report_order()
+                return
             # 过期预警 / 批量状态补记：仅记「已解析」，不上屏
             if isinstance(parsed_data, dict) and (
                 parsed_data.get("_ws_expired") or parsed_data.get("_parse_status_only")
@@ -2297,21 +2307,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            ac = self.config.alert_config
-            feedback_mode = str(getattr(ac, "alert_feedback_mode", "sound") or "sound").strip().lower()
-            if feedback_mode == "tts":
-                if message_type in ("warning", "report", "weather"):
-                    trigger_alert_feedback(
-                        self.config,
-                        message_type,
-                        parsed_data,
-                        display_text=message,
-                    )
-            elif message_type == "warning":
-                play_alert_sound(
+            if message_type in ("warning", "report", "weather"):
+                trigger_alert_feedback(
                     self.config,
                     message_type,
-                    parsed_data=parsed_data,
+                    parsed_data,
+                    display_text=message,
                 )
             if message_type == "warning":
                 play_jma_eew_alert_sound(self.config, parsed_data=parsed_data)
@@ -2745,6 +2746,8 @@ class MainWindow(QMainWindow):
             
             except Exception as e:
                 logger.error(f"处理消息时出错: {e}", exc_info=True)
+
+            self._maybe_open_report_order()
             
             # 继续处理（增加延迟，减少CPU占用）
             if self.running:
@@ -2759,6 +2762,8 @@ class MainWindow(QMainWindow):
             # 显示加载提示
             if self.scrolling_text:
                 self.scrolling_text.show_loading_message()
+                self.current_display_type = "loading"
+                self._current_displaying_message = None
             
             # 启动WebSocket管理器
             ws_manager = WebSocketManager(self.on_message_received)
@@ -3042,23 +3047,6 @@ class MainWindow(QMainWindow):
             logger.error(f"发送WebSocket消息失败: {e}")
             return False
 
-    def apply_fanstudio_api_key(self, api_key: str) -> bool:
-        """
-        将 Fan Studio API Key 写入配置，并向已连接的 /all 热发送鉴权。
-
-        鉴权通过后服务器会自动下发完整数据流，无需重启。
-        """
-        key = (api_key or "").strip()
-        self.config.ws_config.fanstudio_api_key = key
-        if not key:
-            return False
-        if not self.ws_manager:
-            return False
-        try:
-            return bool(self.ws_manager.send_fanstudio_auth(key))
-        except Exception as e:
-            logger.error(f"热应用 Fan Studio 鉴权失败: {e}")
-            return False
 
     def get_data_source_status(self) -> Dict[str, str]:
         """
@@ -3077,14 +3065,6 @@ class MainWindow(QMainWindow):
         """返回本会话已成功解析过的设置页状态键集合。"""
         return set(self._parsed_status_keys)
 
-    def get_fanstudio_auth_status(self) -> Tuple[str, str]:
-        """返回 Fan Studio /all 主连接鉴权状态：(none|pending|ok|failed, message)。"""
-        try:
-            if self.ws_manager and hasattr(self.ws_manager, "get_fanstudio_auth_status"):
-                return self.ws_manager.get_fanstudio_auth_status()
-        except Exception as e:
-            logger.debug(f"获取 Fan Studio 鉴权状态失败: {e}")
-        return ("none", "")
 
     def get_whews_cea_auth_status(self) -> Tuple[str, str]:
         """返回 WeJet CEA App 鉴权状态：(none|pending|ok|failed, message)。"""
@@ -3157,17 +3137,8 @@ class MainWindow(QMainWindow):
                     keys.append(j_flag)
             except Exception:
                 pass
-        elif (
-            fs_st
-            and not fs_st.startswith("wolfx_")
-            and not fs_st.startswith("fanstudio_")
-            and not fs_st.startswith("eqsc_")
-            and not fs_st.startswith("openquake")
-            and fs_st not in ("p2pquake", "p2pquake_tsunami", "p2pquake_eew", "cenc-ir", "eqsc", "openquake")
-        ):
-            # Fan Studio / 同源短名：fanstudio_parse_*
-            keys.append(f"fanstudio_parse_{fs_st.replace('-', '_')}")
-
+        elif pd.get("fssn") or fs_st in ("fssn", "fssn-cmt"):
+            keys.append(f"fssn_parse_{fs_st.replace('-', '_')}")
         if st == "jian_typhoon" or sn_low == "jian_typhoon":
             keys.append(JIAN_TYPHOON_HTTP)
 
@@ -3175,8 +3146,6 @@ class MainWindow(QMainWindow):
             keys.append("p2pquake_parse_551")
         if st == "p2pquake_tsunami" or sn_low == "p2pquake_tsunami":
             keys.append("p2pquake_parse_552")
-        if st == "p2pquake_eew" or sn_low == "p2pquake_eew":
-            keys.append("p2pquake_parse_556")
 
         oq_status_map = {
             "openquake_gq": "openquake_parse_gq",

@@ -150,8 +150,14 @@ def _render_pillow(
 
 
 def _pygmt_usable() -> bool:
-    """PyInstaller lite 打包版不含 PyGMT，仅开发环境可选启用。"""
-    return not getattr(sys, 'frozen', False)
+    """打包版不含 PyGMT；开发环境须能构造 Figure，否则直接走 Pillow。"""
+    if getattr(sys, "frozen", False):
+        return False
+    try:
+        import pygmt
+        return callable(getattr(pygmt, "Figure", None))
+    except Exception:
+        return False
 
 
 def _render_pygmt(

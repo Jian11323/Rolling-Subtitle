@@ -75,8 +75,6 @@ from utils.jma_shindo import format_jma_intensity_areas_detail
 
 logger = get_logger()
 
-# Fan Studio 气象预警图标：type 参数为预警编码（如 11B20_yellow）
-FANSTUDIO_ALARM_ICON_URL = "https://api.fanstudio.tech/we/img/alarm_icon.php?type={type}"
 
 
 class MessageProcessor:
@@ -452,134 +450,10 @@ class MessageProcessor:
             return
         message_parts.append("。" + "，".join(chunks) + "，")
 
-    @staticmethod
-    def _strip_fanstudio_brackets(s: Any) -> str:
-        """去掉测定标识符等外层方括号，如 [自动测定] / 【正式测定】 → 正式测定。"""
-        if s is None:
-            return ""
-        t = str(s).strip()
-        while len(t) >= 2 and t.startswith("[") and t.endswith("]"):
-            t = t[1:-1].strip()
-        while len(t) >= 2 and t.startswith("【") and t.endswith("】"):
-            t = t[1:-1].strip()
-        return t
 
-    def _fanstudio_cea_pr_warning_header(self, province: str) -> str:
-        """省级预警标头：【省/市/自治区全称地震局地震预警】，尽量与 API province 自动匹配。"""
-        p = (province or "").strip()
-        if not p:
-            return "【省级地震局地震预警】"
-        if p.endswith("地震局地震预警"):
-            return f"【{p}】"
-        for suffix in ("省", "市", "壮族自治区", "回族自治区", "维吾尔自治区", "自治区"):
-            if p.endswith(suffix):
-                return f"【{p}地震局地震预警】"
-        municipalities_short = ("北京", "上海", "天津", "重庆")
-        if p in municipalities_short:
-            return f"【{p}市地震局地震预警】"
-        municipalities_full = ("北京市", "上海市", "天津市", "重庆市")
-        if p in municipalities_full:
-            return f"【{p}地震局地震预警】"
-        autonomous_short = {
-            "内蒙古": "内蒙古自治区",
-            "广西": "广西壮族自治区",
-            "西藏": "西藏自治区",
-            "宁夏": "宁夏回族自治区",
-            "新疆": "新疆维吾尔自治区",
-        }
-        if p in autonomous_short:
-            return f"【{autonomous_short[p]}地震局地震预警】"
-        return f"【{p}省地震局地震预警】"
 
-    def _fanstudio_warning_header(self, data: Dict[str, Any]) -> str:
-        """Fan Studio 预警类统一标头（与 Wolfx 等区分）。"""
-        st = data.get("source_type") or ""
-        province = (data.get("province") or "").strip()
-        it = (data.get("info_type") or "").strip()
-        if st == "cea":
-            return "【中国地震预警网地震预警】"
-        if st == "cea-pr":
-            return self._fanstudio_cea_pr_warning_header(province)
-        if st == "cwa-eew":
-            return "【台湾省气象署地震预警】"
-        if st == "sa":
-            return "【美国ShakeAlert地震预警】"
-        if st == "jma":
-            if it:
-                return f"【日本气象厅  緊急地震速報  {it}】"
-            return "【日本气象厅  緊急地震速報】"
-        if st == "kma-eew":
-            return "【韩国气象厅地震预警】"
-        org = (data.get("organization") or "").strip()
-        if org:
-            if "地震预警" in org or "地震情报" in org:
-                return f"【{org}】"
-            return f"【{org}地震预警】"
-        return "【地震预警】"
 
-    def _fanstudio_report_header(self, data: Dict[str, Any]) -> str:
-        """Fan Studio 速报/气象/海啸等统一标头。"""
-        st = data.get("source_type") or ""
-        raw = data.get("raw_data") or {}
-        if not isinstance(raw, dict):
-            raw = {}
-        info_type = (data.get("info_type") or "").strip()
-        if st == "weatheralarm":
-            return "【中国气象局气象预警】"
-        if st == "tsunami":
-            details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
-            batch_raw = details.get("batch", "")
-            batch = str(batch_raw).strip() if batch_raw is not None else ""
-            level = (data.get("tsunami_warning_level") or "").strip()
-            title = (data.get("tsunami_warning_title") or "").strip()
-            # 优先级别（信息/蓝/黄/橙/红/解除），与 WHEWS 标头一致
-            suffix = level or title
-            if batch and suffix:
-                return f"【自然资源部海啸预警中心 第{batch}报 {suffix}】"
-            if batch:
-                return f"【自然资源部海啸预警中心 第{batch}报】"
-            if suffix:
-                return f"【自然资源部海啸预警中心 {suffix}】"
-            return "【自然资源部海啸预警中心】"
-        if st == "cenc":
-            raw_it = raw.get("infoTypeName") or info_type
-            clean = self._strip_fanstudio_brackets(raw_it)
-            raw_s = str(raw_it or "")
-            if "烈度速报" in clean or "烈度速报" in raw_s:
-                return "【中国地震台网中心地震烈度速报】"
-            if clean:
-                return f"【中国地震台网中心地震信息 {clean}】"
-            return "【中国地震台网中心地震信息】"
-        fixed = {
-            "cenc-ir": "【中国地震台网中心地震烈度速报】",
-            "ningxia": "【宁夏回族自治区地震局地震信息】",
-            "guangxi": "【广西壮族自治区地震局地震信息】",
-            "shanxi": "【山西省地震局地震信息】",
-            "beijing": "【北京市地震局地震信息】",
-            "yunnan": "【云南省地震局地震信息】",
-            "cwa": "【台湾省气象署地震报告】",
-            "hko": "【香港天文台地震信息】",
-            "usgs": "【美国地质调查局地震信息】",
-            "emsc": "【欧洲地中海地震中心地震信息】",
-            "bcsf": "【法国中央地震研究所地震信息】",
-            "gfz": "【德国地学研究中心地震信息】",
-            "usp": "【巴西圣保罗大学地震信息】",
-            "kma": "【韩国气象厅地震信息】",
-            "bmkg": "【印尼气象气候和地球物理局地震信息】",
-            "geonet": "【新西兰 GeoNet 地震信息】",
-            "ingv": "【意大利国家地球物理与火山学研究所地震信息】",
-            "tmd": "【泰国地震局地震信息】",
-            "mmd": "【马来西亚气象局地震信息】",
-            "nrcan": "【加拿大自然资源部地震信息】",
-            "fssn": "【FSSN 地震信息】",
-        }
-        if st in fixed:
-            return fixed[st]
-        org = (data.get("organization") or "").strip()
-        if org:
-            return f"【{org}】"
-        return "【地震信息】"
-    
+
     def _format_warning_message(self, data: Dict[str, Any]) -> str:
         """
         格式化预警消息
@@ -648,10 +522,7 @@ class MessageProcessor:
             message_parts = []
             
             # 机构名称处理
-            if data.get("fanstudio"):
-                message_parts.append(self._fanstudio_warning_header(data))
-            # 对于日本气象厅，特殊处理格式
-            elif source_type == 'wolfx_jma_eew':
+            if source_type == 'wolfx_jma_eew':
                 warn_area_type = (data.get('warn_area_type') or '').strip()
                 if warn_area_type:
                     message_parts.append(f"【Wolfx 緊急地震速報 {warn_area_type}】")
@@ -663,8 +534,6 @@ class MessageProcessor:
                     message_parts.append(f"【EQSC 緊急地震速報 {warn_area_type}】")
                 else:
                     message_parts.append("【EQSC 緊急地震速報】")
-            elif source_type == 'p2pquake_eew':
-                message_parts.append("【P2PQuake 緊急地震速報】")
             elif source_type in ('openquake_gq', 'globalquake'):
                 message_parts.append("【GlobalQuake地震预警】")
             elif source_type == 'wolfx_sc_eew':
@@ -680,11 +549,12 @@ class MessageProcessor:
             elif source_type == 'early_est':
                 message_parts.append("【Early-est预警】")
             elif source_type == 'jma':
-                # 日本气象厅格式：【日本气象厅 紧急地震速报 infoTypeName】
-                if info_type:
-                    message_parts.append(f"【日本气象厅 紧急地震速报 {info_type}】")
+                # 日本气象厅：优先预报/警报类型
+                warn_area_type = (data.get('warn_area_type') or info_type or '').strip()
+                if warn_area_type:
+                    message_parts.append(f"【日本气象厅 紧急地震速报 {warn_area_type}】")
                 else:
-                    message_parts.append(f"【日本气象厅 紧急地震速报】")
+                    message_parts.append("【日本气象厅 紧急地震速报】")
             # 对于省级预警（cea-pr），使用省份名称
             # 仅保留province地震局地震预警格式，如果没有省份信息则使用默认机构名称
             elif source_type == 'cea-pr' and province:
@@ -753,8 +623,15 @@ class MessageProcessor:
                 depth_int = int(round(depth, 0))
                 message_parts.append(f"，震源深度{depth_int}公里")
             self._append_epi_intensity_after_depth(message_parts, data, source_type)
-            if source_type == 'p2pquake_eew' and data.get('warning_areas'):
-                message_parts.append(f"，警戒区域：{data['warning_areas']}")
+            lg = str(data.get("lg_intensity") or "").strip()
+            if not lg:
+                raw = data.get("raw_data") if isinstance(data.get("raw_data"), dict) else {}
+                lg = str(raw.get("lgIntensity") or "").strip()
+            if lg and lg not in ("0", "不明"):
+                message_parts.append(f"，长周期地震动阶级{lg}")
+            if data.get("warning_areas"):
+                label = "警报区域"
+                message_parts.append(f"，{label}：{data['warning_areas']}")
             self._append_wolfx_jma_accuracy_line(message_parts, data, source_type)
 
             result = "".join(message_parts)
@@ -1051,9 +928,7 @@ class MessageProcessor:
         message_parts = []
         
         # 机构名称
-        if data.get("fanstudio"):
-            message_parts.append(self._fanstudio_report_header(data))
-        elif source_type == "wolfx_cenc":
+        if source_type == "wolfx_cenc":
             det = str(info_type or "").strip()
             if "正式" in det:
                 message_parts.append("【Wolfx中国地震台网中心正式测定】")
@@ -1085,9 +960,11 @@ class MessageProcessor:
             message_parts.append("【EQSC 欧洲地中海地震中心地震信息】")
         elif source_type == "openquake_nmefc":
             message_parts.append("【国家海洋环境预报中心海啸预警】")
+        elif source_type == "fssn":
+            message_parts.append("【FSSN地震信息】")
         elif organization:
-            if organization == "FSSN":
-                message_parts.append("【FSSN 地震信息】")
+            if organization in ("FSSN", "FAN Studio Seismic Network"):
+                message_parts.append("【FSSN地震信息】")
             elif organization == "香港天文台":
                 message_parts.append("【香港天文台地震信息】")
             elif organization == "美国地质调查局":
@@ -1353,9 +1230,8 @@ class MessageProcessor:
         否则回退 Fan Studio 在线接口（需 type 编码，如 11B20_yellow / p0005003）。
         """
         try:
-            from urllib.parse import quote
-
-            # 无界科技 / 部分 Fan Studio 帧直接给出完整图标 URL
+            
+            # 无界科技等帧直接给出完整图标 URL
             img_url = weather_data.get("img") or weather_data.get("image") or weather_data.get("icon")
             if isinstance(img_url, str):
                 img_url = img_url.strip()
@@ -1371,14 +1247,14 @@ class MessageProcessor:
                 type_str = alarm_type.strip()
                 # 允许 11B20_yellow、p0005003 等常见编码；拒绝空白与路径分隔符
                 if re.match(r'^[A-Za-z0-9][A-Za-z0-9_.\-]*$', type_str):
-                    # p 开头编码优先走 NMC 官方图床（与无界科技 img 一致），Fan Studio 代理常解析失败
+                    # p 开头编码优先走 NMC 官方图床（与无界科技 img 一致）
                     if re.match(r'^p\d+$', type_str, re.I):
                         nmc_url = f"https://image.nmc.cn/assets/img/alarm/{type_str}.png"
                         logger.info(f"使用 NMC 图床获取气象预警图片: {nmc_url}")
                         return nmc_url
-                    url = FANSTUDIO_ALARM_ICON_URL.format(type=quote(type_str, safe=""))
-                    logger.info(f"使用 type 字段获取气象预警图片: {url}")
-                    return url
+                    cma_url = f"https://weather.cma.cn/assets/img/alarm/{type_str}.png"
+                    logger.info(f"使用中央台图床获取气象预警图片: {cma_url}")
+                    return cma_url
                 logger.warning(f"气象预警 type 编码无效，无法使用在线图标: {type_str!r}")
                 return None
             headline = weather_data.get('headline', '') or weather_data.get('title', '')
@@ -1410,8 +1286,6 @@ class MessageProcessor:
 
         if data.get("whews") or data.get("jian"):
             prefix = "【中国气象局气象预警】"
-        elif data.get("fanstudio"):
-            prefix = "【中国气象局气象预警】"
         elif source_type == "openquake_cma":
             prefix = "【中国气象局气象预警】"
         elif source_type == "openquake_nmefc_wave":
@@ -1433,7 +1307,7 @@ class MessageProcessor:
     def get_weather_image_path(self, parsed_data: Dict[str, Any]) -> Optional[str]:
         """
         获取气象预警图标 URL。
-        优先 raw_data.img（无界科技等），否则按 type 走 NMC / Fan Studio 图标接口。
+        优先 raw_data.img（无界科技等），否则按 type 走 NMC / 中央台图标接口。
 
         Args:
             parsed_data: 解析后的数据字典

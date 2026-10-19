@@ -21,8 +21,7 @@ SOURCE_NO_CHINA_EPI_ESTIMATE = frozenset(
         "eqsc_jma_eew",
         "eqsc_cwa",
         "p2pquake",
-        "p2pquake_eew",
-    }
+            }
 )
 
 # 情报/观测最大震度（非 EEW 预估）：文案用「最大震度」
@@ -48,8 +47,7 @@ SOURCE_TW_JP_ALERT_EXCLUDE = frozenset(
         "eqsc_jma_eew",
         "eqsc_cwa",
         "p2pquake",
-        "p2pquake_eew",
-    }
+            }
 )
 
 _EPI_KEYS = (

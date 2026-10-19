@@ -65,6 +65,8 @@ _WARNING_STORE_KEYS = frozenset(
         "organization",
         "cancel",
         "fanstudio",
+        "fssn",
+        "fssn",
         "whews",
         "jian",
         "eqsc",

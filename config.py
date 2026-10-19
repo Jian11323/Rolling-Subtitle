@@ -33,18 +33,25 @@ def fanstudio_http_url(path: str) -> str:
 FANSTUDIO_ALL_URL = fanstudio_ws_url("all")
 FANSTUDIO_ALL_URLS = (FANSTUDIO_ALL_URL,)
 
+# FSSN WebSocket（https://fssn-api.fanstudio.tech/ ；旧 FAN Studio API 已停运）
+FSSN_API_DOMAIN = "fssn-api.fanstudio.tech"
+FSSN_ALL_URL = f"wss://{FSSN_API_DOMAIN}/all"
+FSSN_FSSN_URL = f"wss://{FSSN_API_DOMAIN}/fssn"
+FSSN_CMT_URL = f"wss://{FSSN_API_DOMAIN}/fssn-cmt"
+FSSN_MASTER_KEY = "fssn://master"
+FSSN_DOCS_URL = "https://fssn-api.fanstudio.tech/"
+
 # WeJet（WHEWS）：国内为主 api.2v8.cn，国外为辅 api.beecld.com（仅 WAuth；CEA 走 /ws/all，无二次 App 鉴权）
 WHEWS_HOST_PRIMARY = "api.2v8.cn"
 WHEWS_HOST_BACKUP = "api.beecld.com"
 WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
 WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主机域名
 WHEWS_CEA_APPLY_URL = "https://api.2v8.cn/apply"  # 历史申请页（已不再需要 App 二次鉴权）
-DATA_PROVIDER_FANSTUDIO = "fanstudio"
+DATA_PROVIDER_FANSTUDIO = "fanstudio"  # 已废弃：加载时迁移为 Jian
 DATA_PROVIDER_WHEWS = "whews"
 DATA_PROVIDER_JIAN = "jian"
 DATA_PROVIDER_OFFICIAL = "official"
 DATA_PROVIDERS = (
-    DATA_PROVIDER_FANSTUDIO,
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_JIAN,
 )
@@ -162,10 +169,10 @@ def whews_cea_app_configured(ws_config: Any = None) -> bool:
 
 
 def normalize_data_provider(value: Any) -> str:
-    """规范化数据源提供者取值；无效/空值默认 Jian Project。"""
+    """规范化数据源提供者取值；无效/空值/旧 Fan Studio 默认 Jian Project。"""
     v = str(value or "").strip().lower()
-    if v == DATA_PROVIDER_OFFICIAL:
-        return DATA_PROVIDER_FANSTUDIO
+    if v in (DATA_PROVIDER_OFFICIAL, DATA_PROVIDER_FANSTUDIO, "official", "fanstudio"):
+        return DATA_PROVIDER_JIAN
     if v in ("jianproject", "jian_project", "sismotide"):
         return DATA_PROVIDER_JIAN
     if v in DATA_PROVIDERS:
@@ -195,7 +202,7 @@ WHEWS_WS_URLS: List[str] = all_whews_ws_urls()
 # Wolfx 聚合源 wss://ws-api.wolfx.jp/all_eew
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake 地震情报 WSS 总开关
 P2PQUAKE_HISTORY_AGGREGATE_URL = (
-    "https://api.p2pquake.net/v2/history?codes=551&codes=552&codes=556&limit=10"
+    "https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10"
 )
 WOLFX_ALL_EEW_URL = "wss://ws-api.wolfx.jp/all_eew"  # Wolfx 聚合（EEW + 列表速报；不含 CWA）
 WOLFX_CWA_EEW_URL = "wss://ws-api.wolfx.jp/cwa_eew"  # Wolfx CWA 单独通道
@@ -207,7 +214,7 @@ WOLFX_VIRTUAL_SOURCE_KEYS: Tuple[str, ...] = (
     WOLFX_JMA_EQLIST_URL,
 )
 WOLFX_MASTER_KEY = "wolfx://master"  # Wolfx 总开关逻辑键（全局辅助源，参考 EQSC）
-AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）
+AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI / FSSN）
 NOWQUAKE_CENCINT_WSS_URL = "wss://api-cencint-public.nowquake.cn/websocket"  # Nowquake CENC 烈度速报
 
 # PancakesAPI（原 OpenQuakeAPI，api.aloys23.link）全局辅助 WebSocket：/api/v1/alert/ws/all 聚合
@@ -220,7 +227,6 @@ OPENQUAKE_WS_ALL_URL_LEGACY = f"{OPENQUAKE_WS_BASE}/ws/all"
 # 气象预警源互斥：同一时刻仅允许一个解析开关为 True
 WEATHER_SOURCE_FLAGS: Dict[str, str] = {
     "jian": "jian_parse_weather",
-    "fanstudio": "fanstudio_parse_weatheralarm",
     "whews": "whews_parse_weatheralarm",
     "openquake": "openquake_parse_cma",
 }
@@ -298,7 +304,7 @@ def enforce_jma_report_mutex(
 
 
 def active_weather_source(message_config: Any) -> str:
-    """返回当前启用的气象预警源键（jian / fanstudio / whews / openquake），无则空串。"""
+    """返回当前启用的气象预警源键（jian / whews / openquake），无则空串。"""
     for key, flag in WEATHER_SOURCE_FLAGS.items():
         if bool(getattr(message_config, flag, False)):
             return key
@@ -320,13 +326,11 @@ def weather_provider_for_parsed(parsed_data: Dict[str, Any]) -> Optional[str]:
             return "jian"
         if parsed_data.get("whews"):
             return "whews"
-        if parsed_data.get("fanstudio"):
-            return "fanstudio"
         org = str(parsed_data.get("organization") or "")
         if "中国气象局" in org and parsed_data.get("openquake"):
             return "openquake"
-        if st == "weatheralarm":
-            return "fanstudio"
+        # 旧 Fan Studio 气象已移除；未知归属时不放行
+        return None
     return None
 
 
@@ -597,7 +601,7 @@ def openquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
 
 
 def aux_sources_enabled(enabled_sources: Dict[str, Any]) -> bool:
-    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）；缺省视为开启以兼容旧配置。"""
+    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI / FSSN）；缺省视为开启以兼容旧配置。"""
     if not isinstance(enabled_sources, dict):
         return True
     if AUX_SOURCES_MASTER_KEY not in enabled_sources:
@@ -670,20 +674,21 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.8.6"  # 当前程序版本
+APP_VERSION = "2.9.0"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.8.6
+CHANGELOG_TEXT = """版本 2.9.0
 
-1、修复Jian Project API鉴权问题，适配新增的部分数据源；
-2、替换台风实况数据来源；
-3、移除whews数据源的部分数据的二次鉴权，并适配新增的部分数据；
-4、修复字幕黑屏问题；
-5、修复不同性能模式导致的数据缺失以及顺序错乱问题"""
+1、移除 Fan Studio 主数据源及鉴权；
+2、新增 FSSN 数据源，支持地震信息与矩心矩张量解，矩张量解可显示震源机制沙滩球；
+3、WeJet 新增部分数据源解析；
+4、Jian Project 的 JMA 预警补充警报/预报、长周期地震动与警报区域；
+5、P2PQuake 不再解析紧急地震速报，保留地震情报与海啸预报；
+6、删除部分涉嫌侵权的音频"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -853,8 +858,6 @@ class MessageConfig:
     custom_text: str = '系统运行中，等待最新地震信息...'
     use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
     # Fan Studio All 数据源：勾选则解析对应类型，不勾选则不解析（不写单项 URL）
-    fanstudio_parse_warning: bool = True  # 勾选则解析所有预警数据源
-    fanstudio_parse_report: bool = True   # 勾选则解析所有速报数据源（含气象预警）
     # Wolfx 聚合源 (ws-api.wolfx.jp/all_eew)：勾选则解析对应子源，不勾选则不解析
     ali_all_parse_nied: bool = True         # 解析 JMA 緊急地震速報
     ali_all_parse_early_est: bool = True    # 解析 四川省地震局预警
@@ -896,31 +899,11 @@ class MessageConfig:
     alert_flash_interval_ms: int = 400  # 红色背景闪烁间隔
     # Fan Studio 单项数据源解析开关（基于 All 通道按子源细分）
     # 预警类
-    fanstudio_parse_cea: bool = True
-    fanstudio_parse_cea_pr: bool = True
-    fanstudio_parse_cwa_eew: bool = True
-    fanstudio_parse_jma: bool = True
-    fanstudio_parse_sa: bool = True
-    fanstudio_parse_kma_eew: bool = True
     # 速报 / 其他类
-    fanstudio_parse_cenc: bool = True
-    fanstudio_parse_ningxia: bool = True
-    fanstudio_parse_guangxi: bool = True
-    fanstudio_parse_shanxi: bool = True
-    fanstudio_parse_beijing: bool = True
-    fanstudio_parse_yunnan: bool = True
-    fanstudio_parse_cwa: bool = True
-    fanstudio_parse_hko: bool = True
-    fanstudio_parse_usgs: bool = True
-    fanstudio_parse_emsc: bool = True
-    fanstudio_parse_bcsf: bool = True
-    fanstudio_parse_gfz: bool = True
-    fanstudio_parse_usp: bool = True
-    fanstudio_parse_kma: bool = True
-    fanstudio_parse_fssn: bool = True
-    fanstudio_parse_fssn_cmt: bool = True
-    fanstudio_parse_weatheralarm: bool = False  # 默认主源为 Jian，气象仅开其一
-    fanstudio_parse_tsunami: bool = True
+
+    # FSSN
+    fssn_parse_fssn: bool = True
+    fssn_parse_fssn_cmt: bool = True
     # 无界科技（WHEWS）子源解析开关
     whews_parse_jma_eew: bool = True
     whews_parse_jma: bool = True  # WeJet /ws/jma 地震情报（与紧急地震速报分开）
@@ -977,6 +960,12 @@ class MessageConfig:
     whews_parse_igp: bool = True
     whews_parse_nepal: bool = True
     whews_parse_typhoon: bool = False
+    whews_parse_cenc_int: bool = True
+    whews_parse_cmt_gfz: bool = True
+    whews_parse_funvisis: bool = True
+    whews_parse_cheji: bool = True
+    whews_parse_nea: bool = True
+    whews_parse_jma_okiai: bool = True
     # Jian Project 子源解析开关（主提供者 api.sismotide.top/all）
     jian_parse_cea: bool = True
     jian_parse_cea_pr: bool = True
@@ -1031,10 +1020,9 @@ class MessageConfig:
     jian_parse_ga: bool = True
     jian_parse_igepn: bool = True
     jian_parse_peru: bool = True
-    # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報 / 556 緊急地震速報）
+    # P2PQuake WSS：同一连接下按 code 分别控制是否解析（551 地震情報 / 552 津波予報）
     p2pquake_parse_551: bool = False  # 与主源 JMA 情报互斥；默认关，优先主源
     p2pquake_parse_552: bool = True
-    p2pquake_parse_556: bool = True
     # PancakesAPI（/api/v1/alert/ws/all）：按子源分别控制是否解析
     openquake_parse_gq: bool = True
     openquake_parse_nmefc: bool = True
@@ -1107,27 +1095,14 @@ class AlertConfig:
     flash_target_screen: int = -1
     flash_color: str = "#FF0000"
     flash_max_alpha: int = 180
-    sound_enabled: bool = False
-    sound_path: str = ""
-    sound_volume: int = 100
-    sound_warnings_only: bool = True
-    felt_sound_enabled: bool = False
-    felt_sound_path: str = ""
-    felt_sound_repeat: int = 1
-    critical_sound_enabled: bool = False
-    critical_sound_path: str = ""
-    critical_sound_repeat: int = 1
-    # 已废弃：速报不再使用预设 WAV，保留字段仅为兼容旧配置
-    ciev_sound_enabled: bool = False
-    ciev_sound_path: str = ""
-    ciev_sound_repeat: int = 1
+    # 有感/强震内置 WAV 已移除；通用预警走 TTS。NHK / JMA 警報音保留。
     nhk_news_bell_enabled: bool = False
     nhk_news_bell_path: str = ""
     nhk_news_bell_repeat: int = 1
     jma_eew_alert_sound_enabled: bool = True
     jma_eew_alert_sound_path: str = ""
     jma_eew_alert_sound_repeat: int = 2
-    alert_feedback_mode: str = "sound"
+    alert_feedback_mode: str = "tts"
     felt_tts_enabled: bool = False
     critical_tts_enabled: bool = False
     felt_tts_repeat: int = 1
@@ -1167,23 +1142,8 @@ class AlertConfig:
                 self.flash_max_alpha = 30
             if self.flash_max_alpha > 255:
                 self.flash_max_alpha = 255
-            self.felt_sound_path = (self.felt_sound_path or "").strip()
-            self.critical_sound_path = (self.critical_sound_path or "").strip()
-            self.ciev_sound_path = (self.ciev_sound_path or "").strip()
             self.nhk_news_bell_path = (self.nhk_news_bell_path or "").strip()
             self.jma_eew_alert_sound_path = (self.jma_eew_alert_sound_path or "").strip()
-            try:
-                self.felt_sound_repeat = int(self.felt_sound_repeat)
-            except (TypeError, ValueError):
-                self.felt_sound_repeat = 1
-            try:
-                self.critical_sound_repeat = int(self.critical_sound_repeat)
-            except (TypeError, ValueError):
-                self.critical_sound_repeat = 1
-            try:
-                self.ciev_sound_repeat = int(self.ciev_sound_repeat)
-            except (TypeError, ValueError):
-                self.ciev_sound_repeat = 1
             try:
                 self.nhk_news_bell_repeat = int(self.nhk_news_bell_repeat)
             except (TypeError, ValueError):
@@ -1192,14 +1152,10 @@ class AlertConfig:
                 self.jma_eew_alert_sound_repeat = int(self.jma_eew_alert_sound_repeat)
             except (TypeError, ValueError):
                 self.jma_eew_alert_sound_repeat = 2
-            self.felt_sound_repeat = max(1, min(10, self.felt_sound_repeat))
-            self.critical_sound_repeat = max(1, min(10, self.critical_sound_repeat))
-            self.ciev_sound_repeat = max(1, min(10, self.ciev_sound_repeat))
             self.nhk_news_bell_repeat = max(1, min(10, self.nhk_news_bell_repeat))
             self.jma_eew_alert_sound_repeat = max(1, min(10, self.jma_eew_alert_sound_repeat))
-            self.alert_feedback_mode = (self.alert_feedback_mode or "sound").strip().lower()
-            if self.alert_feedback_mode not in ("sound", "tts"):
-                self.alert_feedback_mode = "sound"
+            # 通用预警反馈固定 TTS（有感/强震预设音已移除）
+            self.alert_feedback_mode = "tts"
             try:
                 self.felt_tts_repeat = int(self.felt_tts_repeat)
             except (TypeError, ValueError):
@@ -1267,7 +1223,6 @@ class WebSocketConfig:
     # 启动时相邻两路 WebSocket 建连任务之间的间隔（秒），0 表示不间隔（与旧版同时发起）
     startup_stagger_seconds: float = 1.5
     # Fan Studio /all 用户 API Key（sk-…）；未填写时仍可连上，但仅收到公开精简数据流
-    fanstudio_api_key: str = ""
     # 无界科技 WAuth 令牌（wat_…）；建连后以纯文本首帧发送，须在 5 秒内
     whews_token: str = ""
     # CEA App 凭证（历史字段保留兼容；公开版已不再二次鉴权）
@@ -1366,7 +1321,7 @@ class Config:
         self.log_config = LogConfig()
 
         # 数据源配置
-        # 当前选用的数据源提供者：fanstudio / whews / jian（三选一，默认 Jian Project）
+        # 当前选用的数据源提供者：whews / jian（二选一，默认 Jian Project）
         self.data_provider: str = DATA_PROVIDER_JIAN
         self.enabled_sources: Dict[str, bool] = {}
         self.ws_urls: List[str] = []
@@ -1520,8 +1475,6 @@ class Config:
                 'no_activity_message': self.message_config.no_activity_message,
                 'custom_text': self.message_config.custom_text,
                 'use_custom_text': self.message_config.use_custom_text,
-                'fanstudio_parse_warning': self.message_config.fanstudio_parse_warning,
-                'fanstudio_parse_report': self.message_config.fanstudio_parse_report,
                 'ali_all_parse_nied': getattr(self.message_config, 'ali_all_parse_nied', True),
                 'ali_all_parse_early_est': getattr(self.message_config, 'ali_all_parse_early_est', True),
                 'ali_all_parse_jma_volcano': getattr(self.message_config, 'ali_all_parse_jma_volcano', True),
@@ -1541,7 +1494,6 @@ class Config:
                 # 默认 False，与 MessageConfig / 主源 JMA 情报互斥约定一致
                 'p2pquake_parse_551': getattr(self.message_config, 'p2pquake_parse_551', False),
                 'p2pquake_parse_552': getattr(self.message_config, 'p2pquake_parse_552', True),
-                'p2pquake_parse_556': getattr(self.message_config, 'p2pquake_parse_556', True),
                 'openquake_parse_gq': getattr(self.message_config, 'openquake_parse_gq', True),
                 'openquake_parse_nmefc': getattr(self.message_config, 'openquake_parse_nmefc', True),
                 'openquake_parse_nmefc_wave': getattr(
@@ -1573,30 +1525,8 @@ class Config:
                 'strong_felt_stage2_ms': getattr(self.message_config, 'strong_felt_stage2_ms', 2500),
                 'alert_flash_interval_ms': getattr(self.message_config, 'alert_flash_interval_ms', 400),
                 # Fan Studio 子源细粒度开关
-                'fanstudio_parse_cea': getattr(self.message_config, 'fanstudio_parse_cea', True),
-                'fanstudio_parse_cea_pr': getattr(self.message_config, 'fanstudio_parse_cea_pr', True),
-                'fanstudio_parse_cwa_eew': getattr(self.message_config, 'fanstudio_parse_cwa_eew', True),
-                'fanstudio_parse_jma': getattr(self.message_config, 'fanstudio_parse_jma', True),
-                'fanstudio_parse_sa': getattr(self.message_config, 'fanstudio_parse_sa', True),
-                'fanstudio_parse_kma_eew': getattr(self.message_config, 'fanstudio_parse_kma_eew', True),
-                'fanstudio_parse_cenc': getattr(self.message_config, 'fanstudio_parse_cenc', True),
-                'fanstudio_parse_ningxia': getattr(self.message_config, 'fanstudio_parse_ningxia', True),
-                'fanstudio_parse_guangxi': getattr(self.message_config, 'fanstudio_parse_guangxi', True),
-                'fanstudio_parse_shanxi': getattr(self.message_config, 'fanstudio_parse_shanxi', True),
-                'fanstudio_parse_beijing': getattr(self.message_config, 'fanstudio_parse_beijing', True),
-                'fanstudio_parse_yunnan': getattr(self.message_config, 'fanstudio_parse_yunnan', True),
-                'fanstudio_parse_cwa': getattr(self.message_config, 'fanstudio_parse_cwa', True),
-                'fanstudio_parse_hko': getattr(self.message_config, 'fanstudio_parse_hko', True),
-                'fanstudio_parse_usgs': getattr(self.message_config, 'fanstudio_parse_usgs', True),
-                'fanstudio_parse_emsc': getattr(self.message_config, 'fanstudio_parse_emsc', True),
-                'fanstudio_parse_bcsf': getattr(self.message_config, 'fanstudio_parse_bcsf', True),
-                'fanstudio_parse_gfz': getattr(self.message_config, 'fanstudio_parse_gfz', True),
-                'fanstudio_parse_usp': getattr(self.message_config, 'fanstudio_parse_usp', True),
-                'fanstudio_parse_kma': getattr(self.message_config, 'fanstudio_parse_kma', True),
-                'fanstudio_parse_fssn': getattr(self.message_config, 'fanstudio_parse_fssn', True),
-                'fanstudio_parse_fssn_cmt': getattr(self.message_config, 'fanstudio_parse_fssn_cmt', True),
-                'fanstudio_parse_weatheralarm': getattr(self.message_config, 'fanstudio_parse_weatheralarm', True),
-                'fanstudio_parse_tsunami': getattr(self.message_config, 'fanstudio_parse_tsunami', True),
+                'fssn_parse_fssn': getattr(self.message_config, 'fssn_parse_fssn', True),
+                'fssn_parse_fssn_cmt': getattr(self.message_config, 'fssn_parse_fssn_cmt', True),
                 'whews_parse_jma_eew': getattr(self.message_config, 'whews_parse_jma_eew', True),
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
                 'whews_parse_cwa_eew': getattr(self.message_config, 'whews_parse_cwa_eew', True),
@@ -1653,6 +1583,12 @@ class Config:
                 'whews_parse_igp': getattr(self.message_config, 'whews_parse_igp', True),
                 'whews_parse_nepal': getattr(self.message_config, 'whews_parse_nepal', True),
                 'whews_parse_typhoon': getattr(self.message_config, 'whews_parse_typhoon', False),
+                'whews_parse_cenc_int': getattr(self.message_config, 'whews_parse_cenc_int', True),
+                'whews_parse_cmt_gfz': getattr(self.message_config, 'whews_parse_cmt_gfz', True),
+                'whews_parse_funvisis': getattr(self.message_config, 'whews_parse_funvisis', True),
+                'whews_parse_cheji': getattr(self.message_config, 'whews_parse_cheji', True),
+                'whews_parse_nea': getattr(self.message_config, 'whews_parse_nea', True),
+                'whews_parse_jma_okiai': getattr(self.message_config, 'whews_parse_jma_okiai', True),
                 **{
                     flag: getattr(self.message_config, flag, True)
                     for flag in JIAN_SHORT_TO_PARSE_FLAG.values()
@@ -1676,26 +1612,13 @@ class Config:
                 'flash_target_screen': self.alert_config.flash_target_screen,
                 'flash_color': self.alert_config.flash_color,
                 'flash_max_alpha': self.alert_config.flash_max_alpha,
-                'sound_enabled': getattr(self.alert_config, 'sound_enabled', False),
-                'sound_path': getattr(self.alert_config, 'sound_path', ''),
-                'sound_volume': getattr(self.alert_config, 'sound_volume', 100),
-                'sound_warnings_only': getattr(self.alert_config, 'sound_warnings_only', True),
-                'felt_sound_enabled': getattr(self.alert_config, 'felt_sound_enabled', False),
-                'felt_sound_path': getattr(self.alert_config, 'felt_sound_path', ''),
-                'felt_sound_repeat': getattr(self.alert_config, 'felt_sound_repeat', 1),
-                'critical_sound_enabled': getattr(self.alert_config, 'critical_sound_enabled', False),
-                'critical_sound_path': getattr(self.alert_config, 'critical_sound_path', ''),
-                'critical_sound_repeat': getattr(self.alert_config, 'critical_sound_repeat', 1),
-                'ciev_sound_enabled': getattr(self.alert_config, 'ciev_sound_enabled', False),
-                'ciev_sound_path': getattr(self.alert_config, 'ciev_sound_path', ''),
-                'ciev_sound_repeat': getattr(self.alert_config, 'ciev_sound_repeat', 1),
                 'nhk_news_bell_enabled': getattr(self.alert_config, 'nhk_news_bell_enabled', False),
                 'nhk_news_bell_path': getattr(self.alert_config, 'nhk_news_bell_path', ''),
                 'nhk_news_bell_repeat': getattr(self.alert_config, 'nhk_news_bell_repeat', 1),
                 'jma_eew_alert_sound_enabled': getattr(self.alert_config, 'jma_eew_alert_sound_enabled', True),
                 'jma_eew_alert_sound_path': getattr(self.alert_config, 'jma_eew_alert_sound_path', ''),
                 'jma_eew_alert_sound_repeat': getattr(self.alert_config, 'jma_eew_alert_sound_repeat', 2),
-                'alert_feedback_mode': getattr(self.alert_config, 'alert_feedback_mode', 'sound'),
+                'alert_feedback_mode': 'tts',
                 'felt_tts_enabled': getattr(self.alert_config, 'felt_tts_enabled', False),
                 'critical_tts_enabled': getattr(self.alert_config, 'critical_tts_enabled', False),
                 'felt_tts_repeat': getattr(self.alert_config, 'felt_tts_repeat', 1),
@@ -1724,7 +1647,6 @@ class Config:
                 'close_timeout': self.ws_config.close_timeout,
                 'connection_timeout': self.ws_config.connection_timeout,
                 'startup_stagger_seconds': self.ws_config.startup_stagger_seconds,
-                'fanstudio_api_key': getattr(self.ws_config, 'fanstudio_api_key', '') or '',
                 'whews_token': getattr(self.ws_config, 'whews_token', '') or '',
                 'whews_cea_app_id': getattr(self.ws_config, 'whews_cea_app_id', '') or '',
                 'whews_cea_app_secret': getattr(self.ws_config, 'whews_cea_app_secret', '') or '',
@@ -1762,6 +1684,8 @@ class Config:
     def _is_fanstudio_individual_url(self, url: str) -> bool:
         """是否为应剔除持久化的 Fan Studio 单项 URL（历史遗留：除 all 外的 path 源）。"""
         if not url or not isinstance(url, str):
+            return False
+        if "fssn-api.fanstudio.tech" in url.lower():
             return False
         if "fanstudio.tech" not in url:
             return False
@@ -1839,6 +1763,7 @@ class Config:
         return {
             JIAN_MASTER_KEY,
             WHEWS_MASTER_KEY,
+            FSSN_MASTER_KEY,
             WOLFX_MASTER_KEY,
             AUX_SOURCES_MASTER_KEY,
             *JIAN_SUB_SOURCE_KEYS,
@@ -1864,6 +1789,9 @@ class Config:
         """公开版允许持久化/连接的 WebSocket URL 集合。"""
         return {
             FANSTUDIO_ALL_URL,
+            FSSN_ALL_URL,
+            FSSN_FSSN_URL,
+            FSSN_CMT_URL,
             JIAN_PROJECT_ALL_URL,
             P2PQUAKE_WSS_URL,
             NOWQUAKE_CENCINT_WSS_URL,
@@ -2006,6 +1934,12 @@ class Config:
         # CENC 烈度速报（Nowquake）：任意提供者下均可连接（不计入辅助三源）
         if u == NOWQUAKE_CENCINT_WSS_URL or "nowquake.cn" in low:
             return True
+        # FSSN：任意主源下可连（受自身开关控制）
+        if (
+            u in (FSSN_MASTER_KEY, FSSN_ALL_URL, FSSN_FSSN_URL, FSSN_CMT_URL)
+            or "fssn-api.fanstudio.tech" in low
+        ):
+            return True
         # 台风 HTTP：任意提供者下均可轮询（全局，与主提供者/辅助三源解耦）
         if (
             u == JIAN_TYPHOON_HTTP
@@ -2013,8 +1947,9 @@ class Config:
             or "typhoon.php" in low
         ):
             return True
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            return u == FANSTUDIO_ALL_URL or "fanstudio" in low
+        # 旧 Fan Studio 主源已移除：残留 URL 一律不激活
+        if u == FANSTUDIO_ALL_URL or ("fanstudio.tech" in low and "fssn-api" not in low):
+            return False
         if provider == DATA_PROVIDER_WHEWS:
             return u == WHEWS_MASTER_KEY or is_whews_all_url(u)
         if provider == DATA_PROVIDER_JIAN:
@@ -2039,6 +1974,16 @@ class Config:
         except (TypeError, ValueError):
             return max(1, DEFAULT_HTTP_POLL_INTERVALS.get(lookup_url, 2))
 
+
+
+    def _disable_legacy_fanstudio_master(self) -> None:
+        """关闭已下线的 Fan Studio 主源连接键。"""
+        try:
+            self.enabled_sources[FANSTUDIO_ALL_URL] = False
+            for u in FANSTUDIO_ALL_URLS:
+                self.enabled_sources[u] = False
+        except Exception:
+            pass
 
     def _migrate_typhoon_http_url(self) -> None:
         """已停运的 Fan Studio 台风 URL → Jian Project GET。"""
@@ -2149,11 +2094,11 @@ class Config:
                 migrated = True
         if migrated:
             logger.info("已将遗留国际 HTTP 开关键迁移为 Jian Project 解析开关")
-        if self.data_provider == DATA_PROVIDER_OFFICIAL:
-            self.data_provider = DATA_PROVIDER_FANSTUDIO
+        if self.data_provider in (DATA_PROVIDER_OFFICIAL, DATA_PROVIDER_FANSTUDIO):
+            self.data_provider = DATA_PROVIDER_JIAN
             logger.info(
-                "已将主数据源「官方+Wolfx」迁移为 Fan Studio；"
-                "国际速报请选用 Jian Project 主源，Wolfx 仅作辅助源"
+                "已将主数据源「官方/Fan Studio」迁移为 Jian Project；"
+                "FSSN 请使用独立辅助源（wss://fssn-api.fanstudio.tech/all）"
             )
 
     def _purge_obsolete_intl_http_config(self) -> None:
@@ -2200,6 +2145,18 @@ class Config:
                 removed = True
         if removed:
             logger.info("已清理遗留国际 HTTP 数据源配置项")
+
+
+    def _ensure_fssn_defaults(self) -> None:
+        """补全 FSSN 开关键；缺省时默认启用（新装/升级迁移）。"""
+        if FSSN_MASTER_KEY not in self.enabled_sources and FSSN_ALL_URL not in self.enabled_sources:
+            self.enabled_sources[FSSN_MASTER_KEY] = True
+            self.enabled_sources[FSSN_ALL_URL] = True
+            logger.info("已启用 FSSN 默认连接（wss://fssn-api.fanstudio.tech/all）")
+        elif FSSN_MASTER_KEY not in self.enabled_sources:
+            self.enabled_sources[FSSN_MASTER_KEY] = bool(self.enabled_sources.get(FSSN_ALL_URL, False))
+        elif FSSN_ALL_URL not in self.enabled_sources:
+            self.enabled_sources[FSSN_ALL_URL] = bool(self.enabled_sources.get(FSSN_MASTER_KEY, False))
 
     def _ensure_wolfx_source_defaults(self) -> None:
         """补全 Wolfx 全局辅助源开关键；总开关与 all_eew 连接项保持一致。"""
@@ -2384,12 +2341,13 @@ class Config:
                     or raw_sources_preview.get(JIAN_PROJECT_ALL_URL, False)
                 )
                 whews_on = is_whews_all_enabled(raw_sources_preview)
-                if fs_on and not jian_on and not whews_on:
-                    self.data_provider = DATA_PROVIDER_FANSTUDIO
-                elif whews_on and not jian_on and not fs_on:
+                if whews_on and not jian_on and not fs_on:
                     self.data_provider = DATA_PROVIDER_WHEWS
                 else:
+                    # 含旧 Fan Studio 主源：一律迁到 Jian
                     self.data_provider = DATA_PROVIDER_JIAN
+                    if fs_on:
+                        raw_sources_preview[FANSTUDIO_ALL_URL] = False
             else:
                 self.data_provider = normalize_data_provider(raw_provider)
             
@@ -2426,6 +2384,7 @@ class Config:
                         setattr(self.message_config, key, value)
                 if not self.message_config.validate():
                     success = False
+                # 已移除 Fan Studio 主源：气象开关强制关闭
                 enforce_weather_source_mutex(
                     self.message_config,
                     prefer=normalize_data_provider(
@@ -2433,40 +2392,13 @@ class Config:
                     ),
                 )
                 enforce_jma_report_mutex(self.message_config, prefer="main")
-                # 迁移逻辑：当老配置仅有 fanstudio_parse_warning / fanstudio_parse_report 时，
                 # 按这两个总开关初始化各 Fan Studio 子源细粒度开关，避免升级后行为变化。
                 try:
-                    parse_warning_flag = getattr(self.message_config, 'fanstudio_parse_warning', True)
-                    parse_report_flag = getattr(self.message_config, 'fanstudio_parse_report', True)
                     # 预警类子源字段名
                     warning_fields = [
-                        'fanstudio_parse_cea',
-                        'fanstudio_parse_cea_pr',
-                        'fanstudio_parse_cwa_eew',
-                        'fanstudio_parse_jma',
-                        'fanstudio_parse_sa',
-                        'fanstudio_parse_kma_eew',
                     ]
                     # 速报/其他类子源字段名
                     report_fields = [
-                        'fanstudio_parse_cenc',
-                        'fanstudio_parse_ningxia',
-                        'fanstudio_parse_guangxi',
-                        'fanstudio_parse_shanxi',
-                        'fanstudio_parse_beijing',
-                        'fanstudio_parse_yunnan',
-                        'fanstudio_parse_cwa',
-                        'fanstudio_parse_hko',
-                        'fanstudio_parse_usgs',
-                        'fanstudio_parse_emsc',
-                        'fanstudio_parse_bcsf',
-                        'fanstudio_parse_gfz',
-                        'fanstudio_parse_usp',
-                        'fanstudio_parse_kma',
-                        'fanstudio_parse_fssn',
-                        'fanstudio_parse_fssn_cmt',
-                        'fanstudio_parse_weatheralarm',
-                        'fanstudio_parse_tsunami',
                     ]
                     # 如果配置文件中没有对应键，则根据总开关初始化，已有键则保留用户设置
                     msg_cfg_section = config_data.get('MESSAGE_CONFIG', {})
@@ -2628,6 +2560,7 @@ class Config:
             self._sync_p2pquake_http_with_wss()
             self._ensure_jian_source_defaults()
             self._ensure_wolfx_source_defaults()
+            self._ensure_fssn_defaults()
             self._ensure_whews_source_defaults()
             self._ensure_eqsc_http_defaults()
 
@@ -2723,37 +2656,12 @@ class Config:
             self._save_lock.release()
     
     def _migrate_tiered_sound_fields(self, alert_section: Dict[str, Any]) -> None:
-        """从旧版单层 sound_enabled/sound_path 迁移到分级预警声音字段。"""
-        if not isinstance(alert_section, dict):
-            return
-        has_new = (
-            'felt_sound_enabled' in alert_section
-            or 'critical_sound_enabled' in alert_section
-        )
-        if has_new:
-            return
-        old_enabled = bool(alert_section.get('sound_enabled', False))
-        old_path = (alert_section.get('sound_path') or '').strip()
-        self.alert_config.felt_sound_enabled = old_enabled
-        self.alert_config.critical_sound_enabled = old_enabled
-        if old_path:
-            self.alert_config.felt_sound_path = old_path
+        """有感/强震内置音已移除，旧分级字段不再迁移。"""
+        return
 
     def _migrate_alert_feedback_mode(self, alert_section: Dict[str, Any]) -> None:
-        """从旧版 tts_playback_mode / TTS 开关迁移到 alert_feedback_mode。"""
-        if not isinstance(alert_section, dict):
-            return
-        if "alert_feedback_mode" in alert_section:
-            return
-        legacy = str(alert_section.get("tts_playback_mode") or "").strip().lower()
-        tts_on = bool(
-            alert_section.get("felt_tts_enabled")
-            or alert_section.get("critical_tts_enabled")
-        )
-        if legacy == "replace" or tts_on:
-            self.alert_config.alert_feedback_mode = "tts"
-        else:
-            self.alert_config.alert_feedback_mode = "sound"
+        """预设 WAV 已移除：告警反馈固定为 TTS。"""
+        self.alert_config.alert_feedback_mode = "tts"
 
     def _migrate_legacy_alert_fields(self, config_data: Dict[str, Any]) -> None:
         """
@@ -2797,6 +2705,8 @@ class Config:
         self.enabled_sources[WOLFX_CENC_EQLIST_URL] = False
         self.enabled_sources[WOLFX_JMA_EQLIST_URL] = False
         self.enabled_sources[NOWQUAKE_CENCINT_WSS_URL] = False
+        self.enabled_sources[FSSN_MASTER_KEY] = True
+        self.enabled_sources[FSSN_ALL_URL] = True
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
         self.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
         self.enabled_sources[AUX_SOURCES_MASTER_KEY] = True
@@ -2805,6 +2715,7 @@ class Config:
         self.data_provider = DATA_PROVIDER_JIAN
         self._ensure_jian_source_defaults()
         self._ensure_wolfx_source_defaults()
+        self._ensure_fssn_defaults()
         self._ensure_whews_source_defaults()
         self._ensure_eqsc_http_defaults()
         self._ensure_http_poll_interval_defaults()
@@ -2819,6 +2730,7 @@ class Config:
     
     def _build_ws_urls_ordered(self) -> List[str]:
         """按主提供者构建 ws_urls；Wolfx / P2P / Nowquake 为全局辅助源。"""
+        self._disable_legacy_fanstudio_master()
         self._cleanup_invalid_fanstudio_ws_sources()
         self._migrate_openquake_ws_url()
         self._enforce_public_ws_sources()
@@ -2826,10 +2738,8 @@ class Config:
         self._migrate_whews_url_keys_to_master()
         provider = self.get_active_data_provider()
         ws_urls: List[str] = []
-        if provider == DATA_PROVIDER_FANSTUDIO:
-            if self.enabled_sources.get(FANSTUDIO_ALL_URL, False):
-                ws_urls.append(FANSTUDIO_ALL_URL)
-        elif provider == DATA_PROVIDER_WHEWS:
+        # 旧 Fan Studio 主源已移除，不再建连 ws.fanstudio.tech
+        if provider == DATA_PROVIDER_WHEWS:
             if is_whews_all_enabled(self.enabled_sources):
                 all_url = self.get_whews_endpoint_urls().get("all")
                 if all_url:
@@ -2855,6 +2765,13 @@ class Config:
         if self.enabled_sources.get(NOWQUAKE_CENCINT_WSS_URL, False):
             if NOWQUAKE_CENCINT_WSS_URL not in ws_urls:
                 ws_urls.append(NOWQUAKE_CENCINT_WSS_URL)
+        # FSSN
+        if self.enabled_sources.get(FSSN_MASTER_KEY, False) or self.enabled_sources.get(FSSN_ALL_URL, False):
+            if getattr(self.message_config, "fssn_parse_fssn", True) or getattr(
+                self.message_config, "fssn_parse_fssn_cmt", True
+            ):
+                if FSSN_ALL_URL not in ws_urls:
+                    ws_urls.append(FSSN_ALL_URL)
         filtered: List[str] = []
         for u in ws_urls:
             if is_whews_dedicated_endpoint(u):
@@ -2925,6 +2842,8 @@ class Config:
                 continue
             low = url.lower()
             if "fanstudio" in low and low.startswith(("ws://", "wss://")):
+                if "fssn-api.fanstudio.tech" in low:
+                    continue
                 if url.rstrip("/").lower() != all_norm:
                     del self.enabled_sources[url]
                     logger.debug(f"已移除无效 Fan Studio WebSocket 配置: {url}")
@@ -2971,8 +2890,15 @@ class Config:
                 "cenc": "cenc",
             }
             return whews_path_to_name.get(path, "whews")
-        # Fan Studio wss：从 URL 抽 path，用代号查表，避免在代码中写单项 API 链接
-        if "fanstudio.tech" in normalized_url and normalized_url.startswith(("wss://", "ws://")):
+        # FSSN 新地址路径也是 /all，必须先于旧 Fan Studio 的 path=all → fanstudio
+        low_url = normalized_url.lower()
+        if "fssn-api.fanstudio.tech" in low_url and low_url.startswith(("wss://", "ws://")):
+            path = low_url.rstrip("/").split("/")[-1] or "all"
+            if path == "fssn-cmt":
+                return "fssn-cmt"
+            return "fssn"
+        # 旧 Fan Studio wss（已停运）：从 URL 抽 path
+        if "fanstudio.tech" in low_url and low_url.startswith(("wss://", "ws://")):
             try:
                 path = normalized_url.rstrip("/").split("/")[-1] or "all"
                 fanstudio_path_to_name = {
@@ -2999,6 +2925,9 @@ class Config:
             WOLFX_CENC_EQLIST_URL: "wolfx_cenc",
             WOLFX_JMA_EQLIST_URL: "wolfx_jma_eqlist",
             NOWQUAKE_CENCINT_WSS_URL: "cenc-ir",
+            FSSN_ALL_URL: "fssn",
+            FSSN_FSSN_URL: "fssn",
+            FSSN_CMT_URL: "fssn-cmt",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
             OPENQUAKE_WS_ALL_URL: "openquake",
             JIAN_PROJECT_ALL_URL: "jian",
@@ -3036,7 +2965,6 @@ class Config:
             "jma_eq": "日本气象厅地震情报",
             "p2pquake": "日本气象厅地震情报",
             "p2pquake_tsunami": "日本气象厅海啸预报",
-            "p2pquake_eew": "日本气象厅紧急地震速报",
             "openquake": "PancakesAPI",
             "openquake_gq": "GlobalQuake地震预警",
             "openquake_nmefc": "国家海洋环境预报中心海啸预警",
@@ -3057,6 +2985,12 @@ class Config:
             "kma-eew": "韩国气象厅地震预警",
             "fssn": "FSSN",
             "fssn-cmt": "FSSN 矩心矩张量解",
+            "cenc_int": "中国地震台网中心地震烈度速报",
+            "cmt_gfz": "GFZ 矩心矩张量解",
+            "funvisis": "委内瑞拉地震研究中心",
+            "cheji": "自然资源部自然灾害风险预警中心",
+            "nea": "新加坡国家环境局",
+            "jma_okiai": "日本气象厅冲合海啸观测",
             "p2pquake_ws": "日本气象厅地震/海啸 (P2PQuake WSS)",
             "wolfx_jma_eew": "緊急地震速報",
             "wolfx_sc_eew": "四川省地震局",

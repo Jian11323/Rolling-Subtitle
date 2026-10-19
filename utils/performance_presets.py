@@ -17,9 +17,10 @@ from config import (
     JIAN_MASTER_KEY,
     WOLFX_MASTER_KEY,
     AUX_SOURCES_MASTER_KEY,
+    FSSN_MASTER_KEY,
+    FSSN_ALL_URL,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
-    FANSTUDIO_ALL_URL,
     JIAN_TYPHOON_HTTP,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
@@ -138,9 +139,7 @@ TYPHOON_HTTP = JIAN_TYPHOON_HTTP
 
 def _base_enabled_sources() -> Dict[str, bool]:
     """与 Config._apply_default_config 对齐的基础数据源开关。"""
-    sources: Dict[str, bool] = {
-        FANSTUDIO_ALL_URL: True,
-    }
+    sources: Dict[str, bool] = {}
     for url in P2PQUAKE_HTTP_SOURCE_KEYS:  # HTTP 键仅兼容旧配置，永不作为持续轮询源
         sources[url] = False
     sources[TYPHOON_HTTP] = True
@@ -157,6 +156,8 @@ def _base_enabled_sources() -> Dict[str, bool]:
     sources[JIAN_MASTER_KEY] = False
     sources[WOLFX_MASTER_KEY] = False
     sources[AUX_SOURCES_MASTER_KEY] = True
+    sources[FSSN_MASTER_KEY] = True
+    sources[FSSN_ALL_URL] = True
     return sources
 
 
@@ -176,6 +177,8 @@ def _low_enabled_sources() -> Dict[str, bool]:
     sources[JIAN_MASTER_KEY] = False
     sources[WOLFX_MASTER_KEY] = False
     sources[AUX_SOURCES_MASTER_KEY] = False
+    sources[FSSN_MASTER_KEY] = False
+    sources[FSSN_ALL_URL] = False
     return sources
 
 
@@ -197,6 +200,8 @@ def _high_enabled_sources() -> Dict[str, bool]:
     sources[WOLFX_MASTER_KEY] = True
     sources[WOLFX_ALL_EEW_URL] = True
     sources[AUX_SOURCES_MASTER_KEY] = True
+    sources[FSSN_MASTER_KEY] = True
+    sources[FSSN_ALL_URL] = True
     return sources
 
 
@@ -225,32 +230,6 @@ def _message_fields_low() -> Dict[str, Any]:
         "enable_china_intensity": False,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": False,
-        "fanstudio_parse_warning": True,
-        "fanstudio_parse_report": True,
-        "fanstudio_parse_cea": True,
-        "fanstudio_parse_cea_pr": True,
-        "fanstudio_parse_cwa_eew": True,
-        "fanstudio_parse_jma": True,
-        "fanstudio_parse_sa": True,
-        "fanstudio_parse_kma_eew": True,
-        "fanstudio_parse_cenc": True,
-        "fanstudio_parse_ningxia": False,
-        "fanstudio_parse_guangxi": False,
-        "fanstudio_parse_shanxi": False,
-        "fanstudio_parse_beijing": False,
-        "fanstudio_parse_yunnan": False,
-        "fanstudio_parse_cwa": False,
-        "fanstudio_parse_hko": False,
-        "fanstudio_parse_usgs": False,
-        "fanstudio_parse_emsc": False,
-        "fanstudio_parse_bcsf": False,
-        "fanstudio_parse_gfz": False,
-        "fanstudio_parse_usp": False,
-        "fanstudio_parse_kma": False,
-        "fanstudio_parse_fssn": False,
-        "fanstudio_parse_fssn_cmt": False,
-        "fanstudio_parse_weatheralarm": False,
-        "fanstudio_parse_tsunami": False,
         "whews_parse_jma_eew": True,
         "whews_parse_cwa_eew": True,
         "whews_parse_sa_eew": True,
@@ -310,10 +289,9 @@ def _message_fields_low() -> Dict[str, Any]:
         "ali_all_parse_jma_volcano": False,
         "ali_all_parse_bmkg": True,
         "ali_all_parse_cq_eew": True,
-        # 与主源 JMA 情报互斥；低配仍开 fanstudio/jian JMA 时须关 551，避免 apply 后被 mutex 改写导致与 payload 不一致
+        # 与主源 JMA 情报互斥；低配仍开 jian/whews JMA 时须关 551，避免 apply 后被 mutex 改写导致与 payload 不一致
         "p2pquake_parse_551": False,
         "p2pquake_parse_552": False,
-        "p2pquake_parse_556": True,
         **_jian_parse_fields(
             default=False,
             jian_parse_cea=True,
@@ -336,32 +314,6 @@ def _message_fields_high() -> Dict[str, Any]:
         "enable_china_intensity": True,
         "enable_felt_alert_flow": False,
         "enable_strong_felt_alert_flow": True,
-        "fanstudio_parse_warning": True,
-        "fanstudio_parse_report": True,
-        "fanstudio_parse_cea": True,
-        "fanstudio_parse_cea_pr": True,
-        "fanstudio_parse_cwa_eew": True,
-        "fanstudio_parse_jma": True,
-        "fanstudio_parse_sa": True,
-        "fanstudio_parse_kma_eew": True,
-        "fanstudio_parse_cenc": True,
-        "fanstudio_parse_ningxia": True,
-        "fanstudio_parse_guangxi": True,
-        "fanstudio_parse_shanxi": True,
-        "fanstudio_parse_beijing": True,
-        "fanstudio_parse_yunnan": True,
-        "fanstudio_parse_cwa": True,
-        "fanstudio_parse_hko": True,
-        "fanstudio_parse_usgs": True,
-        "fanstudio_parse_emsc": True,
-        "fanstudio_parse_bcsf": True,
-        "fanstudio_parse_gfz": True,
-        "fanstudio_parse_usp": True,
-        "fanstudio_parse_kma": True,
-        "fanstudio_parse_fssn": True,
-        "fanstudio_parse_fssn_cmt": True,
-        "fanstudio_parse_weatheralarm": False,
-        "fanstudio_parse_tsunami": True,
         "whews_parse_jma_eew": True,
         "whews_parse_cwa_eew": True,
         "whews_parse_sa_eew": True,
@@ -425,7 +377,6 @@ def _message_fields_high() -> Dict[str, Any]:
         "ali_all_parse_cq_eew": True,
         "p2pquake_parse_551": False,
         "p2pquake_parse_552": True,
-        "p2pquake_parse_556": True,
         **_jian_parse_fields(),
     }
 
@@ -499,13 +450,10 @@ def _gui_fields_extreme() -> Dict[str, Any]:
 
 
 def _alert_fields_low() -> Dict[str, Any]:
-    """低配模式告警反馈配置覆盖项（默认关闭声音/TTS）。"""
+    """低配模式告警反馈配置覆盖项（默认关闭 TTS）。"""
     return {
         "enabled": False,
-        "alert_feedback_mode": "sound",
-        "felt_sound_enabled": False,
-        "critical_sound_enabled": False,
-        "sound_enabled": False,
+        "alert_feedback_mode": "tts",
         "felt_tts_enabled": False,
         "critical_tts_enabled": False,
         "weather_tts_enabled": False,
@@ -517,10 +465,7 @@ def _alert_fields_high() -> Dict[str, Any]:
     """高配模式告警反馈配置覆盖项。"""
     return {
         "enabled": True,
-        "alert_feedback_mode": "sound",
-        "felt_sound_enabled": True,
-        "critical_sound_enabled": True,
-        "sound_enabled": True,
+        "alert_feedback_mode": "tts",
         "felt_tts_enabled": False,
         "critical_tts_enabled": False,
     }
@@ -624,30 +569,6 @@ def _data_source_snapshot(config) -> tuple:
     mc = config.message_config
     flags = (
         getattr(mc, "use_custom_text", False),
-        getattr(mc, "fanstudio_parse_cea", True),
-        getattr(mc, "fanstudio_parse_cea_pr", True),
-        getattr(mc, "fanstudio_parse_cwa_eew", True),
-        getattr(mc, "fanstudio_parse_jma", True),
-        getattr(mc, "fanstudio_parse_sa", True),
-        getattr(mc, "fanstudio_parse_kma_eew", True),
-        getattr(mc, "fanstudio_parse_cenc", True),
-        getattr(mc, "fanstudio_parse_ningxia", True),
-        getattr(mc, "fanstudio_parse_guangxi", True),
-        getattr(mc, "fanstudio_parse_shanxi", True),
-        getattr(mc, "fanstudio_parse_beijing", True),
-        getattr(mc, "fanstudio_parse_yunnan", True),
-        getattr(mc, "fanstudio_parse_cwa", True),
-        getattr(mc, "fanstudio_parse_hko", True),
-        getattr(mc, "fanstudio_parse_usgs", True),
-        getattr(mc, "fanstudio_parse_emsc", True),
-        getattr(mc, "fanstudio_parse_bcsf", True),
-        getattr(mc, "fanstudio_parse_gfz", True),
-        getattr(mc, "fanstudio_parse_usp", True),
-        getattr(mc, "fanstudio_parse_kma", True),
-        getattr(mc, "fanstudio_parse_fssn", True),
-        getattr(mc, "fanstudio_parse_fssn_cmt", True),
-        getattr(mc, "fanstudio_parse_weatheralarm", True),
-        getattr(mc, "fanstudio_parse_tsunami", True),
         getattr(mc, "whews_parse_jma_eew", True),
         getattr(mc, "whews_parse_jma", True),
         getattr(mc, "whews_parse_cwa_eew", True),
@@ -710,7 +631,6 @@ def _data_source_snapshot(config) -> tuple:
         getattr(mc, "ali_all_parse_cq_eew", True),
         getattr(mc, "p2pquake_parse_551", False),
         getattr(mc, "p2pquake_parse_552", True),
-        getattr(mc, "p2pquake_parse_556", True),
         *(
             getattr(mc, flag, True)
             for flag in JIAN_SHORT_TO_PARSE_FLAG.values()
@@ -766,32 +686,6 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
             if hasattr(config.message_config, field_name):
                 setattr(config.message_config, field_name, getattr(defaults_msg, field_name))
         for field_name in (
-            "fanstudio_parse_warning",
-            "fanstudio_parse_report",
-            "fanstudio_parse_cea",
-            "fanstudio_parse_cea_pr",
-            "fanstudio_parse_cwa_eew",
-            "fanstudio_parse_jma",
-            "fanstudio_parse_sa",
-            "fanstudio_parse_kma_eew",
-            "fanstudio_parse_cenc",
-            "fanstudio_parse_ningxia",
-            "fanstudio_parse_guangxi",
-            "fanstudio_parse_shanxi",
-            "fanstudio_parse_beijing",
-            "fanstudio_parse_yunnan",
-            "fanstudio_parse_cwa",
-            "fanstudio_parse_hko",
-            "fanstudio_parse_usgs",
-            "fanstudio_parse_emsc",
-            "fanstudio_parse_bcsf",
-            "fanstudio_parse_gfz",
-            "fanstudio_parse_usp",
-            "fanstudio_parse_kma",
-            "fanstudio_parse_fssn",
-            "fanstudio_parse_fssn_cmt",
-            "fanstudio_parse_weatheralarm",
-            "fanstudio_parse_tsunami",
             "whews_parse_jma_eew",
             "whews_parse_cwa_eew",
             "whews_parse_sa_eew",
@@ -841,7 +735,6 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
             "ali_all_parse_cq_eew",
             "p2pquake_parse_551",
             "p2pquake_parse_552",
-            "p2pquake_parse_556",
             *JIAN_SHORT_TO_PARSE_FLAG.values(),
         ):
             if hasattr(config.message_config, field_name):
@@ -849,9 +742,6 @@ def apply_performance_preset(config, mode: str) -> Dict[str, Any]:
         for field_name in (
             "enabled",
             "alert_feedback_mode",
-            "felt_sound_enabled",
-            "critical_sound_enabled",
-            "sound_enabled",
             "felt_tts_enabled",
             "critical_tts_enabled",
             "weather_tts_enabled",

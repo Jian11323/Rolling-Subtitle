@@ -321,7 +321,10 @@ class JianProjectAdapter(BaseAdapter):
 
         placename_zh = ""
         if internal == "kma-eew":
-            placename_zh = str(data.get("placename_zh") or "").strip()
+            # 震中参考地名（API placename_zh）；有则优先展示
+            placename_zh = str(
+                data.get("placename_zh") or data.get("placeName_zh") or ""
+            ).strip()
             if not placename_zh:
                 placename_zh = _lookup_kma_placename_zh(latitude, longitude)
             if placename_zh:
@@ -394,12 +397,50 @@ class JianProjectAdapter(BaseAdapter):
             if isinstance(areas, list) and areas:
                 result["affected_areas"] = [str(a).strip() for a in areas if str(a).strip()]
         if internal == "jma":
-            for key in ("infoTypeName", "isFinal", "isCancel", "isTraining", "isPLUM", "isWarn"):
+            # 训练报不展示
+            if data.get("isTraining") is True or data.get("is_training") is True:
+                logger.debug("[Jian] JMA 训练报 isTraining，跳过")
+                return None
+            for key in ("infoTypeName", "isFinal", "isCancel", "isPLUM", "isWarn"):
                 if key in data:
                     result[key] = data.get(key)
+            if data.get("isFinal") is not None:
+                result["final"] = bool(data.get("isFinal"))
+            if data.get("isCancel") is not None:
+                result["cancel"] = bool(data.get("isCancel"))
+            info_type = str(data.get("infoTypeName") or "").strip()
+            if info_type:
+                result["info_type"] = info_type
+            if data.get("isWarn") is True:
+                result["warn_area_type"] = "警報"
+            elif data.get("isWarn") is False:
+                result["warn_area_type"] = "予報"
+            lg = str(data.get("lgIntensity") or "").strip()
+            if lg and lg not in ("0", "不明"):
+                result["lg_intensity"] = lg
             warn_area = data.get("warnArea") or data.get("wolfx_warn_areas")
             if isinstance(warn_area, list) and warn_area:
                 result["wolfx_warn_areas"] = warn_area
+                # 警报区域地名摘要
+                names = []
+                for item in warn_area:
+                    if isinstance(item, dict):
+                        n = str(item.get("name") or item.get("Chiiki") or item.get("chiiki") or "").strip()
+                        inten = str(
+                            item.get("intensityFrom")
+                            or item.get("intensity")
+                            or item.get("Shindo1")
+                            or ""
+                        ).strip()
+                        if n:
+                            names.append(f"{n}({inten})" if inten else n)
+                        t = str(item.get("Type") or item.get("type") or "").strip()
+                        if t and not result.get("warn_area_type"):
+                            result["warn_area_type"] = t
+                if names:
+                    result["warning_areas"] = "、".join(names[:12])
+                    if len(names) > 12:
+                        result["warning_areas"] += "等"
         return result
 
     def _parse_report(self, data: Dict[str, Any], internal: str) -> Optional[Dict[str, Any]]:
@@ -415,7 +456,9 @@ class JianProjectAdapter(BaseAdapter):
 
         placename_zh = ""
         if internal == "kma":
-            placename_zh = str(data.get("placename_zh") or "").strip()
+            placename_zh = str(
+                data.get("placename_zh") or data.get("placeName_zh") or ""
+            ).strip()
             if not placename_zh:
                 placename_zh = _lookup_kma_placename_zh(latitude, longitude)
         else:

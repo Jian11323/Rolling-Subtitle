@@ -7,7 +7,7 @@ WeJet（WHEWS：api.2v8.cn / 备用 api.beecld.com）数据源适配器。
 聚合 /ws/all 首连为 JSON 数组，之后为单对象；心跳 type=heartbeat。
 JMA 预警（jma_eew）随主服务解析；JMA 情报（jma）不解析，统一走 P2PQuake。
 
-本适配器独立完成字段解析，不依赖 FanStudioAdapter。
+本适配器独立完成字段解析。
 
 注意：上游 API 的 source 字段大小写混杂（如 CENC / cenc / Cenc），
 解析时一律规范化为小写后再映射；待上游统一后再可简化。
@@ -30,6 +30,28 @@ logger = get_logger()
 
 # WeJet CEA 已恢复：需 WAuth + App 鉴权；不再整源丢弃
 WHEWS_SKIP_SOURCES = frozenset()
+
+
+
+def _is_whews_training(data: Dict[str, Any]) -> bool:
+    """判断 WeJet 业务载荷是否为训练报（全部源统一跳过）。"""
+    if not isinstance(data, dict):
+        return False
+    for key in ("isTraining", "is_training", "training", "isDrill", "is_drill", "drill"):
+        v = data.get(key)
+        if v is True:
+            return True
+        if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "y"):
+            return True
+        if isinstance(v, (int, float)) and int(v) == 1:
+            return True
+    for key in ("infoTypeName", "infoType", "info_type", "typeName", "messageType"):
+        s = str(data.get(key) or "").strip().lower()
+        if not s:
+            continue
+        if any(tok in s for tok in ("训练", "演習", "演习", "試驗", "试验", "drill", "training")):
+            return True
+    return False
 
 
 def _is_whews_cea_source(short: str) -> bool:
@@ -100,6 +122,12 @@ WHEWS_SOURCE_TO_INTERNAL = {
     "cmt_emsc": "cmt_emsc",
     "cmt_cenc": "cmt_cenc",
     "cmt_ingv": "cmt_ingv",
+    "cmt_gfz": "cmt_gfz",
+    "cenc_int": "cenc_int",
+    "funvisis": "funvisis",
+    "cheji": "cheji",
+    "nea": "nea",
+    "jma_okiai": "jma_okiai",
 }
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_TO_INTERNAL[_prov] = _prov
@@ -187,6 +215,12 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "cmt_emsc": "whews_parse_cmt_emsc",
     "cmt_cenc": "whews_parse_cmt_cenc",
     "cmt_ingv": "whews_parse_cmt_ingv",
+    "cmt_gfz": "whews_parse_cmt_gfz",
+    "cenc_int": "whews_parse_cenc_int",
+    "funvisis": "whews_parse_funvisis",
+    "cheji": "whews_parse_cheji",
+    "nea": "whews_parse_nea",
+    "jma_okiai": "whews_parse_jma_okiai",
 }
 for _prov in WHEWS_PROVINCIAL_SOURCES:
     WHEWS_SOURCE_FLAG_FIELD[_prov] = f"whews_parse_{_prov}"
@@ -194,7 +228,7 @@ for _prov in WHEWS_PROVINCIAL_SOURCES:
 WHEWS_WARNING_INTERNAL = frozenset(
     {"jma", "cwa-eew", "sa", "kma-eew", "cea", "cea-pr", "early_est"}
 )
-WHEWS_CMT_INTERNAL = frozenset({"cmt_usgs", "cmt_emsc", "cmt_cenc", "cmt_ingv"})
+WHEWS_CMT_INTERNAL = frozenset({"cmt_usgs", "cmt_emsc", "cmt_cenc", "cmt_ingv", "cmt_gfz"})
 WHEWS_FLAT_TSUNAMI_INTERNAL = frozenset(
     {"ntwc", "ptwc", "incois", "cat_tsunami", "cwa_tsunami"}
 )
@@ -454,15 +488,38 @@ class WhewsAdapter(BaseAdapter):
             "updates": updates,
             "source_type": source_type,
             "raw_data": data,
+            "whews": True,
         }
 
         if source_type == "jma":
             if "infoTypeName" in data:
                 result["info_type"] = data.get("infoTypeName")
-            if "final" in data:
-                result["final"] = data.get("final", False)
-            if "cancel" in data:
-                result["cancel"] = data.get("cancel", False)
+            if "isFinal" in data or "final" in data:
+                result["final"] = bool(data.get("isFinal", data.get("final", False)))
+            if "isCancel" in data or "cancel" in data:
+                result["cancel"] = bool(data.get("isCancel", data.get("cancel", False)))
+            if "isWarn" in data:
+                result["isWarn"] = bool(data.get("isWarn"))
+            if "isPLUM" in data:
+                result["isPLUM"] = bool(data.get("isPLUM"))
+            lg = str(data.get("lgIntensity") or "").strip()
+            if lg and lg not in ("0", "不明"):
+                result["lg_intensity"] = lg
+            warn_area = data.get("warnArea") or data.get("WarnArea")
+            if isinstance(warn_area, list) and warn_area:
+                result["wolfx_warn_areas"] = warn_area
+                # 推断预报/警报
+                for item in warn_area:
+                    if isinstance(item, dict):
+                        t = str(item.get("Type") or item.get("type") or "").strip()
+                        if t:
+                            result["warn_area_type"] = t
+                            break
+                if not result.get("warn_area_type"):
+                    if data.get("isWarn") is True:
+                        result["warn_area_type"] = "警報"
+                    elif data.get("isWarn") is False:
+                        result["warn_area_type"] = "予報"
 
         if source_type == "cwa-eew" and "locationDesc" in data:
             result["location_desc"] = data.get("locationDesc")
@@ -941,6 +998,12 @@ class WhewsAdapter(BaseAdapter):
             return self._parse_volcano(data_obj)
         if internal in WHEWS_CMT_INTERNAL:
             return self._parse_cmt(data_obj, internal)
+        if internal == "cenc_int":
+            return self._parse_cenc_int(data_obj)
+        if internal == "cheji":
+            return self._parse_cheji(data_obj)
+        if internal == "jma_okiai":
+            return self._parse_jma_okiai(data_obj)
         if internal in WHEWS_WARNING_INTERNAL:
             return self._parse_warning(data_obj, internal)
         return self._parse_report(data_obj, internal)
@@ -1246,10 +1309,13 @@ class WhewsAdapter(BaseAdapter):
         if not isinstance(data_obj, dict) or not data_obj:
             return None
 
+        if _is_whews_training(data_obj):
+            logger.debug(f"[WHEWS] 训练报跳过: source={short}({internal})")
+            return None
+
         parsed = self._parse_by_internal(data_obj, internal)
         if not parsed:
             return None
-        parsed["fanstudio"] = False
         parsed["whews"] = True
         parsed["jian"] = False
         # 溯源：规范化短名写入 raw 旁注，便于调试
@@ -1277,6 +1343,108 @@ class WhewsAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"[WHEWS] parse_all_sources 失败: {e}")
             return []
+
+
+    def _parse_cenc_int(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """CENC 烈度速报（/ws/cenc_int）。"""
+        if not isinstance(data, dict):
+            return None
+        place = str(data.get("placeName") or data.get("place") or data.get("title") or "").strip()
+        shock_time = str(data.get("shockTime") or data.get("originTime") or data.get("createTime") or "").strip()
+        if not place and not shock_time:
+            return None
+        if shock_time:
+            shock_time = timezone_utils.cst_to_display(shock_time)
+        lat = _safe_float(data.get("latitude", 0))
+        lon = _safe_float(data.get("longitude", 0))
+        mag = _safe_float(data.get("magnitude", 0))
+        depth = _safe_float(data.get("depth", 0))
+        intensity = data.get("intensity") or data.get("maxIntensity") or data.get("epiIntensity")
+        result: Dict[str, Any] = {
+            "type": "report",
+            "source_type": "cenc_int",
+            "place_name": place,
+            "shock_time": shock_time,
+            "magnitude": mag,
+            "latitude": lat,
+            "longitude": lon,
+            "depth": depth,
+            "organization": _get_organization_name("cenc_int"),
+            "event_id": _resolve_event_id(data, "cenc_int", place, shock_time, lat, lon),
+            "raw_data": data,
+            "whews": True,
+        }
+        if intensity is not None and str(intensity).strip():
+            result["intensity"] = str(intensity)
+        return result
+
+    def _parse_cheji(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """自然资源部自然灾害风险预警（/ws/cheji）。"""
+        if not isinstance(data, dict):
+            return None
+        title = str(data.get("title") or data.get("headline") or data.get("placeName") or "").strip()
+        t = str(data.get("shockTime") or data.get("publishTime") or data.get("createTime") or data.get("time") or "").strip()
+        if not title and not t:
+            return None
+        if t:
+            t = timezone_utils.flexible_time_to_display(t) if hasattr(timezone_utils, "flexible_time_to_display") else timezone_utils.cst_to_display(t)
+        return {
+            "type": "report",
+            "source_type": "cheji",
+            "place_name": title,
+            "shock_time": t,
+            "magnitude": 0,
+            "latitude": _safe_float(data.get("latitude", 0)),
+            "longitude": _safe_float(data.get("longitude", 0)),
+            "depth": 0,
+            "organization": _get_organization_name("cheji"),
+            "event_id": str(data.get("id") or data.get("eventId") or title),
+            "raw_data": data,
+            "whews": True,
+            "is_hazard": True,
+        }
+
+    def _parse_jma_okiai(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """JMA 冲合海啸观测（/ws/jma_okiai）。"""
+        if not isinstance(data, dict):
+            return None
+        place = str(
+            data.get("placeName")
+            or data.get("pointName")
+            or data.get("stationName")
+            or data.get("title")
+            or ""
+        ).strip()
+        shock_time = str(
+            data.get("shockTime")
+            or data.get("observeTime")
+            or data.get("originTime")
+            or data.get("createTime")
+            or ""
+        ).strip()
+        if not place and not shock_time:
+            return None
+        if shock_time:
+            shock_time = timezone_utils.jst_to_display(shock_time)
+        height = data.get("height") or data.get("maxHeight") or data.get("waveHeight")
+        place_disp = place
+        if height is not None and str(height).strip():
+            place_disp = f"{place} 观测浪高{height}" if place else f"观测浪高{height}"
+        return {
+            "type": "report",
+            "is_tsunami": True,
+            "source_type": "jma_okiai",
+            "place_name": place_disp,
+            "shock_time": shock_time,
+            "magnitude": 0,
+            "latitude": _safe_float(data.get("latitude", 0)),
+            "longitude": _safe_float(data.get("longitude", 0)),
+            "depth": 0,
+            "organization": _get_organization_name("jma_okiai"),
+            "event_id": str(data.get("id") or data.get("eventId") or f"jma_okiai:{shock_time}:{place}"),
+            "raw_data": data,
+            "whews": True,
+        }
 
     def parse(self, raw_data: Any) -> Optional[Dict[str, Any]]:
         """解析单条消息；若为数组则返回第一条有效数据（完整列表走 parse_all_sources）。"""

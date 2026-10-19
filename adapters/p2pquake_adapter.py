@@ -3,7 +3,7 @@
 """
 P2PQuake数据源适配器
 用于解析日本气象厅地震情报（code 551）
-API: https://api.p2pquake.net/v2/history?codes=551&codes=552&codes=556&limit=10
+API: https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10
 （本适配器仅处理 code=551；聚合列表中其它 code 会被跳过）
 """
 

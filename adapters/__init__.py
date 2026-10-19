@@ -13,12 +13,11 @@ from typing import Any, Dict, Tuple
 # 名称 -> (模块路径, 属性名)
 _LAZY_ATTRS: Dict[str, Tuple[str, str]] = {
     "BaseAdapter": (".base_adapter", "BaseAdapter"),
-    "FanStudioAdapter": (".fanstudio_adapter", "FanStudioAdapter"),
+    "FssnAdapter": (".fssn_adapter", "FssnAdapter"),
     "JianTyphoonHttpAdapter": (".jian_typhoon_http_adapter", "JianTyphoonHttpAdapter"),
     "P2PQuakeAdapter": (".p2pquake_adapter", "P2PQuakeAdapter"),
     "P2PQuakeTsunamiAdapter": (".p2pquake_tsunami_adapter", "P2PQuakeTsunamiAdapter"),
     "P2PQuakeWebSocketAdapter": (".p2pquake_ws_adapter", "P2PQuakeWebSocketAdapter"),
-    "P2PQuakeEEWAdapter": (".p2pquake_eew_adapter", "P2PQuakeEEWAdapter"),
     "CustomAdapter": (".custom_adapter", "CustomAdapter"),
     "WolfxAdapter": (".wolfx_adapter", "WolfxAdapter"),
     "WhewsAdapter": (".whews_adapter", "WhewsAdapter"),

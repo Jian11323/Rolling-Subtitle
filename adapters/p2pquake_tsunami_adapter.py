@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 P2PQuake 海啸预报（code 552）数据源适配器
-API: https://api.p2pquake.net/v2/history?codes=551&codes=552&codes=556&limit=10
+API: https://api.p2pquake.net/v2/history?codes=551&codes=552&limit=10
 （兼容旧接口 /v2/jma/tsunami；本适配器仅处理 code=552 或未带 code 的海啸对象）
 cancelled 为 True 时不展示。
 """

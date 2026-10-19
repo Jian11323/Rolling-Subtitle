@@ -94,7 +94,7 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _fanstudio_cea_pr_org(province: str) -> str:
+def _cea_pr_org_for_tts(province: str) -> str:
     """将省级名称格式化为 TTS 可读机构名（如「四川省地震局」）。"""
     p = (province or "").strip()
     if not p:
@@ -127,33 +127,18 @@ def _warning_org_for_tts(data: Dict[str, Any]) -> str:
     province = (data.get("province") or "").strip()
     info_type = (data.get("info_type") or "").strip()
 
-    if data.get("fanstudio"):
-        if source_type == "cea":
-            return "中国地震预警网"
-        if source_type == "cea-pr":
-            return _fanstudio_cea_pr_org(province)
-        if source_type == "cwa-eew":
-            return "台湾省气象署"
-        if source_type == "sa":
-            return "美国ShakeAlert"
-        if source_type == "jma":
-            if info_type:
-                return f"日本气象厅 {info_type}".strip()
-            return "日本气象厅"
-        if source_type == "kma-eew":
-            return "韩国气象厅"
-        if organization:
-            if "地震预警" in organization or "地震情报" in organization:
-                return _strip_brackets(organization)
-            return f"{organization}地震预警".replace("地震预警地震预警", "地震预警")
-
+    if source_type == "jma":
+        warn_area_type = (data.get("warn_area_type") or info_type or "").strip()
+        if warn_area_type:
+            return f"日本气象厅 {warn_area_type}".strip()
+        return "日本气象厅"
     if source_type == "wolfx_jma_eew":
         warn_area_type = (data.get("warn_area_type") or "").strip()
         if warn_area_type:
             return f"Wolfx 緊急地震速報 {warn_area_type}"
         return "Wolfx 緊急地震速報"
     if source_type == "cea-pr" and province:
-        return _fanstudio_cea_pr_org(province)
+        return _cea_pr_org_for_tts(province)
     if organization:
         if "地震预警" in organization or "地震情报" in organization:
             return _strip_brackets(organization)
@@ -191,21 +176,11 @@ def _report_org_for_tts(data: Dict[str, Any]) -> str:
     info_type = (data.get("info_type") or "").strip()
     source_type = (data.get("source_type") or "").strip()
 
-    if data.get("fanstudio"):
-        if source_type == "weatheralarm":
-            return "中国气象局"
-        if source_type == "cenc":
-            det = _cenc_determination_label(data)
-            if det:
-                return f"中国地震台网中心{det}"
-            return "中国地震台网中心"
-        if organization:
-            if "地震信息" in organization or "地震情报" in organization:
-                return _strip_brackets(organization)
-            return f"{organization}地震信息"
-
-    if organization == "FSSN":
-        return "FSSN"
+    if organization in ("FSSN", "FAN Studio Seismic Network") or source_type in (
+        "fssn",
+        "fssn-cmt",
+    ):
+        return "FSSN" if source_type != "fssn-cmt" else "FSSN 矩心矩张量解"
     if organization == "香港天文台":
         return "香港天文台"
     if organization == "美国地质调查局":
@@ -777,18 +752,8 @@ def _speak_blocking(text: str, alert_config: Any, repeat: int = 1) -> None:
 
 
 def _feedback_mode(alert_config: Any) -> str:
-    """读取告警反馈模式：sound（声音）或 tts（语音）。"""
-    mode = str(getattr(alert_config, "alert_feedback_mode", "sound") or "sound").strip().lower()
-    if mode not in ("sound", "tts"):
-        legacy = str(getattr(alert_config, "tts_playback_mode", "") or "").strip().lower()
-        if legacy == "replace":
-            return "tts"
-        if getattr(alert_config, "felt_tts_enabled", False) or getattr(
-            alert_config, "critical_tts_enabled", False
-        ):
-            return "tts"
-        return "sound"
-    return mode
+    """告警反馈仅 TTS（预设 WAV 已移除）。"""
+    return "tts"
 
 
 def _run_tts_feedback(

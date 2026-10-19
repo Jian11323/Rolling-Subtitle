@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""地震预警声音告警（有感 / 强震分级，仅 warning 类型）。"""
+"""
+告警音效：NHK 一级新闻铃、JMA 緊急地震速報「警報」提示音。
+有感/强震内置 WAV（eewalert / eewcritical）已移除；通用预警反馈走 TTS。
+"""
+
+from __future__ import annotations
 
 import os
 import sys
 import threading
-import time
 from typing import Any, Dict, Optional
 
 from utils.epi_intensity_estimate import effective_epi_for_alert
@@ -20,7 +24,6 @@ from utils.logger import get_logger
 from utils.warning_feedback_dedup import (
     event_key,
     is_startup_sync_message,
-    register_warning_feedback_seen,
     should_play_warning_feedback,
 )
 
@@ -32,14 +35,12 @@ _play_lock = threading.Lock()
 def _warning_feedback_policy(alert_config: Any) -> str:
     return getattr(alert_config, "warning_feedback_policy", "first_received") or "first_received"
 
-# 强震判定阈值：震级 ≥4.8 或报文烈度 ≥7 为 critical 档
+
+# TTS 分级用：震级 ≥4.8 或报文烈度 ≥7 为 critical
 _EEW_MAG_CRITICAL = 4.8
 _EEW_INTENSITY_CRITICAL = 7.0
 
-# 内置默认告警音相对路径
 _DEFAULT_SOUND_FILES = {
-    "felt": "media/eewalert.wav",
-    "critical": "media/eewcritical.wav",
     "nhk": "media/NHK一級ニュースベル.wav",
     "jma_eew_alert": "media/NHK緊急地震速報の音.wav",
 }
@@ -53,8 +54,8 @@ def classify_eew_audio_tier(
     alert_config: Any,
 ) -> Optional[str]:
     """
-    按震级 4.8 与报文烈度 7 判定音频档位（无报文烈度时仅按震级）。
-    返回 ``felt`` / ``critical`` / ``None``（不满足最低震级时不播放）。
+    按震级与烈度判定 TTS 档位。
+    返回 ``felt`` / ``critical`` / ``None``。
     """
     pd = parsed_data or {}
     try:
@@ -63,7 +64,7 @@ def classify_eew_audio_tier(
         return None
 
     min_mag = float(getattr(alert_config, "min_magnitude", 3.0) or 0.0)
-    if magnitude < min_mag:  # 未达最低震级门槛，不播放
+    if magnitude < min_mag:
         return None
 
     intensity = effective_epi_for_alert(pd)
@@ -76,13 +77,7 @@ def classify_eew_audio_tier(
 def resolve_sound_path(tier: str, alert_config: Any) -> Optional[str]:
     """用户自定义路径优先，否则使用内置 media 默认文件。"""
     tier = (tier or "").strip().lower()
-    if tier == "felt":
-        custom = (getattr(alert_config, "felt_sound_path", "") or "").strip()
-        default_rel = _DEFAULT_SOUND_FILES["felt"]
-    elif tier == "critical":
-        custom = (getattr(alert_config, "critical_sound_path", "") or "").strip()
-        default_rel = _DEFAULT_SOUND_FILES["critical"]
-    elif tier == "nhk":
+    if tier == "nhk":
         custom = (getattr(alert_config, "nhk_news_bell_path", "") or "").strip()
         default_rel = _DEFAULT_SOUND_FILES["nhk"]
     elif tier == "jma_eew_alert":
@@ -96,6 +91,7 @@ def resolve_sound_path(tier: str, alert_config: Any) -> Optional[str]:
 
     try:
         from utils.resource_path import get_resource_path
+
         default_path = get_resource_path(default_rel)
         if default_path.is_file():
             return str(default_path)
@@ -106,11 +102,7 @@ def resolve_sound_path(tier: str, alert_config: Any) -> Optional[str]:
 
 def _sound_repeat_for_tier(tier: str, alert_config: Any) -> int:
     """读取指定档位的声音重复次数（1–10）。"""
-    if tier == "felt":
-        repeat = getattr(alert_config, "felt_sound_repeat", 1)
-    elif tier == "critical":
-        repeat = getattr(alert_config, "critical_sound_repeat", 1)
-    elif tier == "nhk":
+    if tier == "nhk":
         repeat = getattr(alert_config, "nhk_news_bell_repeat", 1)
     elif tier == "jma_eew_alert":
         repeat = getattr(alert_config, "jma_eew_alert_sound_repeat", 2)
@@ -124,11 +116,7 @@ def _sound_repeat_for_tier(tier: str, alert_config: Any) -> int:
 
 
 def _tier_enabled(tier: str, alert_config: Any) -> bool:
-    """检查指定档位（felt/critical）的声音告警是否已启用。"""
-    if tier == "felt":
-        return bool(getattr(alert_config, "felt_sound_enabled", False))
-    if tier == "critical":
-        return bool(getattr(alert_config, "critical_sound_enabled", False))
+    """检查指定档位的声音告警是否已启用。"""
     if tier == "nhk":
         return bool(getattr(alert_config, "nhk_news_bell_enabled", False))
     if tier == "jma_eew_alert":
@@ -194,8 +182,16 @@ def should_play_jma_eew_alert_sound(
     return upgraded
 
 
-def _play_mp3_mci(sound_path: str, repeat: int) -> bool:
-    """Windows MCI 播放 MP3（可在后台线程使用，不依赖 Qt 事件循环）。"""
+def _clamp_repeat(repeat: int) -> int:
+    try:
+        n = int(repeat)
+    except (TypeError, ValueError):
+        n = 1
+    return max(1, min(10, n))
+
+
+def _play_mci(sound_path: str, repeat: int, mci_type: str) -> bool:
+    """Windows MCI：每次 ``play from 0 wait`` 只播一遍，共 repeat 次。"""
     if sys.platform != "win32":
         return False
     try:
@@ -205,12 +201,12 @@ def _play_mp3_mci(sound_path: str, repeat: int) -> bool:
         winmm = ctypes.windll.winmm
         alias = f"eqs_{uuid.uuid4().hex[:8]}"
         path = os.path.abspath(sound_path)
-        open_cmd = f'open "{path}" type mpegvideo alias {alias}'
+        open_cmd = f'open "{path}" type {mci_type} alias {alias}'
         if winmm.mciSendStringW(open_cmd, None, 0, 0):
             return False
         try:
-            for _ in range(repeat):
-                if winmm.mciSendStringW(f"play {alias} wait", None, 0, 0):
+            for _ in range(_clamp_repeat(repeat)):
+                if winmm.mciSendStringW(f"play {alias} from 0 wait", None, 0, 0):
                     return False
             return True
         finally:
@@ -219,167 +215,42 @@ def _play_mp3_mci(sound_path: str, repeat: int) -> bool:
         return False
 
 
-def _play_with_qt_media(sound_path: str, repeat: int) -> bool:
-    """Qt QMediaPlayer 播放（需已有 QApplication 并在循环中 processEvents）。"""
-    try:
-        from PyQt5.QtCore import QUrl
-        from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
-        from PyQt5.QtWidgets import QApplication
-
-        app = QApplication.instance()
-        if app is None:
-            return False
-        abs_path = os.path.abspath(sound_path)
-        for _ in range(repeat):
-            player = QMediaPlayer()
-            player.setMedia(QMediaContent(QUrl.fromLocalFile(abs_path)))
-            player.play()
-            deadline = time.time() + 120
-            while player.state() == QMediaPlayer.PlayingState and time.time() < deadline:
-                app.processEvents()
-                time.sleep(0.05)
-            if player.error() != QMediaPlayer.NoError:
-                return False
-        return True
-    except Exception:
-        return False
-
-
 def _play_file(sound_path: str, repeat: int) -> None:
-    """播放音频文件；Windows 优先 winsound/MCI，否则尝试 Qt 多媒体或系统提示音。"""
-    repeat = max(1, min(10, int(repeat or 1)))
-    if not sound_path or not os.path.isfile(sound_path):  # 文件不存在则跳过
+    """按重复次数播放。禁止 Qt QSoundEffect：其 loopCount 在 Windows 上会变成无限循环。"""
+    repeat = _clamp_repeat(repeat)
+    if not sound_path or not os.path.isfile(sound_path):
         return
 
     ext = os.path.splitext(sound_path)[1].lower()
     if sys.platform == "win32" and ext == ".wav":
+        played = 0
         try:
             import winsound
+
+            # 不带 SND_ASYNC / SND_LOOP：同步播完一遍才返回
+            flags = winsound.SND_FILENAME | winsound.SND_NODEFAULT
             for _ in range(repeat):
-                winsound.PlaySound(
-                    sound_path,
-                    winsound.SND_FILENAME | winsound.SND_NODEFAULT,
-                )
+                winsound.PlaySound(sound_path, flags)
+                played += 1
             return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"winsound 播放失败: {e}")
+        if played:
+            return
+        if _play_mci(sound_path, repeat, "waveaudio"):
+            return
 
     if sys.platform == "win32" and ext == ".mp3":
-        if _play_mp3_mci(sound_path, repeat):
+        if _play_mci(sound_path, repeat, "mpegvideo"):
             return
 
-    played = False
-    if ext in (".wav", ".ogg"):
+    if sys.platform == "win32":
         try:
-            from PyQt5.QtCore import QUrl
-            from PyQt5.QtMultimedia import QSoundEffect
-            from PyQt5.QtWidgets import QApplication
+            import winsound
 
-            app = QApplication.instance()
-            effect = QSoundEffect()
-            effect.setSource(QUrl.fromLocalFile(os.path.abspath(sound_path)))
-            load_deadline = time.time() + 1.0
-            while not effect.isLoaded() and time.time() < load_deadline:
-                if app is not None:
-                    app.processEvents()
-                time.sleep(0.02)
-            if effect.isLoaded():
-                effect.setLoopCount(repeat)
-                effect.play()
-                play_deadline = time.time() + 120
-                while effect.isPlaying() and time.time() < play_deadline:
-                    if app is not None:
-                        app.processEvents()
-                    time.sleep(0.05)
-                played = True
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         except Exception:
             pass
-
-    if not played and ext == ".mp3":
-        played = _play_with_qt_media(sound_path, repeat)
-
-    if played:  # Qt 音效已成功播放
-        return
-
-    for _ in range(repeat):
-        try:
-            from PyQt5.QtMultimedia import QSound
-            QSound.play(sound_path)
-            time.sleep(0.3)
-            played = True
-        except Exception:
-            pass
-        if not played:
-            if sys.platform == "win32":
-                import winsound
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-            else:
-                os.system('printf "\\a"')
-            break
-        time.sleep(0.2)
-
-
-def _play_alert_sound_impl(
-    config: Any,
-    message_type: str = "warning",
-    parsed_data: Optional[Dict[str, Any]] = None,
-    tier: Optional[str] = None,
-    *,
-    force: bool = False,
-) -> bool:
-    """在当前线程播放分级告警音（调用方负责持有 ``_play_lock``）。返回是否已尝试播放。"""
-    ac = getattr(config, "alert_config", None)
-    if ac is None:
-        return False
-
-    pd = parsed_data or {}
-
-    if not force and is_startup_sync_message(pd):
-        if message_type == "warning":
-            tier_for_seen = (tier or "").strip().lower()
-            if not tier_for_seen:
-                tier_for_seen = classify_eew_audio_tier(pd, ac) or "felt"
-            if tier_for_seen in ("felt", "critical", "nhk"):
-                register_warning_feedback_seen(
-                    pd, tier_for_seen, policy=_warning_feedback_policy(ac)
-                )
-        return False
-
-    if tier:
-        tier_key = tier.strip().lower()
-        if tier_key not in ("felt", "critical", "nhk"):
-            return False
-        if not _tier_enabled(tier_key, ac):
-            return False
-        sound_path = resolve_sound_path(tier_key, ac)
-        repeat = _sound_repeat_for_tier(tier_key, ac)
-    else:
-        if message_type != "warning":
-            return False
-        tier_key = classify_eew_audio_tier(parsed_data, ac)
-        if not tier_key or not _tier_enabled(tier_key, ac):
-            return False
-        if not force and not should_play_warning_feedback(
-            pd, tier_key, policy=_warning_feedback_policy(ac)
-        ):
-            logger.debug(
-                "跳过重复预警告警音: event_id=%s source_type=%s (同源或跨源同一震次)",
-                pd.get("event_id"),
-                pd.get("source_type"),
-            )
-            return False
-        sound_path = resolve_sound_path(tier_key, ac)
-        repeat = _sound_repeat_for_tier(tier_key, ac)
-
-    if not sound_path:
-        return False
-
-    try:
-        _play_file(sound_path, repeat)
-        return True
-    except Exception as e:
-        logger.debug(f"播放告警音失败: {e}")
-        return False
 
 
 def play_nhk_news_bell(
@@ -397,7 +268,13 @@ def play_nhk_news_bell(
         return
 
     def _run() -> None:
-        with _play_lock:
+        # 试听不排队：上一轮还在播时忽略新的点击，避免叠成不停地响
+        if force:
+            if not _play_lock.acquire(blocking=False):
+                return
+        else:
+            _play_lock.acquire()
+        try:
             if not force and not should_play_nhk_news_bell(pd, ac):
                 return
             if not force and not _tier_enabled("nhk", ac):
@@ -419,6 +296,8 @@ def play_nhk_news_bell(
                 _play_file(sound_path, repeat)
             except Exception as e:
                 logger.debug(f"播放 NHK 新闻铃失败: {e}")
+        finally:
+            _play_lock.release()
 
     threading.Thread(target=_run, daemon=True, name="NhkNewsBell").start()
 
@@ -447,7 +326,12 @@ def play_jma_eew_alert_sound(
             return
 
     def _run() -> None:
-        with _play_lock:
+        if force:
+            if not _play_lock.acquire(blocking=False):
+                return
+        else:
+            _play_lock.acquire()
+        try:
             upgraded, _, current = _jma_eew_alert_upgrade_state(pd)
             should_play = force or (
                 upgraded
@@ -464,27 +348,7 @@ def play_jma_eew_alert_sound(
                         logger.debug(f"播放 JMA 警報提示音失败: {e}")
             if current and not force:
                 _commit_jma_eew_warn_type(pd)
+        finally:
+            _play_lock.release()
 
     threading.Thread(target=_run, daemon=True, name="JmaEewAlertSound").start()
-
-
-def play_alert_sound(
-    config: Any,
-    message_type: str = "warning",
-    parsed_data: Optional[Dict[str, Any]] = None,
-    tier: Optional[str] = None,
-    *,
-    force: bool = False,
-) -> None:
-    """在后台线程播放分级告警音。``tier`` 非空时用于设置页测试；``force`` 跳过去重。"""
-    ac = getattr(config, "alert_config", None)
-    if ac is None:
-        return
-
-    def _run() -> None:
-        with _play_lock:
-            _play_alert_sound_impl(
-                config, message_type, parsed_data, tier=tier, force=force
-            )
-
-    threading.Thread(target=_run, daemon=True, name="AudioAlert").start()

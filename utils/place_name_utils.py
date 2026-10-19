@@ -28,7 +28,7 @@ JMA_ORIGINAL_PLACE_SOURCES = frozenset({
     "jma", "jma_eq", "jma_volcano", "jma_tsunami",
     "wolfx_jma_eew", "wolfx_jma_eqlist",
     "eqsc_jma_eew", "eqsc_jma_report", "eqsc_jma_tsunami", "eqsc_volcano",
-    "p2pquake", "p2pquake_tsunami", "p2pquake_eew",
+    "p2pquake", "p2pquake_tsunami",
 })
 
 KEEP_ORIGINAL_PLACE_NAME_SOURCES = CHINESE_SOURCE_TYPES | JMA_ORIGINAL_PLACE_SOURCES
