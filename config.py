@@ -674,21 +674,17 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.9.0"  # 当前程序版本
+APP_VERSION = "2.9.1"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.9.0
+CHANGELOG_TEXT = """版本 2.9.1
 
-1、移除 Fan Studio 主数据源及鉴权；
-2、新增 FSSN 数据源，支持地震信息与矩心矩张量解，矩张量解可显示震源机制沙滩球；
-3、WeJet 新增部分数据源解析；
-4、Jian Project 的 JMA 预警补充警报/预报、长周期地震动与警报区域；
-5、P2PQuake 不再解析紧急地震速报，保留地震情报与海啸预报；
-6、删除部分涉嫌侵权的音频"""
+1、新增官方通知中心：每 15 秒拉取 Jian Project 公告，未读弹窗；托盘 / 右键可打开通知列表
+2、与 StarQuake 共用同一批官方通知"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (

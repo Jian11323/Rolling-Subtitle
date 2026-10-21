@@ -1,6 +1,6 @@
 # 地震情报实况栏
 
-当前版本：**v2.9.0**
+当前版本：**v2.9.1**
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,9 +18,9 @@
 
 - 介绍页（安装包 / 便携版）：[sismotide.top/rolling-subtitle](https://sismotide.top/rolling-subtitle)
 - 安装包：https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe
-- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.0.zip
-- GitHub Release：[v2.9.0](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.9.0)
-- Gitee Release：[v2.9.0](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.9.0)
+- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.1.zip
+- GitHub Release：[v2.9.1](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.9.1)
+- Gitee Release：[v2.9.1](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.9.1)
 
 ## 功能
 
@@ -38,7 +38,7 @@
 
 ### 界面与告警反馈
 
-支持字幕样式、配色、背景等界面自定义；提供语音播报（TTS）、NHK 一级新闻铃、JMA 警報音与系统通知等告警反馈方式。
+支持字幕样式、配色、背景等界面自定义；提供语音播报（TTS）、NHK 一级新闻铃、JMA 警報音与系统通知等告警反馈方式。官方通知中心每 15 秒拉取 Jian Project 公告（与 StarQuake 共用），未读弹窗；托盘 / 右键菜单可打开通知列表。
 
 ### 性能配置
 

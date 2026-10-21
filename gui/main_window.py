@@ -61,6 +61,7 @@ from utils.geo_utils import should_accept_message
 from utils.audio_alert import play_jma_eew_alert_sound, play_nhk_news_bell
 from utils.tts_alert import trigger_alert_feedback
 from utils.desktop_notify import set_tray_icon_provider, show_event_notification
+from utils.official_notice import OfficialNoticeController, type_label as notice_type_label
 
 from .scrolling_text import ScrollingText, ScrollingTextCPU
 from .message_manager import MessageQueue, MessageBuffer, MessageItem
@@ -147,6 +148,8 @@ class MainWindow(QMainWindow):
     weather_image_update = pyqtSignal(dict)
     # 数据源回调可能在 WebSocket/HTTP 线程中触发，经信号派发到主线程处理
     message_received_signal = pyqtSignal(str, object)
+    # 官方通知拉取完成（后台线程 → 主线程）
+    official_notice_updated = pyqtSignal()
     
     def __init__(self, config=None):
         """
@@ -205,6 +208,13 @@ class MainWindow(QMainWindow):
         self._tray_icon: Optional[QSystemTrayIcon] = None
         # 本会话已成功解析过的设置页状态键
         self._parsed_status_keys: Set[str] = set()
+        self._notice_popup_open = False
+        self.official_notices = OfficialNoticeController(
+            on_updated=lambda: self.official_notice_updated.emit()
+        )
+        self._notice_poll_timer = QTimer(self)
+        self._notice_poll_timer.setInterval(15_000)
+        self._notice_poll_timer.timeout.connect(self._poll_official_notices)
         
         # 窗口大小变更防抖：拖拽结束后再写入配置
         self._resize_save_timer = QTimer(self)
@@ -217,6 +227,7 @@ class MainWindow(QMainWindow):
         # 连接信号到槽函数
         self.weather_image_update.connect(self._update_settings_weather_image)
         self.message_received_signal.connect(self._process_message_received)
+        self.official_notice_updated.connect(self._on_official_notice_updated)
         
         # 注册配置变更回调（支持热修改）
         self.config.add_config_callback(self._on_config_changed)
@@ -269,6 +280,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(800, self._show_changelog_if_needed)
             self._setup_system_tray()
             set_tray_icon_provider(lambda: self._tray_icon)
+            # 官方通知：启动后稍晚拉取，再每 15 秒轮询
+            QTimer.singleShot(1200, self._poll_official_notices)
+            self._notice_poll_timer.start()
             # 启动峰值过后压缩工作集，降低任务管理器常驻读数
             QTimer.singleShot(5000, self._trim_working_set_idle)
         except Exception as e:
@@ -595,6 +609,8 @@ class MainWindow(QMainWindow):
         # 设置菜单项
         settings_action = self.context_menu.addAction("设置")
         settings_action.triggered.connect(self._open_settings)
+        notice_action = self.context_menu.addAction("通知中心")
+        notice_action.triggered.connect(self._open_notice_center)
 
         # 退出菜单项（显式退出，不受「关闭窗口时最小化到托盘」影响）
         exit_action = self.context_menu.addAction("退出")
@@ -657,6 +673,8 @@ class MainWindow(QMainWindow):
             show_action.triggered.connect(self._show_from_tray)
             settings_action = menu.addAction("设置")
             settings_action.triggered.connect(self._open_settings)
+            notice_action = menu.addAction("通知中心")
+            notice_action.triggered.connect(self._open_notice_center)
             quit_action = menu.addAction("退出")
             quit_action.triggered.connect(self._quit_application)
             tray.setContextMenu(menu)
@@ -1056,6 +1074,195 @@ class MainWindow(QMainWindow):
                     message_type="report",
                 )
             logger.info("已热退出自定义文本模式，恢复地震速报显示")
+    def _poll_official_notices(self):
+        """触发一次官方通知后台拉取。"""
+        try:
+            self.official_notices.start_fetch_async()
+        except Exception as e:
+            logger.debug(f"官方通知轮询启动失败: {e}")
+
+    def _on_official_notice_updated(self):
+        """拉取完成后：弹未读、刷新托盘提示。"""
+        try:
+            n = self.official_notices.unread_count()
+            if self._tray_icon is not None:
+                tip = "地震情报实况栏"
+                if n > 0:
+                    tip = f"地震情报实况栏（{n} 条未读通知）"
+                self._tray_icon.setToolTip(tip)
+            self._show_next_notice_popup()
+        except Exception as e:
+            logger.debug(f"处理官方通知更新失败: {e}")
+
+    def _show_next_notice_popup(self):
+        """弹出下一条未读官方通知（同时只开一个）。"""
+        if self._notice_popup_open:
+            return
+        item = self.official_notices.pop_popup()
+        if not item:
+            return
+        self._notice_popup_open = True
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"{notice_type_label(item.get('type', ''))} · {item.get('title', '')}")
+            dlg.setWindowModality(Qt.WindowModal)
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            apply_light_palette(dlg, "#f5f5f5", "#333333")
+            dlg.setStyleSheet(light_dialog_stylesheet("#f5f5f5") + LIGHT_SCROLLBAR_QSS)
+            layout = QVBoxLayout(dlg)
+            layout.setSpacing(10)
+            layout.setContentsMargins(20, 16, 20, 14)
+            meta = QLabel(str(item.get("created_at") or ""))
+            meta.setStyleSheet("color:#888;font-size:12px;background:#f5f5f5;")
+            layout.addWidget(meta)
+            scroll = QScrollArea()
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setWidgetResizable(True)
+            body = QLabel(str(item.get("content") or ""))
+            body.setWordWrap(True)
+            body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            body.setStyleSheet(
+                "font-size:14px;color:#333;line-height:1.6;padding:4px;background:#f5f5f5;"
+            )
+            scroll.setWidget(body)
+            scroll.setMinimumHeight(120)
+            scroll.setMaximumHeight(260)
+            layout.addWidget(scroll)
+            btn_row = QHBoxLayout()
+            btn_row.addStretch()
+            ok_btn = QPushButton("知道了")
+            ok_btn.setMinimumWidth(96)
+            ok_btn.setMinimumHeight(34)
+            ok_btn.setStyleSheet("""
+                QPushButton { background-color: #4A90E2; color: white; border: none; border-radius: 4px; font-size: 14px; }
+                QPushButton:hover { background-color: #357ABD; }
+            """)
+            ok_btn.clicked.connect(dlg.accept)
+            btn_row.addWidget(ok_btn)
+            btn_row.addStretch()
+            layout.addLayout(btn_row)
+            dlg.setMinimumWidth(360)
+            dlg.adjustSize()
+            dlg.exec_()
+            self.official_notices.mark_read(int(item["id"]))
+        except Exception as e:
+            logger.error(f"显示官方通知弹窗失败: {e}")
+        finally:
+            self._notice_popup_open = False
+            # 连续弹出队列中下一条
+            QTimer.singleShot(80, self._show_next_notice_popup)
+
+    def _open_notice_center(self):
+        """打开通知中心列表对话框。"""
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("通知中心")
+            dlg.setWindowModality(Qt.WindowModal)
+            dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowStaysOnTopHint)
+            apply_light_palette(dlg, "#f5f5f5", "#333333")
+            dlg.setStyleSheet(light_dialog_stylesheet("#f5f5f5") + LIGHT_SCROLLBAR_QSS)
+            layout = QVBoxLayout(dlg)
+            layout.setContentsMargins(16, 14, 16, 12)
+            layout.setSpacing(10)
+            unread = self.official_notices.unread_count()
+            head = QLabel(f"未读 {unread} 条 · 每 15 秒自动同步")
+            head.setStyleSheet("color:#666;font-size:12px;background:#f5f5f5;")
+            layout.addWidget(head)
+            toolbar = QHBoxLayout()
+            mark_all = QPushButton("全部标为已读")
+            mark_all.setEnabled(unread > 0)
+            refresh_btn = QPushButton("立即刷新")
+            toolbar.addWidget(mark_all)
+            toolbar.addWidget(refresh_btn)
+            toolbar.addStretch()
+            layout.addLayout(toolbar)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            host = QWidget()
+            host_layout = QVBoxLayout(host)
+            host_layout.setSpacing(8)
+            host_layout.setContentsMargins(0, 0, 4, 0)
+
+            def rebuild():
+                while host_layout.count():
+                    item = host_layout.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+                cur = self.official_notices.snapshot()
+                if not cur:
+                    empty = QLabel("暂无通知")
+                    empty.setStyleSheet("color:#888;font-size:13px;padding:12px;background:#f5f5f5;")
+                    host_layout.addWidget(empty)
+                for n in cur:
+                    card = QFrame()
+                    is_unread = not self.official_notices.is_read(int(n["id"]))
+                    card.setStyleSheet(
+                        "QFrame{background:%s;border:1px solid #e5e5e5;border-radius:8px;}"
+                        % ("#FFF8E7" if is_unread else "#ffffff")
+                    )
+                    cl = QVBoxLayout(card)
+                    cl.setContentsMargins(12, 10, 12, 10)
+                    row = QHBoxLayout()
+                    tag = QLabel(notice_type_label(n.get("type", "")))
+                    tag.setStyleSheet("color:#D97706;font-size:11px;font-weight:600;")
+                    row.addWidget(tag)
+                    if is_unread:
+                        u = QLabel("未读")
+                        u.setStyleSheet("color:#EF4444;font-size:11px;font-weight:700;")
+                        row.addWidget(u)
+                    row.addStretch()
+                    ts = QLabel(str(n.get("created_at") or ""))
+                    ts.setStyleSheet("color:#999;font-size:11px;")
+                    row.addWidget(ts)
+                    cl.addLayout(row)
+                    title = QLabel(str(n.get("title") or ""))
+                    title.setStyleSheet("font-size:14px;font-weight:700;color:#222;")
+                    title.setWordWrap(True)
+                    cl.addWidget(title)
+                    body = QLabel(str(n.get("content") or ""))
+                    body.setWordWrap(True)
+                    body.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    body.setStyleSheet("font-size:13px;color:#444;line-height:1.5;")
+                    cl.addWidget(body)
+                    if is_unread:
+                        btn = QPushButton("标为已读")
+                        nid = int(n["id"])
+
+                        def _mark(checked=False, _id=nid):
+                            self.official_notices.mark_read(_id)
+                            rebuild()
+                            self._on_official_notice_updated()
+
+                        btn.clicked.connect(_mark)
+                        cl.addWidget(btn, 0, Qt.AlignLeft)
+                    host_layout.addWidget(card)
+                host_layout.addStretch()
+                mark_all.setEnabled(self.official_notices.unread_count() > 0)
+                head.setText(
+                    f"未读 {self.official_notices.unread_count()} 条 · 每 15 秒自动同步"
+                )
+
+            mark_all.clicked.connect(
+                lambda: (
+                    self.official_notices.mark_all_read(),
+                    rebuild(),
+                    self._on_official_notice_updated(),
+                )
+            )
+            refresh_btn.clicked.connect(self._poll_official_notices)
+            rebuild()
+            scroll.setWidget(host)
+            layout.addWidget(scroll)
+            close_btn = QPushButton("关闭")
+            close_btn.clicked.connect(dlg.accept)
+            layout.addWidget(close_btn, 0, Qt.AlignRight)
+            dlg.resize(480, 520)
+            dlg.exec_()
+        except Exception as e:
+            logger.error(f"打开通知中心失败: {e}")
+
     def _show_changelog_if_needed(self):
         """若当前版本未读过更新说明，则弹窗展示一次，关闭后记录已读版本并保存配置"""
         try:
