@@ -1,15 +1,15 @@
 {
-  "latest_version": "2.9.1",
+  "latest_version": "2.9.2",
   "min_supported_version": "2.0.0",
   "channel": "stable",
   "installer": {
     "url": "https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe",
-    "sha256": "3512462e391a96f4b042afaa53f942f9cec9e63b5bccd43f9bd11875ee4d0e46",
+    "sha256": "044755a9dcc8504bbc4ce907f4566ddb71c9107f6b14c120cc7f914f70599efb",
     "user_interface": "progress"
   },
   "zip": {
-    "url": "https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.1.zip",
-    "sha256": "120045d1c8e737a1523bad99b5829b5ab3e443912c57b567a99d797ce18617c1"
+    "url": "https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.2.zip",
+    "sha256": "58af9a987d2a4705c551514ff087fe8256a3d193ad4567b2681d4feb9ea7ccc6"
   },
   "release_notes_url": ""
 }

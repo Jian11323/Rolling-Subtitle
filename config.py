@@ -674,17 +674,18 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.9.1"  # 当前程序版本
+APP_VERSION = "2.9.2"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.9.1
+CHANGELOG_TEXT = """版本 2.9.2
 
-1、新增官方通知中心：每 15 秒拉取 Jian Project 公告，未读弹窗；托盘 / 右键可打开通知列表
-2、与 StarQuake 共用同一批官方通知"""
+1、官方通知时间改为东八区（UTC+8）展示，不再显示 UTC
+2、升级 certifi（≥2026.10.19），修复 emSign/eMudhra 根证书信任问题
+3、沿用 2.9.1：官方通知中心与 StarQuake 共用公告源"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (

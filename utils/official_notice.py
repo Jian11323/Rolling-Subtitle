@@ -13,6 +13,7 @@ import requests
 
 from config import APP_VERSION
 from utils.logger import get_logger
+from utils.timezone_utils import utc_to_display
 
 logger = get_logger()
 
@@ -94,6 +95,8 @@ def fetch_notices(timeout: float = 10.0) -> List[Dict[str, Any]]:
         content = str(item.get("content") or "")
         if nid < 1 or not title:
             continue
+        raw_created = str(item.get("created_at") or "")
+        raw_updated = str(item.get("updated_at") or "")
         out.append(
             {
                 "id": nid,
@@ -101,12 +104,18 @@ def fetch_notices(timeout: float = 10.0) -> List[Dict[str, Any]]:
                 "content": content,
                 "content_format": str(item.get("content_format") or "text"),
                 "type": str(item.get("type") or "NOTICE").upper(),
-                "created_at": str(item.get("created_at") or ""),
-                "updated_at": str(item.get("updated_at") or ""),
+                # 远端为 UTC ISO；展示统一转为配置时区（默认 Asia/Shanghai = UTC+8）
+                "created_at": utc_to_display(raw_created) if raw_created else "",
+                "updated_at": utc_to_display(raw_updated) if raw_updated else "",
+                "created_at_raw": raw_created,
                 "is_active": True,
             }
         )
-    out.sort(key=lambda x: (x.get("created_at") or "", x.get("id") or 0), reverse=True)
+    # 排序用原始 UTC，避免展示串与原始串混排
+    out.sort(
+        key=lambda x: (x.get("created_at_raw") or x.get("created_at") or "", x.get("id") or 0),
+        reverse=True,
+    )
     return out
 
 

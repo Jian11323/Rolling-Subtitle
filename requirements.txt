@@ -6,6 +6,9 @@ websockets>=11.0
 # HTTP请求库
 requests>=2.28.0
 
+# TLS 根证书（2026-10 emSign/eMudhra；须 ≥2026.10.19）
+certifi>=2026.10.19
+
 # 版本号比较（自动更新）
 packaging>=23.0
 
