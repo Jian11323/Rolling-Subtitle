@@ -417,11 +417,93 @@ EQSC_PARSE_FLAG_TO_URL: Dict[str, str] = {
     "eqsc_parse_volcano": EQSC_VOLCANO_HTTP,
 }
 
-# Jian Project（主数据源之一，WebSocket 聚合 api.sismotide.top/all）
-JIAN_PROJECT_DOMAIN = "api.sismotide.top"
-JIAN_PROJECT_ALL_URL = f"wss://{JIAN_PROJECT_DOMAIN}/all"
+# Jian Project（主数据源之一，WebSocket 聚合）
+JIAN_API_HOST_PRIMARY = "api.sismotide.top"
+JIAN_API_HOST_BACKUP = "api.jianproject.cloud"
+JIAN_API_HOSTS = (JIAN_API_HOST_PRIMARY, JIAN_API_HOST_BACKUP)
+JIAN_PROJECT_DOMAIN = JIAN_API_HOST_PRIMARY  # 兼容旧引用
+JIAN_PROJECT_ALL_URL = f"wss://{JIAN_API_HOST_PRIMARY}/all"
+JIAN_ENDPOINT_MODE_AUTO = "auto"
+JIAN_ENDPOINT_MODE_PRIMARY = "primary"
+JIAN_ENDPOINT_MODE_BACKUP = "backup"
 JIAN_LOGICAL_PREFIX = "jian://"
 JIAN_MASTER_KEY = f"{JIAN_LOGICAL_PREFIX}master"
+
+# auto 运行时当前主机（进程内；失败切换会改写）
+_jian_active_host = JIAN_API_HOST_PRIMARY
+_jian_fail_streak = 0
+
+
+def normalize_jian_endpoint_mode(value) -> str:
+    v = str(value or "").strip().lower()
+    if v in ("primary", "main", "master"):
+        return JIAN_ENDPOINT_MODE_PRIMARY
+    if v in ("backup", "bak", "secondary"):
+        return JIAN_ENDPOINT_MODE_BACKUP
+    return JIAN_ENDPOINT_MODE_AUTO
+
+
+def jian_active_host(mode=None) -> str:
+    """按模式返回当前应连的 API 主机。"""
+    global _jian_active_host
+    m = normalize_jian_endpoint_mode(mode)
+    if m == JIAN_ENDPOINT_MODE_PRIMARY:
+        return JIAN_API_HOST_PRIMARY
+    if m == JIAN_ENDPOINT_MODE_BACKUP:
+        return JIAN_API_HOST_BACKUP
+    return _jian_active_host if _jian_active_host in JIAN_API_HOSTS else JIAN_API_HOST_PRIMARY
+
+
+def set_jian_endpoint_mode(mode) -> None:
+    """应用设置中的入口模式（热切换时调用）。"""
+    global _jian_active_host, _jian_fail_streak
+    m = normalize_jian_endpoint_mode(mode)
+    _jian_fail_streak = 0
+    if m == JIAN_ENDPOINT_MODE_PRIMARY:
+        _jian_active_host = JIAN_API_HOST_PRIMARY
+    elif m == JIAN_ENDPOINT_MODE_BACKUP:
+        _jian_active_host = JIAN_API_HOST_BACKUP
+
+
+def note_jian_connect_result(ok: bool, mode=None) -> None:
+    """连接结果反馈；仅 auto 连续失败时主↔备翻转。"""
+    global _jian_active_host, _jian_fail_streak
+    m = normalize_jian_endpoint_mode(mode)
+    if m != JIAN_ENDPOINT_MODE_AUTO:
+        if ok:
+            _jian_fail_streak = 0
+        return
+    if ok:
+        _jian_fail_streak = 0
+        return
+    _jian_fail_streak += 1
+    if _jian_fail_streak < 3:
+        return
+    _jian_fail_streak = 0
+    _jian_active_host = (
+        JIAN_API_HOST_BACKUP
+        if _jian_active_host == JIAN_API_HOST_PRIMARY
+        else JIAN_API_HOST_PRIMARY
+    )
+
+
+def rewrite_jian_api_url(url: str, host: str = None) -> str:
+    """把已知 Jian API 主机改写成目标主机。"""
+    u = (url or "").strip()
+    if not u:
+        return u
+    target = (host or "").strip() or JIAN_API_HOST_PRIMARY
+    low = u.lower()
+    for h in JIAN_API_HOSTS:
+        if h in low:
+            # 仅替换主机名片段
+            idx = low.find(h)
+            return u[:idx] + target + u[idx + len(h) :]
+    return u
+
+
+def jian_project_all_url(mode=None) -> str:
+    return f"wss://{jian_active_host(mode)}/all"
 
 # (短名, 展示用标签) — 对应 message_config.jian_parse_* 解析开关
 # 与 api.sismotide.top 公开 /all 路径对齐（不含测站、cenc-ir；烈度速报仍走 Nowquake）
@@ -573,9 +655,11 @@ _LEGACY_FANSTUDIO_TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
 
 
 def is_jian_project_url(url: str) -> bool:
-    """是否为 Jian Project WebSocket URL。"""
+    """是否为 Jian Project WebSocket URL（主服/备服）。"""
     low = (url or "").lower().rstrip("/")
-    return "sismotide.top" in low and low.startswith(("ws://", "wss://"))
+    if not low.startswith(("ws://", "wss://")):
+        return False
+    return any(h in low for h in JIAN_API_HOSTS)
 
 
 def is_jian_logical_key(key: str) -> bool:
@@ -674,18 +758,17 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.9.2"  # 当前程序版本
+APP_VERSION = "2.9.3"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.9.2
-
-1、官方通知时间改为东八区（UTC+8）展示，不再显示 UTC
-2、升级 certifi（≥2026.10.19），修复 emSign/eMudhra 根证书信任问题
-3、沿用 2.9.1：官方通知中心与 StarQuake 共用公告源"""
+CHANGELOG_TEXT = """版本 2.9.3
+1、Jian Project 支持主服/备服手动选择与自动切换（api.sismotide.top ↔ api.jianproject.cloud）
+2、鉴权仍走 auth.sismotide.top；令牌主备通用
+3、沿用既有官方通知中心与其它数据源能力"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -1235,6 +1318,8 @@ class WebSocketConfig:
     jian_refresh_expire_at: float = 0.0
     # WeJet 主机：api.2v8.cn（国内，默认）/ api.beecld.com（国外）
     whews_host: str = WHEWS_HOST_PRIMARY
+    # Jian API：auto / primary / backup
+    jian_endpoint_mode: str = JIAN_ENDPOINT_MODE_AUTO
 
     def validate(self) -> bool:
         """验证配置有效性"""
@@ -1247,6 +1332,9 @@ class WebSocketConfig:
             assert self.connection_timeout > 0, "连接超时必须大于0"
             assert self.startup_stagger_seconds >= 0, "启动建连间隔不能为负"
             self.whews_host = normalize_whews_host(getattr(self, "whews_host", WHEWS_HOST_PRIMARY))
+            self.jian_endpoint_mode = normalize_jian_endpoint_mode(
+                getattr(self, "jian_endpoint_mode", JIAN_ENDPOINT_MODE_AUTO)
+            )
             return True
         except AssertionError as e:
             logger.error(f"WebSocket配置验证失败: {e}")
@@ -1655,6 +1743,9 @@ class Config:
                 ),
                 'whews_host': normalize_whews_host(
                     getattr(self.ws_config, 'whews_host', WHEWS_HOST_PRIMARY)
+                ),
+                'jian_endpoint_mode': normalize_jian_endpoint_mode(
+                    getattr(self.ws_config, 'jian_endpoint_mode', JIAN_ENDPOINT_MODE_AUTO)
                 ),
             },
             'TRANSLATION_CONFIG': {

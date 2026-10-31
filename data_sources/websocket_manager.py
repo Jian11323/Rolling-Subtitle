@@ -31,6 +31,11 @@ from config import (
     whews_cea_app_configured,
     is_jian_project_url,
     JIAN_PROJECT_ALL_URL,
+    rewrite_jian_api_url,
+    jian_active_host,
+    note_jian_connect_result,
+    set_jian_endpoint_mode,
+    normalize_jian_endpoint_mode,
     WOLFX_ALL_EEW_URL,
     WOLFX_CWA_EEW_URL,
     WOLFX_CENC_EQLIST_URL,
@@ -962,6 +967,12 @@ class WebSocketManager:
                 
                 if is_jian_project_url(url or ""):
                     ws_cfg = Config().ws_config
+                    mode = normalize_jian_endpoint_mode(
+                        getattr(ws_cfg, "jian_endpoint_mode", "auto")
+                    )
+                    set_jian_endpoint_mode(mode)
+                    url = rewrite_jian_api_url(url, jian_active_host(mode))
+                    connect_url = url
                     login_key = (getattr(ws_cfg, "jian_login_token", "") or "").strip()
                     refresh_token = (getattr(ws_cfg, "jian_refresh_token", "") or "").strip()
                     refresh_expire_at = float(
@@ -1027,6 +1038,11 @@ class WebSocketManager:
                     close_timeout=self.close_timeout,
                     open_timeout=self.open_timeout
                 ) as websocket:
+                    if is_jian_project_url(url or ""):
+                        note_jian_connect_result(
+                            True,
+                            getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                        )
                     logger.info(f"[{source_name}] 已连接到 {url}")
                     self.reconnect_attempts[url] = 0
                     self.connections[url] = websocket

@@ -49,6 +49,13 @@ from config import (
     wolfx_master_enabled,
     aux_sources_enabled,
     normalize_whews_host,
+    normalize_jian_endpoint_mode,
+    JIAN_ENDPOINT_MODE_AUTO,
+    JIAN_ENDPOINT_MODE_PRIMARY,
+    JIAN_ENDPOINT_MODE_BACKUP,
+    JIAN_API_HOST_PRIMARY,
+    JIAN_API_HOST_BACKUP,
+    set_jian_endpoint_mode,
     is_whews_url,
     is_whews_dedicated_endpoint,
     WOLFX_ALL_EEW_URL,
@@ -3560,6 +3567,38 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         gj_main_layout.addWidget(self.jian_auth_status_label)
         self._refresh_jian_auth_status_label(force=True)
 
+        ep_label = QLabel("Jian API 入口：")
+        _set_widget_style(ep_label, STYLE_LABEL)
+        gj_main_layout.addWidget(ep_label)
+        ep_row = QHBoxLayout()
+        self.jian_endpoint_group = QButtonGroup(self)
+        self.radio_jian_ep_auto = QRadioButton("自动（失败切换）")
+        self.radio_jian_ep_primary = QRadioButton("主服")
+        self.radio_jian_ep_backup = QRadioButton("备服")
+        self.radio_jian_ep_auto.setToolTip(
+            f"优先 {JIAN_API_HOST_PRIMARY}；连续失败后切到 {JIAN_API_HOST_BACKUP}"
+        )
+        self.radio_jian_ep_primary.setToolTip(JIAN_API_HOST_PRIMARY)
+        self.radio_jian_ep_backup.setToolTip(JIAN_API_HOST_BACKUP)
+        for i, rb in enumerate(
+            (self.radio_jian_ep_auto, self.radio_jian_ep_primary, self.radio_jian_ep_backup)
+        ):
+            _set_widget_style(rb, STYLE_CHECKBOX_SOURCE)
+            self.jian_endpoint_group.addButton(rb, i)
+            ep_row.addWidget(rb)
+            rb.toggled.connect(lambda *_: self._mark_settings_dirty())
+        ep_row.addStretch()
+        gj_main_layout.addLayout(ep_row)
+        cur_ep = normalize_jian_endpoint_mode(
+            getattr(self.config.ws_config, "jian_endpoint_mode", JIAN_ENDPOINT_MODE_AUTO)
+        )
+        if cur_ep == JIAN_ENDPOINT_MODE_PRIMARY:
+            self.radio_jian_ep_primary.setChecked(True)
+        elif cur_ep == JIAN_ENDPOINT_MODE_BACKUP:
+            self.radio_jian_ep_backup.setChecked(True)
+        else:
+            self.radio_jian_ep_auto.setChecked(True)
+
         def _jian_cb(cfg_name: str, text: str) -> QCheckBox:
             cb = QCheckBox(text)
             cb.setChecked(getattr(self.config.message_config, cfg_name, True))
@@ -4137,6 +4176,14 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         scroll_area.setWidget(scrollable_widget)
         self.notebook.addTab(scroll_area, "数据源")
         self._update_parse_status_labels()
+
+    def _current_jian_endpoint_from_ui(self) -> str:
+        """从设置页读取 Jian API 入口模式。"""
+        if hasattr(self, "radio_jian_ep_primary") and self.radio_jian_ep_primary.isChecked():
+            return JIAN_ENDPOINT_MODE_PRIMARY
+        if hasattr(self, "radio_jian_ep_backup") and self.radio_jian_ep_backup.isChecked():
+            return JIAN_ENDPOINT_MODE_BACKUP
+        return JIAN_ENDPOINT_MODE_AUTO
 
     def _current_whews_host_from_ui(self) -> str:
         """从设置页读取 WeJet 主机。"""
@@ -5995,6 +6042,10 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             pass
         if hasattr(self, "_current_whews_host_from_ui"):
             self.config.ws_config.whews_host = self._current_whews_host_from_ui()
+        if hasattr(self, "_current_jian_endpoint_from_ui"):
+            mode = self._current_jian_endpoint_from_ui()
+            self.config.ws_config.jian_endpoint_mode = mode
+            set_jian_endpoint_mode(mode)
         for flag in JIAN_SHORT_TO_PARSE_FLAG.values():
             cb = getattr(self, f"{flag}_cb", None)
             if cb is not None:

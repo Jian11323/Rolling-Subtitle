@@ -1,15 +1,16 @@
 {
-  "latest_version": "2.9.2",
-  "min_supported_version": "2.0.0",
-  "channel": "stable",
+  "latest_version": "2.9.3",
+  "notes": "v2.9.3：Jian 主服/备服手动选择与自动切换。",
   "installer": {
     "url": "https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe",
-    "sha256": "044755a9dcc8504bbc4ce907f4566ddb71c9107f6b14c120cc7f914f70599efb",
+    "sha256": "d89b93f686c95887fc58eb937279753648fd09d95496cfc3b6c633f7c1a72ded",
     "user_interface": "progress"
   },
   "zip": {
-    "url": "https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.2.zip",
-    "sha256": "58af9a987d2a4705c551514ff087fe8256a3d193ad4567b2681d4feb9ea7ccc6"
+    "url": "https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.3.zip",
+    "sha256": "c39279a1aead4c335b8790e019db508c505c3fcba3900ee36a1c7ab88b814c1b"
   },
+  "min_supported_version": "2.0.0",
+  "channel": "stable",
   "release_notes_url": ""
 }
