@@ -33,7 +33,7 @@ JIAN_TSUNAMI_INTERNAL = frozenset(
     {"tsunami", "cwa_tsunami", "jma_tsunami", "usgs_tsunami"}
 )
 JIAN_VOLCANO_INTERNAL = frozenset({"jma_volcano", "usgs_volcano"})
-JIAN_SKIP_INTERNAL = frozenset({"nrcan"})  # 已下架：加拿大自然资源部
+JIAN_SKIP_INTERNAL = frozenset()
 JIAN_UTC9_SOURCES = frozenset(
     {"jma", "jma_eq", "jma_tsunami", "jma_volcano"}
 )  # JMA 系列：ISO/发表时刻常为 JST

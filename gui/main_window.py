@@ -34,14 +34,11 @@ from config import (
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
     NOWQUAKE_CENCINT_WSS_URL,
-    EQSC_HTTP_MASTER,
-    EQSC_HTTP_SOURCE_KEYS,
-    OPENQUAKE_WS_ALL_URL,
-    FSSN_MASTER_KEY,
-    FSSN_ALL_URL,
+    PANCAKES_WS_ALL_URL,
+    EQSC_WS_URL,
     DATA_PROVIDER_WHEWS,
     wolfx_master_enabled,
-    openquake_master_enabled,
+    pancakes_master_enabled,
     active_weather_source,
     weather_provider_for_parsed,
     main_jma_report_enabled,
@@ -82,8 +79,11 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "p2pquake",
     "p2pquake_ws",
     "p2pquake_tsunami",
-    # EQSC 各子源（全局辅助 HTTP）
+    # EQSC 各子源（全局辅助 WebSocket）
     "eqsc_jma_eew",
+    "eqsc_cea",
+    "eqsc_cea_pr",
+    "eqsc_cwa_eew",
     "eqsc_jma_report",
     "eqsc_jma_tsunami",
     "eqsc_cenc",
@@ -94,27 +94,34 @@ _GLOBAL_BUFFER_SOURCES: Set[str] = {
     "eqsc_emsc",
     "eqsc_typhoon",
     "eqsc_volcano",
-    # PancakesAPI（原 OpenQuakeAPI）
-    "openquake",
-    "openquake_gq",
-    "openquake_nmefc",
-    "openquake_nmefc_wave",
-    "openquake_nmefc_surge",
-    "openquake_cma",
+    # PancakesAPI
+    "pancakes",
+    "pancakes_gq",
     "custom",
     "globalquake",
 }
 # 入队时始终保留的溯源字段（避免速报不存 parsed_data 导致切换后无法识别归属）
 _MSG_PROVENANCE_KEYS: Tuple[str, ...] = (
     "source_type",
-    "fssn",
     "whews",
     "eqsc",
     "jian",
-    "openquake",
+    "pancakes",
     "type",
     "event_id",
     "is_tsunami",
+)
+# 跨源融合字段（速报也入库，供 event_id 缺失时按时空接近合并）
+_MSG_FUSION_KEYS: Tuple[str, ...] = (
+    "latitude",
+    "longitude",
+    "magnitude",
+    "shock_time",
+    "place_name",
+    "updates",
+    "info_type",
+    "infoTypeName",
+    "type",
 )
 
 
@@ -2170,7 +2177,7 @@ class MainWindow(QMainWindow):
 
     def _should_process_data_source_message(self, source_name: str, parsed_data: Dict[str, Any]) -> bool:
         """
-        关闭某路数据源后，仍可能从 Fan Studio /all 等聚合通道收到同源 update。
+        关闭某路数据源后，仍可能从聚合通道收到同源 update。
         在此按 enabled_sources / 解析开关丢弃，避免继续格式化并入队滚动。
         """
         es = self.config.enabled_sources
@@ -2180,7 +2187,7 @@ class MainWindow(QMainWindow):
         sn = source_name or ""
         provider = self.config.get_active_data_provider()
 
-        # 气象预警：全局仅允许一个数据源（Jian / WeJet / PancakesAPI）
+        # 气象预警：全局仅允许一个数据源（Jian / WeJet）
         weather_provider = weather_provider_for_parsed(parsed_data)
         if weather_provider:
             active_weather = active_weather_source(mc)
@@ -2213,23 +2220,6 @@ class MainWindow(QMainWindow):
             or source_name == "jian_typhoon"
             or bool(parsed_data.get("jian_typhoon"))
         )
-        # FSSN 辅助源：不受主提供者门控，但受辅助总开关与 FSSN 开关约束
-        is_fssn = (
-            bool(parsed_data.get("fssn"))
-            or st in ("fssn", "fssn-cmt")
-            or sn in ("fssn", "fssn-cmt")
-        )
-        if is_fssn:
-            from config import aux_sources_enabled
-            if not aux_sources_enabled(es):
-                logger.debug("已忽略消息：辅助数据源总开关已关闭（FSSN）")
-                return False
-            if not (es.get(FSSN_MASTER_KEY, False) or es.get(FSSN_ALL_URL, False)):
-                logger.debug("已忽略消息：FSSN 已关闭")
-                return False
-        elif parsed_data.get("fanstudio") and not is_typhoon:
-            logger.debug("已忽略消息：Fan Studio 主源已下线")
-            return False
         if parsed_data.get("whews") and provider != DATA_PROVIDER_WHEWS:
             logger.debug("已忽略消息：当前非 WeJet 提供者")
             return False
@@ -2240,10 +2230,10 @@ class MainWindow(QMainWindow):
                 logger.debug("已忽略消息：CENC 烈度速报（Nowquake）已关闭")
                 return False
 
-        # EQSC HTTP 全局辅助源
+        # EQSC WebSocket 全局辅助源（wss://equake.top/）
         is_eqsc = bool(parsed_data.get("eqsc")) or st.startswith("eqsc_") or sn.startswith("eqsc_")
         if is_eqsc:
-            if not es.get(EQSC_HTTP_MASTER, False):
+            if not es.get(EQSC_WS_URL, False):
                 logger.debug("已忽略消息：EQSC 总开关已关闭")
                 return False
             from adapters.eqsc_adapter import EQSC_PARSE_FLAG
@@ -2251,17 +2241,6 @@ class MainWindow(QMainWindow):
             if flag and not getattr(mc, flag, True):
                 logger.debug(f"已忽略消息：EQSC 子源「{st}」解析已关闭（{flag}=False）")
                 return False
-            # 对应 HTTP URL 未启用则丢弃
-            from config import EQSC_PARSE_FLAG_TO_URL
-            url = EQSC_PARSE_FLAG_TO_URL.get(flag or "")
-            if url and not es.get(url, False):
-                logger.debug(f"已忽略消息：EQSC HTTP 源已关闭: {url}")
-                return False
-
-        # 已下架源
-        if st in ("nrcan",) or (st or "").startswith("nrcan-") or (st or "").startswith("nrcan_"):
-            logger.debug(f"已忽略消息：下架源 {st}")
-            return False
 
         if parsed_data.get("whews"):
             from config import is_whews_all_enabled
@@ -2288,13 +2267,16 @@ class MainWindow(QMainWindow):
 
         # 辅助源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）
         from config import aux_sources_enabled
+        sn_l = sn.strip().lower()
         is_aux_msg = (
             bool(parsed_data.get("eqsc"))
-            or bool(parsed_data.get("openquake"))
+            or bool(parsed_data.get("pancakes"))
             or st.startswith("eqsc_")
             or sn.startswith("eqsc_")
-            or st.startswith("openquake")
-            or sn.startswith("openquake")
+            or st.startswith("pancakes")
+            or sn.startswith("pancakes")
+            or sn_l in ("pancakesapi", "pancakes")
+            or "api.aloys23.link" in sn_l
             or st.startswith("wolfx_")
             or sn.startswith("wolfx_")
             or st in ("p2pquake", "p2pquake_tsunami", "wolfx_cenc", "wolfx_jma_eqlist")
@@ -2357,30 +2339,23 @@ class MainWindow(QMainWindow):
             if is_p2p_tsu and not getattr(mc, "p2pquake_parse_552", True):
                 logger.debug("已忽略消息：P2PQuake 津波予報解析已关闭")
                 return False
-            # code 556 已移除，丢弃残留
-            if source_name == "p2pquake_eew" or st == "p2pquake_eew" or ("api.p2pquake.net" in sn and "556" in sn):
-                logger.debug("已忽略消息：P2PQuake 緊急地震速報（556）已移除")
-                return False
 
         # PancakesAPI 辅助源
-        is_openquake = (
-            bool(parsed_data.get("openquake"))
-            or st.startswith("openquake")
-            or sn.startswith("openquake")
-            or "api.aloys23.link" in sn
+        is_pancakes = (
+            bool(parsed_data.get("pancakes"))
+            or st.startswith("pancakes")
+            or sn.startswith("pancakes")
+            or sn_l in ("pancakesapi", "pancakes")
+            or "api.aloys23.link" in sn_l
         )
-        if is_openquake:
-            if not openquake_master_enabled(es):
+        if is_pancakes:
+            if not pancakes_master_enabled(es):
                 logger.debug("已忽略消息：PancakesAPI 总开关已关闭")
                 return False
-            oq_flag_map = {
-                "openquake_gq": "openquake_parse_gq",
-                "openquake_nmefc": "openquake_parse_nmefc",
-                "openquake_nmefc_wave": "openquake_parse_nmefc_wave",
-                "openquake_nmefc_surge": "openquake_parse_nmefc_surge",
-                "openquake_cma": "openquake_parse_cma",
+            pancakes_flag_map = {
+                "pancakes_gq": "pancakes_parse_gq",
             }
-            flag = oq_flag_map.get(st)
+            flag = pancakes_flag_map.get(st)
             if flag and not getattr(mc, flag, True):
                 logger.debug(f"已忽略消息：PancakesAPI 子源「{st}」解析已关闭（{flag}=False）")
                 return False
@@ -2588,7 +2563,7 @@ class MainWindow(QMainWindow):
                 image_path = parsed_data.get('logo_url')
                 if image_path:
                     logger.info(f"✓ 海啸预警图标路径: {image_path}")
-            # FSSN CMT / CENC 烈度图在 process_messages 中异步生成，避免阻塞主线程
+            # CMT / CENC 烈度图在 process_messages 中异步生成，避免阻塞主线程
 
             # 获取event_id（用于识别同一条地震事件的更新）
             event_id = parsed_data.get('event_id', '')
@@ -2598,7 +2573,7 @@ class MainWindow(QMainWindow):
             image_after_text = bool(
                 message_type == 'report'
                 and (
-                    parsed_data.get('source_type') == 'fssn-cmt'
+                    False
                     or parsed_data.get('source_type') == 'cenc-ir'
                     or parsed_data.get('nodal_plane_1')
                 )
@@ -2628,7 +2603,7 @@ class MainWindow(QMainWindow):
                         pd_store = dict(parsed_data)
                         pd_store.pop("raw_data", None)
                 elif message_type == 'report' and (
-                    parsed_data.get('source_type') == 'fssn-cmt'
+                    False
                     or parsed_data.get('source_type') == 'cenc-ir'
                     or parsed_data.get('nodal_plane_1')
                 ):
@@ -2678,7 +2653,7 @@ class MainWindow(QMainWindow):
             logger.error(f"处理消息时出错: {e}")
 
     def _start_deferred_report_image_render(self, msg_item: MessageItem):
-        """在后台线程生成 FSSN CMT 沙滩球或 CENC 烈度图，完成后更新消息项"""
+        """在后台线程生成 CMT 沙滩球或 CENC 烈度图，完成后更新消息项"""
         if not msg_item.parsed_data:
             return
 
@@ -2688,7 +2663,7 @@ class MainWindow(QMainWindow):
             pd = msg_item.parsed_data
             try:
                 source_type = pd.get('source_type', '')
-                if source_type == 'fssn-cmt' or pd.get('nodal_plane_1'):
+                if pd.get('nodal_plane_1'):
                     from utils.beachball import render_beachball_to_file
                     nodal_plane_1 = pd.get('nodal_plane_1') or (pd.get('raw_data') or {}).get('nodalPlane1', '')
                     if nodal_plane_1:
@@ -2898,7 +2873,7 @@ class MainWindow(QMainWindow):
                                 thread.start()
                             elif msg.message_type == 'report' and not msg.image_path and msg.parsed_data:
                                 st = msg.parsed_data.get('source_type', '')
-                                if st == 'fssn-cmt' or st == 'cenc-ir' or msg.parsed_data.get('nodal_plane_1'):
+                                if st == 'cenc-ir' or msg.parsed_data.get('nodal_plane_1'):
                                     self._start_deferred_report_image_render(msg)
                         
                         # 检查是否正在滚动
@@ -3318,15 +3293,12 @@ class MainWindow(QMainWindow):
 
         try:
             from adapters.eqsc_adapter import EQSC_PARSE_FLAG
-            from config import EQSC_HTTP_MASTER, EQSC_PARSE_FLAG_TO_URL
+            from config import EQSC_WS_URL as _EQSC_WS_URL
 
             eq_flag = EQSC_PARSE_FLAG.get(st)
             if eq_flag:
                 keys.append(eq_flag)
-                http_url = EQSC_PARSE_FLAG_TO_URL.get(eq_flag)
-                if http_url:
-                    keys.append(http_url)
-                keys.append(EQSC_HTTP_MASTER)
+                keys.append(_EQSC_WS_URL)
         except Exception:
             pass
 
@@ -3351,8 +3323,6 @@ class MainWindow(QMainWindow):
                     keys.append(j_flag)
             except Exception:
                 pass
-        elif pd.get("fssn") or fs_st in ("fssn", "fssn-cmt"):
-            keys.append(f"fssn_parse_{fs_st.replace('-', '_')}")
         if st == "jian_typhoon" or sn_low == "jian_typhoon":
             keys.append(JIAN_TYPHOON_HTTP)
 
@@ -3361,19 +3331,15 @@ class MainWindow(QMainWindow):
         if st == "p2pquake_tsunami" or sn_low == "p2pquake_tsunami":
             keys.append("p2pquake_parse_552")
 
-        oq_status_map = {
-            "openquake_gq": "openquake_parse_gq",
-            "openquake_nmefc": "openquake_parse_nmefc",
-            "openquake_nmefc_wave": "openquake_parse_nmefc_wave",
-            "openquake_nmefc_surge": "openquake_parse_nmefc_surge",
-            "openquake_cma": "openquake_parse_cma",
+        pancakes_status_map = {
+            "pancakes_gq": "pancakes_parse_gq",
         }
-        if st in oq_status_map:
-            keys.append(oq_status_map[st])
+        if st in pancakes_status_map:
+            keys.append(pancakes_status_map[st])
         if sn_low in ("custom", "globalquake") or st in ("custom", "globalquake"):
             keys.append("custom")
-        if sn_low == "openquake" or st == "openquake":
-            keys.append(OPENQUAKE_WS_ALL_URL)
+        if sn_low in ("pancakes", "pancakesapi") or st in ("pancakes", "pancakesapi"):
+            keys.append(PANCAKES_WS_ALL_URL)
 
         if sn.startswith(("http://", "https://")):
             keys.append(sn)

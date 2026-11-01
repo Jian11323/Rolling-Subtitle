@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 HTTP轮询管理器
-用于管理HTTP API数据源的定期轮询（台风 / P2P 补拉 / EQSC / 自定义源）
+用于管理HTTP API数据源的定期轮询（台风 / 自定义源等）
 """
 
 import time
@@ -20,9 +20,6 @@ from config import (
     APP_VERSION,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     JIAN_TYPHOON_HTTP_KEYS,
-    EQSC_HTTP_MASTER,
-    EQSC_HTTP_SOURCE_KEYS,
-    EQSC_HTTP_URL_TO_SCOPE,
 )
 from utils.logger import get_logger
 
@@ -39,22 +36,14 @@ def is_http_source_enabled(config: Config, url: str) -> bool:
     lookup_url = url
     if url in P2PQUAKE_HTTP_SOURCE_KEYS or "api.p2pquake.net" in low:
         return False
-    if url == EQSC_HTTP_MASTER or url.rstrip("/") == "https://equake.top":
+    if "equake.top" in low:
+        # 2.10：EQSC 已停 HTTP 轮询
         return False
     custom_url = (config.custom_data_source_url or "").strip()
     if custom_url and url == custom_url:
         return True
     if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(lookup_url):
         return False
-    if url in EQSC_HTTP_SOURCE_KEYS or "equake.top" in low:
-        if not bool(config.enabled_sources.get(EQSC_HTTP_MASTER, False)):
-            return False
-        if not bool(config.enabled_sources.get(lookup_url, False)):
-            return False
-        token = (getattr(config.ws_config, "eqsc_login_token", "") or "").strip()
-        if not token:
-            return False
-        return True
     if not config.enabled_sources.get(lookup_url, False):
         return False
     return True
@@ -188,9 +177,8 @@ class HTTPPollingManager:
             from adapters.p2pquake_adapter import P2PQuakeAdapter
             return P2PQuakeAdapter('p2pquake', url)
         if "equake.top" in url:
-            from adapters.eqsc_adapter import EqscAdapter
-            scope = EQSC_HTTP_URL_TO_SCOPE.get(url, "")
-            return EqscAdapter(scope or "eqsc", url)
+            # 2.10：不再为 EQSC 建立 HTTP 轮询适配器
+            return None
         if 'api.wolfx.jp' in url or 'wolfx' in url.lower():
             return None
         return None
@@ -201,19 +189,6 @@ class HTTPPollingManager:
         if not http_urls:
             logger.info("没有启用的HTTP数据源")
             return
-
-        if any("equake.top" in (u or "").lower() for u in http_urls):
-            login = (getattr(self.config.ws_config, "eqsc_login_token", "") or "").strip()
-            if login:
-                try:
-                    from utils.eqsc_credentials import warm_eqsc_access_token
-                    ok, msg = warm_eqsc_access_token(login)
-                    if ok:
-                        logger.info("EQSC AccessToken 预热成功")
-                    else:
-                        logger.warning(f"EQSC AccessToken 预热失败: {msg}")
-                except Exception as e:
-                    logger.warning(f"EQSC AccessToken 预热异常: {e}")
 
         logger.info(f"开始启动 {len(http_urls)} 个HTTP数据源（错开首包间隔 {HTTP_POLL_STARTUP_STAGGER_SEC}s）...")
         self._start_urls(http_urls, stagger=True)

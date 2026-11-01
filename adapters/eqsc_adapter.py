@@ -3,11 +3,11 @@
 """
 EQSC（equake.top）数据源适配器。
 
-WebSocket：wss://equake.top:50023/
-HTTP：https://equake.top/<scope>.json（需 AccessToken）
+WebSocket：wss://equake.top/（443，实时主通道；2.10 起不再 HTTP 轮询）
+HTTP：仅按需（如烈度详情 intensityReportCENC；ntpCST 仅 HTTP）
 文档：https://equake.top/apidocs
 
-作为全局辅助数据源（非主提供者），可与 Fan Studio / WeJet 及 Jian Project 等并存。
+作为全局辅助数据源（非主提供者），可与 WeJet / Jian Project 等并存；同机构事件走跨源融合。
 """
 
 from __future__ import annotations
@@ -37,6 +37,9 @@ def _stable_event_id(prefix: str, fingerprint: str) -> str:
 # WS/API type -> 本程序 source_type
 EQSC_TYPE_MAP: Dict[str, str] = {
     "jma_eew": "eqsc_jma_eew",
+    "eewCEA": "eqsc_cea",
+    "eewPRCEA": "eqsc_cea_pr",
+    "eewCWA": "eqsc_cwa_eew",
     "jma_report": "eqsc_jma_report",
     "jma_tsunami": "eqsc_jma_tsunami",
     "eqlistCENC": "eqsc_cenc",
@@ -59,12 +62,15 @@ EQSC_TYPE_MAP: Dict[str, str] = {
     "volcanoJMA": "eqsc_volcano",
 }
 
-EQSC_WARNING_TYPES = frozenset({"eqsc_jma_eew"})
+EQSC_WARNING_TYPES = frozenset({"eqsc_jma_eew", "eqsc_cea", "eqsc_cea_pr", "eqsc_cwa_eew"})
 EQSC_DIRECT_SOURCE_TYPES = frozenset(EQSC_TYPE_MAP.values())
 
 # source_type -> MessageConfig 解析开关
 EQSC_PARSE_FLAG: Dict[str, str] = {
     "eqsc_jma_eew": "eqsc_parse_jma_eew",
+    "eqsc_cea": "eqsc_parse_cea",
+    "eqsc_cea_pr": "eqsc_parse_cea_pr",
+    "eqsc_cwa_eew": "eqsc_parse_cwa_eew",
     "eqsc_jma_report": "eqsc_parse_jma_report",
     "eqsc_jma_tsunami": "eqsc_parse_jma_tsunami",
     "eqsc_cenc": "eqsc_parse_cenc",
@@ -79,6 +85,9 @@ EQSC_PARSE_FLAG: Dict[str, str] = {
 
 ORG_BY_SOURCE: Dict[str, str] = {
     "eqsc_jma_eew": "日本气象厅（EQSC）",
+    "eqsc_cea": "中国地震预警网（EQSC）",
+    "eqsc_cea_pr": "中国地震预警省网（EQSC）",
+    "eqsc_cwa_eew": "台湾中央气象署预警（EQSC）",
     "eqsc_jma_report": "日本气象厅地震情报（EQSC）",
     "eqsc_jma_tsunami": "日本气象厅海啸情报（EQSC）",
     "eqsc_cenc": "中国地震台网中心（EQSC）",
@@ -197,7 +206,7 @@ def _extract_warn_areas(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
             "chiiki": item.get("Chiiki") or item.get("chiiki"),
             "shindo1": item.get("Shindo1") or item.get("shindo1"),
             "shindo2": item.get("Shindo2") or item.get("shindo2"),
-            "time": item.get("Time") or item.get("time"),
+            "time": item.get("ArrivalTime") or item.get("Time") or item.get("time"),
             "arrive": item.get("Arrive") if "Arrive" in item else item.get("arrive"),
         }
         wt = item.get("Type") if "Type" in item else item.get("type")
@@ -215,7 +224,7 @@ def _extract_warn_areas(data: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
 
 
 class EqscAdapter(BaseAdapter):
-    """EQSC HTTP（主）/ WebSocket（保留解析）统一适配器。"""
+    """EQSC WebSocket（主）/ HTTP 按需拉取统一适配器。"""
 
     def __init__(
         self,
@@ -295,6 +304,22 @@ class EqscAdapter(BaseAdapter):
                 else:
                     payload = data_field
             scope = str(scope or raw_data.get("scope") or "").strip()
+        else:
+            # 标准推送 {"type":"eewCEA","data":{...}}：解包 data，避免把信封当业务体
+            scope_candidate = msg_type if msg_type in EQSC_TYPE_MAP else re.sub(r"\d+$", "", msg_type)
+            if scope_candidate in EQSC_TYPE_MAP:
+                scope = msg_type if msg_type in EQSC_TYPE_MAP else scope_candidate
+                data_field = raw_data.get("data")
+                if isinstance(data_field, dict):
+                    payload = data_field
+                elif data_field is None:
+                    payload = {
+                        k: v
+                        for k, v in raw_data.items()
+                        if k not in ("type", "md5", "timestamp", "time")
+                    }
+                else:
+                    return None
 
         if not scope or scope not in EQSC_TYPE_MAP:
             scope = self._infer_scope(payload if isinstance(payload, dict) else raw_data)
@@ -323,6 +348,8 @@ class EqscAdapter(BaseAdapter):
 
         if source_type == "eqsc_jma_eew":
             return self._parse_jma_eew(payload, source_type)
+        if source_type in ("eqsc_cea", "eqsc_cea_pr", "eqsc_cwa_eew"):
+            return self._parse_latest_eew(payload, source_type)
         if source_type == "eqsc_jma_report":
             return self._parse_jma_report(payload, source_type)
         if source_type == "eqsc_jma_tsunami":
@@ -407,6 +434,16 @@ class EqscAdapter(BaseAdapter):
             return ""
         if "Magunitude" in data or ("MaxIntensity" in data and "EventID" in data and "Hypocenter" in data):
             return "jma_eew"
+        # CEA / CEA-PR / CWA 最新一条预警（无列表 No1 结构）
+        if "thirdID" in data and "hypoCenterName" in data and "reportNum" in data:
+            return "eewCEA"
+        if "epiIntensity" in data and "province" in data and "hypoCenterName" in data:
+            return "eewPRCEA"
+        if ("HypoCenter" in data or "Hypocenter" in data) and "ReportNum" in data and (
+            "Magunitude" in data or "Magnitude" in data
+        ):
+            if "WarnArea" not in data and "EventID" not in data:
+                return "eewCWA"
         if "Control" in data and "Head" in data:
             return "jma_report"
         if isinstance(data.get("areas"), list) and data.get("areas"):
@@ -440,7 +477,6 @@ class EqscAdapter(BaseAdapter):
         result: Dict[str, Any] = {
             "source_type": source_type,
             "organization": ORG_BY_SOURCE.get(source_type, "EQSC"),
-            "fanstudio": False,
             "whews": False,
             "eqsc": True,
         }
@@ -537,6 +573,104 @@ class EqscAdapter(BaseAdapter):
                 "depth": acc.get("Depth") or acc.get("depth"),
                 "magnitude": acc.get("Magnitude") or acc.get("magnitude"),
             }
+        return result
+
+    def _parse_latest_eew(self, data: Dict[str, Any], source_type: str) -> Optional[Dict[str, Any]]:
+        """解析 EQSC 最新一条预警：CEA / CEA-PR / CWA EEW。"""
+        if source_type == "eqsc_cwa_eew":
+            place_name = str(
+                data.get("HypoCenter") or data.get("Hypocenter") or data.get("hypoCenterName") or ""
+            ).strip()
+            mag_raw = data.get("Magnitude")
+            if mag_raw is None:
+                mag_raw = data.get("Magunitude")
+            mag = _to_float(mag_raw, 0.0)
+            lat = _to_float(data.get("Latitude") or data.get("latitude"), 0.0)
+            lon = _to_float(data.get("Longitude") or data.get("longitude"), 0.0)
+            depth = _optional_depth(data.get("Depth"), data.get("depth"))
+            shock_raw = str(data.get("OriginTime") or data.get("shockTime") or "").strip()
+            shock_time = timezone_utils.cst_to_display(shock_raw) if shock_raw else ""
+            event_id = str(data.get("ID") or data.get("eventID") or data.get("id") or "").strip()
+            updates_i = None
+            for key in ("ReportNum", "reportNum", "Serial", "updates"):
+                if data.get(key) is not None:
+                    try:
+                        u = int(data.get(key))
+                        if u > 0:
+                            updates_i = u
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            epi = data.get("MaxIntensity")
+            if epi is None:
+                epi = data.get("maxIntensity") or data.get("epiIntensity")
+            cancel = _to_bool(data.get("isCancel"))
+        else:
+            place_name = str(data.get("hypoCenterName") or data.get("HypoCenter") or "").strip()
+            mag = _to_float(data.get("magnitude"), 0.0)
+            lat = _to_float(data.get("latitude"), 0.0)
+            lon = _to_float(data.get("longitude"), 0.0)
+            depth = _optional_depth(data.get("depth"))
+            shock_raw = str(data.get("shockTime") or data.get("OriginTime") or "").strip()
+            shock_time = timezone_utils.cst_to_display(shock_raw) if shock_raw else ""
+            # 文档：CEA 用 thirdID、CEA-PR 用 eventID 做跨源查重
+            if source_type == "eqsc_cea":
+                event_id = str(
+                    data.get("thirdID") or data.get("eventID") or data.get("id") or ""
+                ).strip()
+            else:
+                event_id = str(
+                    data.get("eventID") or data.get("thirdID") or data.get("id") or ""
+                ).strip()
+            updates_i = None
+            for key in ("reportNum", "ReportNum", "Serial", "updates"):
+                if data.get(key) is not None:
+                    try:
+                        u = int(data.get(key))
+                        if u > 0:
+                            updates_i = u
+                            break
+                    except (TypeError, ValueError):
+                        pass
+            epi = data.get("epiIntensity")
+            if epi is None:
+                epi = data.get("MaxIntensity") or data.get("maxIntensity")
+            cancel = _to_bool(data.get("isCancel"))
+
+        if not event_id and shock_time:
+            event_id = f"{source_type}_{shock_time}"
+
+        dedup = (
+            f"{event_id}|{updates_i}|{mag}|{epi}|"
+            f"{data.get('reportTime') or data.get('ReportTime')}"
+        )
+        if self._last_event_key.get(source_type) == dedup:
+            return None
+        self._last_event_key[source_type] = dedup
+
+        result = self._base_result(
+            source_type,
+            type="warning",
+            magnitude=mag,
+            latitude=lat,
+            longitude=lon,
+            place_name=place_name or "未知地区",
+            shock_time=shock_time,
+            event_id=event_id,
+            cancel=cancel,
+            raw_data=data,
+        )
+        if depth is not None:
+            result["depth"] = depth
+        if updates_i is not None:
+            result["updates"] = updates_i
+        if epi is not None and str(epi).strip() != "":
+            result["epiIntensity"] = epi
+            result["intensity"] = epi
+        if source_type == "eqsc_cea_pr":
+            province = str(data.get("province") or "").strip()
+            if province:
+                result["province"] = province
         return result
 
     def _parse_jma_report(self, data: Dict[str, Any], source_type: str) -> Optional[Dict[str, Any]]:
@@ -708,11 +842,9 @@ class EqscAdapter(BaseAdapter):
 
         shock_raw = str(item.get("shockTime") or item.get("time") or "").strip()
         if shock_raw:
-            if source_type in ("eqsc_cwa", "eqsc_hko", "eqsc_cenc"):
+            if source_type in ("eqsc_cwa", "eqsc_hko", "eqsc_cenc", "eqsc_usgs", "eqsc_emsc"):
+                # 文档：shockTime 均为 UTC+8
                 shock_time = timezone_utils.cst_to_display(shock_raw)
-            elif source_type in ("eqsc_usgs", "eqsc_emsc"):
-                # USGS / EMSC 时间按 UTC（ISO/Z 或无时区朴素串）
-                shock_time = timezone_utils.utc_to_display(shock_raw)
             else:
                 shock_time = self.format_time(shock_raw.replace("/", "-"))
         else:

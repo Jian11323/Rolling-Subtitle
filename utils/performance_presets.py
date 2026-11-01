@@ -17,8 +17,6 @@ from config import (
     JIAN_MASTER_KEY,
     WOLFX_MASTER_KEY,
     AUX_SOURCES_MASTER_KEY,
-    FSSN_MASTER_KEY,
-    FSSN_ALL_URL,
     P2PQUAKE_HTTP_SOURCE_KEYS,
     P2PQUAKE_WSS_URL,
     JIAN_TYPHOON_HTTP,
@@ -27,6 +25,8 @@ from config import (
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
     NOWQUAKE_CENCINT_WSS_URL,
+    EQSC_WS_URL,
+    PANCAKES_WS_ALL_URL,
 )
 
 PERFORMANCE_MODE_LOW = "low"
@@ -156,8 +156,8 @@ def _base_enabled_sources() -> Dict[str, bool]:
     sources[JIAN_MASTER_KEY] = False
     sources[WOLFX_MASTER_KEY] = False
     sources[AUX_SOURCES_MASTER_KEY] = True
-    sources[FSSN_MASTER_KEY] = True
-    sources[FSSN_ALL_URL] = True
+    sources[EQSC_WS_URL] = False  # 需登录密钥，预设默认关
+    sources[PANCAKES_WS_ALL_URL] = False
     return sources
 
 
@@ -177,8 +177,8 @@ def _low_enabled_sources() -> Dict[str, bool]:
     sources[JIAN_MASTER_KEY] = False
     sources[WOLFX_MASTER_KEY] = False
     sources[AUX_SOURCES_MASTER_KEY] = False
-    sources[FSSN_MASTER_KEY] = False
-    sources[FSSN_ALL_URL] = False
+    sources[EQSC_WS_URL] = False
+    sources[PANCAKES_WS_ALL_URL] = False
     return sources
 
 
@@ -200,8 +200,8 @@ def _high_enabled_sources() -> Dict[str, bool]:
     sources[WOLFX_MASTER_KEY] = True
     sources[WOLFX_ALL_EEW_URL] = True
     sources[AUX_SOURCES_MASTER_KEY] = True
-    sources[FSSN_MASTER_KEY] = True
-    sources[FSSN_ALL_URL] = True
+    sources[EQSC_WS_URL] = False
+    sources[PANCAKES_WS_ALL_URL] = False
     return sources
 
 
@@ -353,9 +353,8 @@ def _message_fields_high() -> Dict[str, Any]:
         "whews_parse_sgc": True,
         "whews_parse_ga": True,
         "whews_parse_cenais": True,
-        # 气象三选一：默认主源 Jian，高配保留 jian_parse_weather，避免与 Fan Studio 气象冲突
+        # 气象互斥：默认主源 Jian，高配保留 jian_parse_weather
         "whews_parse_weatheralarm": False,
-        "openquake_parse_cma": False,
         "whews_parse_gsras": True,
         "whews_parse_bgs": True,
         "whews_parse_ipma": True,

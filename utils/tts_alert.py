@@ -63,6 +63,9 @@ _SOURCE_NAME_MAP = {
     "wolfx_fj_eew": "福建省地震局",
     "wolfx_cenc_eew": "中国地震台网",
     "eqsc_jma_eew": "日本气象厅",
+    "eqsc_cea": "中国地震预警网",
+    "eqsc_cea_pr": "省级地震局",
+    "eqsc_cwa_eew": "台湾中央气象局",
 }
 
 
@@ -175,12 +178,6 @@ def _report_org_for_tts(data: Dict[str, Any]) -> str:
     organization = (data.get("organization") or "").strip()
     info_type = (data.get("info_type") or "").strip()
     source_type = (data.get("source_type") or "").strip()
-
-    if organization in ("FSSN", "FAN Studio Seismic Network") or source_type in (
-        "fssn",
-        "fssn-cmt",
-    ):
-        return "FSSN" if source_type != "fssn-cmt" else "FSSN 矩心矩张量解"
     if organization == "香港天文台":
         return "香港天文台"
     if organization == "美国地质调查局":

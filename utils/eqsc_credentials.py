@@ -21,7 +21,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 EQSC_BASE_URL = "https://equake.top"
-EQSC_WS_URL = "wss://equake.top:50023/"
+EQSC_WS_URL = "wss://equake.top/"
 EQSC_CREATE_REFRESH_TOKEN_URL = f"{EQSC_BASE_URL}/createRefreshToken/v1"
 EQSC_CREATE_ACCESS_TOKEN_URL = f"{EQSC_BASE_URL}/createAccessToken/v1"
 
@@ -314,6 +314,9 @@ def test_eqsc_auth(login_key: str, timeout: float = 15.0) -> Tuple[bool, str]:
 # WebSocket/HTTP scope 名（与 API URL 主干一致）
 EQSC_ALL_SCOPES: Tuple[str, ...] = (
     "jma_eew",
+    "eewCEA",
+    "eewPRCEA",
+    "eewCWA",
     "jma_report",
     "jma_tsunami",
     "eqlistCENC",
@@ -330,6 +333,9 @@ EQSC_ALL_SCOPES: Tuple[str, ...] = (
 # scope -> MessageConfig 解析开关字段
 EQSC_SCOPE_FLAG_FIELD: Dict[str, str] = {
     "jma_eew": "eqsc_parse_jma_eew",
+    "eewCEA": "eqsc_parse_cea",
+    "eewPRCEA": "eqsc_parse_cea_pr",
+    "eewCWA": "eqsc_parse_cwa_eew",
     "jma_report": "eqsc_parse_jma_report",
     "jma_tsunami": "eqsc_parse_jma_tsunami",
     "eqlistCENC": "eqsc_parse_cenc",

@@ -209,7 +209,7 @@ def now_display_str() -> str:
 
 def ms_timestamp_utc_to_display(ms: Union[int, float]) -> str:
     """
-    Fan Studio 等数据源常用的 Unix 毫秒时间戳（按 UTC）→ 当前显示时区 YYYY-MM-DD HH:MM:SS。
+    Unix 毫秒时间戳（按 UTC）→ 当前显示时区 YYYY-MM-DD HH:MM:SS。
     """
     try:
         t = float(ms) / 1000.0

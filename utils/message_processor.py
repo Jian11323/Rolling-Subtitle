@@ -260,13 +260,6 @@ class MessageProcessor:
                 if parsed_data.get('source_type') == 'eqsc_volcano':
                     place = parsed_data.get('place_name') or '火山情报'
                     return f"【EQSC JMA 火山】{place}"
-                st_cmt = str(parsed_data.get('source_type') or '')
-                if (
-                    st_cmt == 'fssn-cmt'
-                    or st_cmt.startswith('cmt_')
-                    or parsed_data.get('is_cmt')
-                ):
-                    return self._format_fssn_cmt_message(parsed_data)
                 if parsed_data.get('source_type') in ('cenc-ir', 'eqsc_cenc_ir'):
                     return self._format_cenc_ir_message(parsed_data)
                 return self._format_report_message(parsed_data)
@@ -534,7 +527,15 @@ class MessageProcessor:
                     message_parts.append(f"【EQSC 緊急地震速報 {warn_area_type}】")
                 else:
                     message_parts.append("【EQSC 緊急地震速報】")
-            elif source_type in ('openquake_gq', 'globalquake'):
+            elif source_type == 'eqsc_cea':
+                message_parts.append("【EQSC 中国地震预警网】")
+            elif source_type == 'eqsc_cea_pr' and data.get('province'):
+                message_parts.append(f"【EQSC {data.get('province')}地震局地震预警】")
+            elif source_type == 'eqsc_cea_pr':
+                message_parts.append("【EQSC 中国地震预警省网】")
+            elif source_type == 'eqsc_cwa_eew':
+                message_parts.append("【EQSC 台湾中央气象署预警】")
+            elif source_type in ('pancakes_gq', 'globalquake'):
                 message_parts.append("【GlobalQuake地震预警】")
             elif source_type == 'wolfx_sc_eew':
                 message_parts.append("【Wolfx四川省地震局】")
@@ -694,47 +695,6 @@ class MessageProcessor:
         err_match = re.search(r'[+＋]\s*/\s*-\s*([\d.]+)', s)
         err_km = float(err_match.group(1)) if err_match else None
         return (main_km, err_km)
-
-    def _format_fssn_cmt_message(self, data: Dict[str, Any]) -> str:
-        """
-        格式化 FSSN 矩心矩张量解 (CMT) 消息。
-        """
-        raw = data.get('raw_data') or {}
-        shock_time = data.get('shock_time', '')
-        time_display = self._shock_time_to_cmt_display(shock_time) if shock_time else timezone_utils.now_display_str()
-        place_name = data.get('place_name', '') or raw.get('placeName', '')
-        all_mag = raw.get('allMagnitudes') or {}
-        mww = self._safe_float(all_mag.get('Mww') or all_mag.get('M') or data.get('magnitude', 0), 0)
-        depth_str = raw.get('depth', '')
-        depth_km, depth_err = self._parse_depth_with_error(depth_str)
-        centroid_str = raw.get('centroidDepth', '')
-        try:
-            centroid_km = int(round(float(centroid_str))) if centroid_str else int(round(depth_km))
-        except (ValueError, TypeError):
-            centroid_km = int(round(depth_km))
-        np1 = data.get('nodal_plane_1') or raw.get('nodalPlane1', '')
-        np2 = data.get('nodal_plane_2') or raw.get('nodalPlane2', '')
-        org = (data.get("organization") or "").strip() or "矩心矩张量解"
-        parts = [f"【{org}】", time_display]
-        if place_name:
-            parts.append(f"，{place_name}")
-        parts.append(f"发生Mw {mww:.1f}级地震")
-        if depth_err is not None:
-            parts.append(f"，震源深度{int(round(depth_km))} km（±{int(round(depth_err))} km）")
-        else:
-            parts.append(f"，震源深度{int(round(depth_km))} km")
-        parts.append(f"，矩心深度{centroid_km} km")
-        parts.append("，震源机制解：")
-        if np1 and '/' in np1:
-            p1 = np1.strip().split('/')
-            if len(p1) == 3:
-                parts.append(f"节面1走向{p1[0]}°、倾角{p1[1]}°、滑动角{p1[2]}°")
-        if np2 and '/' in np2:
-            p2 = np2.strip().split('/')
-            if len(p2) == 3:
-                parts.append("，节面2走向{}°、倾角{}°、滑动角{}°".format(p2[0], p2[1], p2[2]))
-        parts.append("。")
-        return "".join(parts)
 
     def _format_cenc_ir_message(self, data: Dict[str, Any]) -> str:
         """
@@ -924,7 +884,7 @@ class MessageProcessor:
         
         # 构建消息
         # 格式：【机构名称地震信息】时间，地点发生X.X级地震，震源深度X公里
-        # 特殊处理：CENC 等（FSSN/HKO/USGS 不再根据 infoTypeName、verify 区分标头）
+        # 特殊处理：CENC 等（HKO/USGS 不再根据 infoTypeName、verify 区分标头）
         message_parts = []
         
         # 机构名称
@@ -958,14 +918,8 @@ class MessageProcessor:
             message_parts.append("【EQSC 美国地质调查局地震信息】")
         elif source_type == "eqsc_emsc":
             message_parts.append("【EQSC 欧洲地中海地震中心地震信息】")
-        elif source_type == "openquake_nmefc":
-            message_parts.append("【国家海洋环境预报中心海啸预警】")
-        elif source_type == "fssn":
-            message_parts.append("【FSSN地震信息】")
         elif organization:
-            if organization in ("FSSN", "FAN Studio Seismic Network"):
-                message_parts.append("【FSSN地震信息】")
-            elif organization == "香港天文台":
+            if organization == "香港天文台":
                 message_parts.append("【香港天文台地震信息】")
             elif organization == "美国地质调查局":
                 message_parts.append("【美国地质调查局地震信息】")
@@ -993,7 +947,6 @@ class MessageProcessor:
                     "ntwc", "ptwc", "incois", "jma_tsunami", "tsunami",
                     "cat_tsunami", "cwa_tsunami", "usgs_tsunami",
                     "海啸信息", "p2pquake_tsunami", "eqsc_jma_tsunami",
-                    "openquake_nmefc",
                 )
                 or "地震信息" in organization
                 or "地震情报" in organization
@@ -1227,7 +1180,7 @@ class MessageProcessor:
     def _match_weather_image(self, weather_data: Dict[str, Any]) -> Optional[str]:
         """
         气象预警图标：优先使用数据源下发的 img（如 NMC CDN）；
-        否则回退 Fan Studio 在线接口（需 type 编码，如 11B20_yellow / p0005003）。
+        否则按 type 编码回退 NMC / 中央台图床（如 p0005003）。
         """
         try:
             
@@ -1286,12 +1239,6 @@ class MessageProcessor:
 
         if data.get("whews") or data.get("jian"):
             prefix = "【中国气象局气象预警】"
-        elif source_type == "openquake_cma":
-            prefix = "【中国气象局气象预警】"
-        elif source_type == "openquake_nmefc_wave":
-            prefix = "【国家海洋环境预报中心海浪警报】"
-        elif source_type == "openquake_nmefc_surge":
-            prefix = "【国家海洋环境预报中心风暴潮警报】"
         else:
             prefix = "【气象预警】"
         parts = [prefix, title]

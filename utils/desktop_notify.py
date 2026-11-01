@@ -17,7 +17,7 @@ from utils.logger import get_logger
 logger = get_logger()
 
 # 解包桌面程序在 Win10/11 上显示系统 Toast 时建议设置显式 AUMID
-APP_USER_MODEL_ID = "FanStudio.RollingSubtitle"
+APP_USER_MODEL_ID = "JianProject.RollingSubtitle"
 _TOAST_APP_NAME = "地震情报实况栏"
 
 # 由主窗口注册：返回已 show 的 QSystemTrayIcon，或 None

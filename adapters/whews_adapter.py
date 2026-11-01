@@ -29,7 +29,7 @@ from utils import timezone_utils
 logger = get_logger()
 
 # WeJet CEA 已恢复：需 WAuth + App 鉴权；不再整源丢弃
-WHEWS_SKIP_SOURCES = frozenset({"nrcan"})  # 已下架：加拿大自然资源部
+WHEWS_SKIP_SOURCES = frozenset()
 
 
 

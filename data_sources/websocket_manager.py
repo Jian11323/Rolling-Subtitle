@@ -43,12 +43,9 @@ from config import (
     WOLFX_CENC_EQLIST_URL,
     WOLFX_JMA_EQLIST_URL,
     NOWQUAKE_CENCINT_WSS_URL,
-    FSSN_ALL_URL,
-    FSSN_FSSN_URL,
-    FSSN_CMT_URL,
     EQSC_WS_URL,
     P2PQUAKE_HISTORY_AGGREGATE_URL,
-    OPENQUAKE_WS_ALL_URL,
+    PANCAKES_WS_ALL_URL,
     is_custom_data_source_url,
     is_ws_url_enabled,
 )
@@ -61,14 +58,13 @@ logger = get_logger()
 P2PQUAKE_HISTORY_URL = P2PQUAKE_HISTORY_AGGREGATE_URL
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake WebSocket 地址
 HEARTBEAT_TIMEOUT_SECONDS = {  # 各源心跳超时阈值
-    "fssn": 60,
     "whews": 90,
     "jian": 90,
     "wolfx": 90,
     "nowquake": 90,  # 服务端约 60s 发一次 heartbeat
     "p2pquake": 120,
     "eqsc": 45,  # 服务端心跳，客户端需原样回传
-    "openquake": 120,
+    "pancakes": 120,
 }
 
 
@@ -240,8 +236,6 @@ class WebSocketManager:
         self._reload_lock: Optional[asyncio.Lock] = None  # 串行化热重载，避免并发停启打架
         self._running = True  # 全局运行标志
         self._connect_error_log: Dict[str, tuple] = {}  # 连接错误降噪记录
-        # Fan Studio /all：已发鉴权、等待 auth_success 期间，跳过鉴权前的精简 initial_all
-        # Fan Studio /all 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
         # EQSC 鉴权结果：url -> ("none"|"pending"|"ok"|"failed", message)
         self._eqsc_auth_status: Dict[str, Tuple[str, str]] = {}
         # WeJet CEA App 鉴权：url -> 状态；accessToken；续票任务
@@ -260,15 +254,11 @@ class WebSocketManager:
     def _get_source_kind(self, url: str) -> str:
         """按 URL 识别数据源类型（用于心跳策略）"""
         normalized = (url or "").strip().lower().rstrip("/")
-        if "fssn-api.fanstudio.tech" in normalized:
-            return "fssn"
-        if "fanstudio.tech" in normalized:
-            return "other"
-        if is_whews_url(normalized):
+        if is_whews_url(url or ""):
             return "whews"
-        if is_jian_project_url(normalized):
+        if is_jian_project_url(url or "") or "sismotide.top" in normalized:
             return "jian"
-        if normalized in WOLFX_URLS:
+        if "wolfx.jp" in normalized:
             return "wolfx"
         if normalized == NOWQUAKE_CENCINT_WSS_URL:
             return "nowquake"
@@ -276,8 +266,8 @@ class WebSocketManager:
             return "p2pquake"
         if "equake.top" in normalized:
             return "eqsc"
-        if normalized == OPENQUAKE_WS_ALL_URL or "api.aloys23.link" in normalized:
-            return "openquake"
+        if normalized == PANCAKES_WS_ALL_URL or "api.aloys23.link" in normalized:
+            return "pancakes"
         return "other"
 
     def _ensure_health_entry(self, url: str, source_name: str = "") -> Dict[str, Any]:
@@ -348,7 +338,7 @@ class WebSocketManager:
         entry["timeout_count"] = int(entry.get("timeout_count", 0) or 0) + 1
         source_kind = entry.get("source_kind", "other")
         # EQSC 需回显服务端 heartbeat，不发客户端 ping
-        if source_kind not in ("fssn", "jian", "wolfx", "whews"):
+        if source_kind not in ("jian", "wolfx", "whews"):
             return
         # 防止超时后每个循环都发送 ping：最短间隔取阈值一半，至少 10 秒
         min_retry_gap = max(10, timeout_seconds // 2)
@@ -397,10 +387,12 @@ class WebSocketManager:
             adapter = NowquakeCencintAdapter('cenc-ir', url)
             adapter._manager_source_type = 'cenc-ir'
             return adapter
-        # EQSC：官方称 WS 不稳定，公开版仅走 HTTP，拒绝建连
-        if (url or "").strip().lower().rstrip("/") == EQSC_WS_URL.strip().lower().rstrip("/"):
-            logger.warning(f"已拒绝连接 EQSC WebSocket（请改用 HTTP 轮询）: {url}")
-            return None
+        # EQSC：wss://equake.top/（443）
+        if self._is_eqsc_url(url or ""):
+            from adapters.eqsc_adapter import EqscAdapter
+            adapter = EqscAdapter("eqsc", EQSC_WS_URL)
+            adapter._manager_source_type = "eqsc"
+            return adapter
         # 无界科技（WHEWS 主站 / 备用）
         if is_whews_url(url or ""):
             from adapters.whews_adapter import WhewsAdapter
@@ -414,16 +406,6 @@ class WebSocketManager:
             adapter = JianProjectAdapter("jian", url)
             adapter._manager_source_type = "jian_all"
             return adapter
-        # FSSN
-        if "fssn-api.fanstudio.tech" in (url or "").lower():
-            from adapters.fssn_adapter import FssnAdapter
-            adapter = FssnAdapter("fssn", url)
-            adapter._manager_source_type = "fssn"
-            return adapter
-        # 旧 Fan Studio 聚合 API 已移除
-        if "fanstudio.tech" in (url or "").lower():
-            logger.warning(f"已拒绝连接已下线的 Fan Studio 主源: {url}")
-            return None
         # P2PQuake WebSocket（解析 551 / 552）
         if 'api.p2pquake.net' in url and (url.startswith('ws://') or url.startswith('wss://')):
             from adapters.p2pquake_ws_adapter import P2PQuakeWebSocketAdapter
@@ -432,9 +414,9 @@ class WebSocketManager:
             return adapter
         # PancakesAPI WebSocket（/api/v1/alert/ws/all 聚合）
         if 'api.aloys23.link' in url and (url.startswith('ws://') or url.startswith('wss://')):
-            from adapters.openquake_api_adapter import OpenQuakeApiAdapter
-            adapter = OpenQuakeApiAdapter('openquake', url)
-            adapter._manager_source_type = 'openquake'
+            from adapters.pancakes_api_adapter import PancakesApiAdapter
+            adapter = PancakesApiAdapter('PancakesAPI', url)
+            adapter._manager_source_type = 'pancakes'
             return adapter
         # 自定义数据源（WS/WSS）
         config = Config()
@@ -445,7 +427,6 @@ class WebSocketManager:
             adapter = CustomAdapter("custom", url)
             adapter._manager_source_type = "custom"
             return adapter
-        # 未知 URL：不回落到 Fan Studio，避免非 Fan 通道被错误解析
         logger.warning(f"未识别的 WebSocket URL，跳过建连: {url}")
         return None
     
@@ -471,19 +452,18 @@ class WebSocketManager:
             from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
             if source_type in EQSC_DIRECT_SOURCE_TYPES:
                 return source_type
-            from adapters.openquake_api_adapter import OPENQUAKE_DIRECT_SOURCE_TYPES
-            if source_type in OPENQUAKE_DIRECT_SOURCE_TYPES:
+            from adapters.pancakes_api_adapter import PANCAKES_DIRECT_SOURCE_TYPES
+            if source_type in PANCAKES_DIRECT_SOURCE_TYPES:
                 return source_type
             if source_type in ("ptwc", "emsc", "cenc-ir"):
                 return source_type
             if source_type:
                 if parsed_data.get('whews'):
                     return source_type
-                if parsed_data.get('fssn') and source_type:
                     return source_type
                 if parsed_data.get('jian') and source_type:
                     return source_type
-                if parsed_data.get('openquake') and source_type:
+                if parsed_data.get('pancakes') and source_type:
                     return source_type
                 return source_type
             
@@ -523,7 +503,6 @@ class WebSocketManager:
                 "巴西圣保罗大学": "usp",
                 "韩国气象厅": "kma",
                 "韩国气象厅地震预警": "kma-eew",
-                "FSSN": "fssn",
                 "气象预警": "weatheralarm",
                 "自然资源部海啸预警中心": "tsunami",
             }
@@ -533,7 +512,14 @@ class WebSocketManager:
             logger.error(f"获取数据源名称失败: {e}")
             return default_source
     
-    async def _process_message(self, message: str, adapter: Any, source_name: str, url: str):
+    async def _process_message(
+        self,
+        message: str,
+        adapter: Any,
+        source_name: str,
+        url: str,
+        websocket: Any = None,
+    ):
         """
         处理接收到的消息
         
@@ -542,6 +528,7 @@ class WebSocketManager:
             adapter: 适配器实例
             source_name: 数据源名称
             url: WebSocket URL
+            websocket: 当前连接（EQSC 心跳需原样回显）
         """
         try:
             self._mark_message_received(url, source_name)
@@ -549,7 +536,14 @@ class WebSocketManager:
                 message_text = message.strip().lower()
                 if message_text == "heartbeat":
                     self._mark_heartbeat_received(url, source_name)
-                    logger.debug(f"[{source_name}] 收到文本心跳消息")
+                    if self._is_eqsc_url(url) and websocket is not None:
+                        try:
+                            await websocket.send(message)
+                            logger.debug(f"[{source_name}] 已回显 EQSC 文本心跳")
+                        except Exception as e:
+                            logger.warning(f"[{source_name}] 回显 EQSC 心跳失败: {e}")
+                    else:
+                        logger.debug(f"[{source_name}] 收到文本心跳消息")
                     return
                 if message_text == "ping":
                     self._mark_ping_received(url, source_name)
@@ -576,7 +570,27 @@ class WebSocketManager:
                 msg_type = str(data.get('type', '')).strip().lower()
                 if msg_type == 'heartbeat':
                     self._mark_heartbeat_received(url, source_name)
-                    logger.debug(f"[{source_name}] 收到心跳消息")
+                    if self._is_eqsc_url(url) and websocket is not None:
+                        try:
+                            # 官方要求原样回传服务端 heartbeat
+                            await websocket.send(message if isinstance(message, str) else json.dumps(data, ensure_ascii=False))
+                            logger.debug(f"[{source_name}] 已回显 EQSC heartbeat")
+                        except Exception as e:
+                            logger.warning(f"[{source_name}] 回显 EQSC heartbeat 失败: {e}")
+                    else:
+                        logger.debug(f"[{source_name}] 收到心跳消息")
+                    return
+                if self._is_eqsc_url(url) and msg_type in (
+                    "request_authentication",
+                    "authentication_result",
+                ):
+                    await self._handle_eqsc_control(
+                        websocket=websocket,
+                        url=url,
+                        source_name=source_name,
+                        data=data,
+                        msg_type=msg_type,
+                    )
                     return
                 if msg_type == 'ping':
                     self._mark_ping_received(url, source_name)
@@ -657,7 +671,7 @@ class WebSocketManager:
                         _dispatch_parsed_message(
                             self, parsed_data, actual_source, source_name
                         )
-                # 首连聚合快照入队后再放行轮播，避免 FSSN 等先到的低优先级源抢先上屏
+                # 首连聚合快照入队后再放行轮播，避免辅助源先到抢先上屏
                 if isinstance(data, dict) and msg_type == "all":
                     try:
                         self.message_callback(
@@ -690,7 +704,6 @@ class WebSocketManager:
                     if isinstance(data, dict):
                         list_type = str(data.get("type") or "").strip().lower()
                         if list_type in (
-                            "fssnlist_response",
                             "cmtlist_response",
                             "initial_all",
                         ):
@@ -746,20 +759,19 @@ class WebSocketManager:
                         'cenc-ir',
                     )
                     from adapters.eqsc_adapter import EQSC_DIRECT_SOURCE_TYPES
-                    from adapters.openquake_api_adapter import OPENQUAKE_DIRECT_SOURCE_TYPES
+                    from adapters.pancakes_api_adapter import PANCAKES_DIRECT_SOURCE_TYPES
                     if pt and (
                         pt in direct_sources
                         or pt in EQSC_DIRECT_SOURCE_TYPES
-                        or pt in OPENQUAKE_DIRECT_SOURCE_TYPES
+                        or pt in PANCAKES_DIRECT_SOURCE_TYPES
                     ):
                         actual_source = pt
                     elif parsed_data.get("whews") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
                     elif parsed_data.get("jian") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
-                    elif parsed_data.get("fssn") and pt:
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
-                    elif parsed_data.get("openquake") and pt:
+                    elif parsed_data.get("pancakes") and pt:
                         actual_source = pt
                     elif isinstance(data, dict) and data.get('type') == 'update':
                         actual_source = self._get_source_name_from_data(parsed_data, source_name)
@@ -958,14 +970,16 @@ class WebSocketManager:
                         continue
                     # 鉴权不走 URL 参数：建连后立即发送纯文本 token（须在 5 秒内）
                 if self._is_eqsc_url(url):
-                    # 公开版拒绝 EQSC WS；此处不应到达（get_adapter 已 return None）
-                    logger.warning(
-                        f"[{source_name}] EQSC WebSocket 已禁用，跳过连接（请使用 HTTP）"
-                    )
-                    self._eqsc_auth_status[url] = ("none", "EQSC 仅支持 HTTP 轮询")
-                    self.connection_states[url] = "unconnected"
-                    await asyncio.sleep(3600)
-                    continue
+                    login = (getattr(Config().ws_config, "eqsc_login_token", "") or "").strip()
+                    if not login:
+                        logger.error(
+                            f"[{source_name}] 未配置 EQSC 登录密钥，暂停连接"
+                            "（请在设置中填写 equake.top/auth 申请的密钥）"
+                        )
+                        self._eqsc_auth_status[url] = ("failed", "未填写登录密钥")
+                        self.connection_states[url] = "unconnected"
+                        await asyncio.sleep(30)
+                        continue
                 
                 if is_jian_project_url(url or ""):
                     ws_cfg = Config().ws_config
@@ -1066,16 +1080,9 @@ class WebSocketManager:
                     if is_whews_url(url or ""):
                         await self._maybe_send_whews_auth(websocket, url, source_name)
 
-                    # FSSN：建连后拉取列表
-                    if "fssn-api.fanstudio.tech" in (url or "").lower():
-                        from adapters.fssn_adapter import FssnAdapter
-                        if isinstance(adapter, FssnAdapter):
-                            for cmd in adapter.on_open_commands():
-                                try:
-                                    await websocket.send(cmd)
-                                    logger.info(f"[{source_name}] 已发送 FSSN 指令: {cmd}")
-                                except Exception as e:
-                                    logger.warning(f"[{source_name}] 发送 FSSN 指令失败: {e}")
+                    # EQSC：建连后立即 respond_authentication
+                    if self._is_eqsc_url(url):
+                        await self._maybe_send_eqsc_auth(websocket, url, source_name)
 
                     # Wolfx：all_eew 错峰查询 EEW+列表；CWA 仅走独立端点
                     if norm_url == WOLFX_ALL_EEW_URL:
@@ -1138,7 +1145,9 @@ class WebSocketManager:
                         try:
                             message = await asyncio.wait_for(websocket.recv(), timeout=0.5)
                             logger.debug(f"[{source_name}] 收到消息，长度: {len(message) if isinstance(message, str) else len(str(message))}")
-                            await self._process_message(message, adapter, source_name, url)
+                            await self._process_message(
+                                message, adapter, source_name, url, websocket=websocket
+                            )
                         except asyncio.TimeoutError:
                             # 超时：继续循环并执行心跳检查
                             await self._check_heartbeat_timeout(websocket, url, source_name)
@@ -1537,15 +1546,128 @@ class WebSocketManager:
     def _is_eqsc_url(url: str) -> bool:
         """判断是否为 EQSC WebSocket 地址。"""
         normalized = (url or "").strip().lower().rstrip("/")
-        return normalized == EQSC_WS_URL.strip().lower().rstrip("/")
+        known = {
+            EQSC_WS_URL.strip().lower().rstrip("/"),
+            "wss://equake.top:50023",
+            "wss://equake.top",
+        }
+        return normalized in known
 
     def get_eqsc_auth_status(self) -> Tuple[str, str]:
-        """
-        返回 EQSC 鉴权状态。
+        """返回 EQSC WebSocket 鉴权状态（供设置页状态行）。"""
+        for url, status in self._eqsc_auth_status.items():
+            if self._is_eqsc_url(url) and status:
+                return status
+        return ("none", "")
 
-        公开版仅支持 HTTP，WS 路径已禁用；设置页可据此显示「仅 HTTP」。
-        """
-        return ("none", "EQSC 仅支持 HTTP 轮询")
+    async def _maybe_send_eqsc_auth(self, websocket: Any, url: str, source_name: str) -> None:
+        """EQSC 建连后发送 respond_authentication（AccessToken + scopes）。"""
+        if not self._is_eqsc_url(url):
+            return
+        try:
+            from utils.eqsc_credentials import (
+                get_eqsc_access_token,
+                build_eqsc_scopes,
+                build_respond_authentication_message,
+            )
+            cfg = Config()
+            login = (getattr(cfg.ws_config, "eqsc_login_token", "") or "").strip()
+            if not login:
+                self._eqsc_auth_status[url] = ("failed", "未填写登录密钥")
+                logger.warning(f"[{source_name}] EQSC 登录密钥为空，无法鉴权")
+                return
+            self._eqsc_auth_status[url] = ("pending", "正在换取 AccessToken…")
+            ok, token, msg = await asyncio.to_thread(get_eqsc_access_token, login)
+            if not ok or not token:
+                self._eqsc_auth_status[url] = ("failed", msg or "换取 AccessToken 失败")
+                logger.error(f"[{source_name}] EQSC 换取 AccessToken 失败: {msg}")
+                return
+            mc = cfg.message_config
+            flags = {
+                "eqsc_parse_jma_eew": bool(getattr(mc, "eqsc_parse_jma_eew", True)),
+                "eqsc_parse_cea": bool(getattr(mc, "eqsc_parse_cea", True)),
+                "eqsc_parse_cea_pr": bool(getattr(mc, "eqsc_parse_cea_pr", True)),
+                "eqsc_parse_cwa_eew": bool(getattr(mc, "eqsc_parse_cwa_eew", True)),
+                "eqsc_parse_jma_report": bool(getattr(mc, "eqsc_parse_jma_report", True)),
+                "eqsc_parse_jma_tsunami": bool(getattr(mc, "eqsc_parse_jma_tsunami", True)),
+                "eqsc_parse_cenc": bool(getattr(mc, "eqsc_parse_cenc", True)),
+                "eqsc_parse_cenc_ir": bool(getattr(mc, "eqsc_parse_cenc_ir", True)),
+                "eqsc_parse_cwa": bool(getattr(mc, "eqsc_parse_cwa", True)),
+                "eqsc_parse_hko": bool(getattr(mc, "eqsc_parse_hko", True)),
+                "eqsc_parse_usgs": bool(getattr(mc, "eqsc_parse_usgs", True)),
+                "eqsc_parse_emsc": bool(getattr(mc, "eqsc_parse_emsc", True)),
+                "eqsc_parse_typhoon": bool(getattr(mc, "eqsc_parse_typhoon", True)),
+                "eqsc_parse_volcano": bool(getattr(mc, "eqsc_parse_volcano", False)),
+            }
+            scopes = build_eqsc_scopes(flags) or "ALL"
+            payload = build_respond_authentication_message(token, scopes, include_training=False)
+            await websocket.send(payload)
+            self._eqsc_auth_status[url] = ("pending", f"已发送鉴权（scopes={scopes}）")
+            logger.info(f"[{source_name}] 已发送 EQSC respond_authentication scopes={scopes}")
+        except Exception as e:
+            self._eqsc_auth_status[url] = ("failed", str(e))
+            logger.warning(f"[{source_name}] 发送 EQSC 鉴权失败: {e}")
+
+    async def _handle_eqsc_control(
+        self,
+        *,
+        websocket: Any,
+        url: str,
+        source_name: str,
+        data: Dict[str, Any],
+        msg_type: str,
+    ) -> None:
+        """处理 EQSC 控制帧：request_authentication / authentication_result。"""
+        if msg_type == "request_authentication":
+            logger.info(f"[{source_name}] 收到 EQSC request_authentication，重新发送鉴权")
+            await self._maybe_send_eqsc_auth(websocket, url, source_name)
+            return
+        # authentication_result：data 可能为 dict / bool / "200" / "ok"
+        raw_payload = data.get("data", data)
+        ok = False
+        detail = ""
+        if isinstance(raw_payload, bool):
+            ok = bool(raw_payload)
+            detail = "true" if raw_payload else "false"
+        elif isinstance(raw_payload, (int, float)):
+            ok = int(raw_payload) in (0, 1, 200)
+            detail = f"code={raw_payload}"
+        elif isinstance(raw_payload, str):
+            low_p = raw_payload.strip().lower()
+            ok = low_p in ("1", "true", "ok", "success", "yes", "200", "0")
+            detail = raw_payload.strip()
+        elif isinstance(raw_payload, dict):
+            payload = raw_payload
+            for key in ("success", "ok", "authenticated", "result", "status"):
+                if key in payload:
+                    val = payload.get(key)
+                    if isinstance(val, bool):
+                        ok = val
+                    else:
+                        ok = str(val).strip().lower() in (
+                            "1", "true", "ok", "success", "yes", "200", "0",
+                        )
+                    break
+            detail = str(
+                payload.get("message")
+                or payload.get("msg")
+                or payload.get("error")
+                or payload.get("reason")
+                or ""
+            ).strip()
+            code = payload.get("code")
+            if code is not None and not detail:
+                detail = f"code={code}"
+            if not any(k in payload for k in ("success", "ok", "authenticated", "result", "status")):
+                if code is None or str(code) in ("0", "200", "ok"):
+                    blob = str(payload).lower()
+                    ok = ("error" not in blob) or ("success" in blob)
+        if ok:
+            self._eqsc_auth_status[url] = ("ok", detail or "WebSocket 鉴权成功")
+            logger.info(f"[{source_name}] EQSC authentication_result 成功: {detail or 'ok'}")
+        else:
+            self._eqsc_auth_status[url] = ("failed", detail or "WebSocket 鉴权失败")
+            logger.warning(f"[{source_name}] EQSC authentication_result 失败: {detail or data}")
 
     async def _maybe_send_whews_auth(self, websocket: Any, url: str, source_name: str) -> None:
         """
@@ -1733,25 +1855,19 @@ class WebSocketManager:
         5) 其他
         """
         normalized_url = (url or "").strip().lower().rstrip("/")
-        if "fssn-api.fanstudio.tech" in normalized_url:
-            return "fssn"
-        if "sismotide.top" in normalized_url or "jian://" in normalized_url:
-            return "jian"
-        if "ws.fanstudio.tech" in normalized_url:
-            return "other"  # 旧主源已停用
-        if is_whews_url(normalized_url) or any(
-            normalized_url == u.rstrip("/").lower() for u in WHEWS_WS_URLS
-        ):
+        if is_whews_url(url or ""):
             return "whews"
-        if normalized_url == P2PQUAKE_WSS_URL:
+        if "sismotide.top" in normalized_url or "jianproject.cloud" in normalized_url or "jian://" in normalized_url:
+            return "jian"
+        if "p2pquake" in normalized_url:
             return "p2pquake"
-        if normalized_url in WOLFX_URLS:
+        if "wolfx.jp" in normalized_url:
             return "wolfx"
         if normalized_url == EQSC_WS_URL.strip().lower().rstrip("/"):
             return "eqsc"
-        if normalized_url == OPENQUAKE_WS_ALL_URL.strip().lower().rstrip("/"):
-            return "openquake"
-        if is_custom_data_source_url(normalized_url):
+        if normalized_url == PANCAKES_WS_ALL_URL.strip().lower().rstrip("/"):
+            return "pancakes"
+        if is_custom_data_source_url(url or ""):
             return "other"
         if normalized_url == NOWQUAKE_CENCINT_WSS_URL:
             return "other"
@@ -1778,12 +1894,6 @@ class WebSocketManager:
             config._disable_whews_dedicated_endpoints()
         enabled_urls = []
         for url in config.ws_urls:
-            if "fanstudio.tech" in (url or "").lower() and "fssn-api" not in (url or "").lower():
-                logger.warning(f"跳过已移除的 Fan Studio 主源: {url}")
-                continue
-            if is_whews_dedicated_endpoint(url) or is_whews_cea_split_endpoint(url):
-                logger.debug(f"跳过已废弃的 WeJet 专用端点: {url}")
-                continue
             if hasattr(config, "is_url_active_for_provider") and not config.is_url_active_for_provider(url):
                 continue
             if config.enabled_sources.get(url, True):
@@ -1811,20 +1921,19 @@ class WebSocketManager:
         
         # 创建所有连接任务
         grouped_urls: Dict[str, list] = {
-                        "fssn": [],
             "jian": [],
             "whews": [],
             "p2pquake": [],
             "wolfx": [],
             "eqsc": [],
-            "openquake": [],
+            "pancakes": [],
             "other": [],
         }
         for url in enabled_urls:
             grouped_urls[self._classify_startup_group(url)].append(url)
 
-        # 启动阶段顺序固定：whews -> p2pquake -> wolfx -> eqsc -> openquake -> other
-        startup_stages = ("whews", "jian", "fssn", "p2pquake", "wolfx", "eqsc", "openquake", "other")
+        # 启动阶段顺序固定：whews -> p2pquake -> wolfx -> eqsc -> pancakes -> other
+        startup_stages = ("whews", "jian", "p2pquake", "wolfx", "eqsc", "pancakes", "other")
         tasks = []
         urls_for_tasks = []
         stagger = float(getattr(config.ws_config, "startup_stagger_seconds", 1.5) or 0.0)
@@ -1844,8 +1953,9 @@ class WebSocketManager:
                 except Exception as e:
                     logger.error(f"P2PQuake 启动前 HTTP 拉取失败: {e}", exc_info=True)
 
+            stage_label = "PancakesAPI" if stage == "pancakes" else stage
             logger.info(
-                f"启动阶段[{stage}]，准备创建 {len(stage_urls)} 个连接任务"
+                f"启动阶段[{stage_label}]，准备创建 {len(stage_urls)} 个连接任务"
                 + (f"（相邻任务间隔 {stagger}s）" if stagger > 0 else "（同时发起）")
             )
             if stage == "wolfx" and stage_urls:
@@ -1976,7 +2086,7 @@ class WebSocketManager:
             "p2pquake": 2,
             "wolfx": 3,
             "eqsc": 4,
-            "openquake": 5,
+            "pancakes": 5,
             "other": 6,
         }
 

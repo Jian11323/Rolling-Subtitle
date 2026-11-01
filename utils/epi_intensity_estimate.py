@@ -20,6 +20,7 @@ SOURCE_NO_CHINA_EPI_ESTIMATE = frozenset(
         "wolfx_jma_eqlist",
         "eqsc_jma_eew",
         "eqsc_cwa",
+        "eqsc_cwa_eew",
         "p2pquake",
             }
 )
@@ -46,6 +47,7 @@ SOURCE_TW_JP_ALERT_EXCLUDE = frozenset(
         "wolfx_jma_eqlist",
         "eqsc_jma_eew",
         "eqsc_cwa",
+        "eqsc_cwa_eew",
         "p2pquake",
             }
 )

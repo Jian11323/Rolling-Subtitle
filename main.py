@@ -139,7 +139,7 @@ def main():
         app = QApplication(sys.argv)  # Qt 应用主对象
         try:
             app.setApplicationName("地震情报实况栏")
-            app.setOrganizationName("FanStudio")
+            app.setOrganizationName("JianProject")
         except Exception:
             pass
 

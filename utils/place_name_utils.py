@@ -15,12 +15,12 @@ CHINESE_SOURCE_TYPES = frozenset({
     "hko",
     "wolfx_sc", "wolfx_fj", "wolfx_cenc", "wolfx_cwa", "wolfx_cq",
     "wolfx_sc_eew", "wolfx_cenc_eew", "wolfx_fj_eew", "wolfx_cq_eew", "wolfx_cwa_eew",
-    "eqsc_cenc", "eqsc_cenc_ir", "eqsc_cwa", "eqsc_hko", "eqsc_typhoon",
+    "eqsc_cenc", "eqsc_cenc_ir", "eqsc_cwa", "eqsc_cwa_eew",
+    "eqsc_cea", "eqsc_cea_pr", "eqsc_hko", "eqsc_typhoon",
     "nmefc", "nmefc-tsunami",
     # NMEFC 海啸正文已是中文地点+预报区，勿被 FE 粗分区覆盖
     "tsunami", "海啸信息",
     "cwa_tsunami",
-    "openquake_nmefc", "openquake_nmefc_wave", "openquake_nmefc_surge", "openquake_cma",
 })
 
 # JMA / P2PQuake：使用官方原始地名（日文），不做 FE 粗分区覆盖

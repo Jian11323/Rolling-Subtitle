@@ -163,7 +163,6 @@ class JianTyphoonHttpAdapter(BaseAdapter):
             "Name": name,
             "Enname": enname,
             "raw_data": item,
-            "fanstudio": False,
             "jian": False,
             "jian_typhoon": True,
             "whews": False,

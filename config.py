@@ -16,41 +16,14 @@ from utils.logger import get_logger
 
 logger = get_logger()
 
-# Fan Studio 域名
-FANSTUDIO_DOMAIN = "fanstudio.tech"
-
-
-def fanstudio_ws_url(path: str) -> str:
-    """构建 Fan Studio WebSocket URL。"""
-    return f"wss://ws.{FANSTUDIO_DOMAIN}/{path}"
-
-
-def fanstudio_http_url(path: str) -> str:
-    """构建 Fan Studio HTTP API URL。"""
-    return f"https://api.{FANSTUDIO_DOMAIN}/{path.lstrip('/')}"
-
-
-FANSTUDIO_ALL_URL = fanstudio_ws_url("all")
-FANSTUDIO_ALL_URLS = (FANSTUDIO_ALL_URL,)
-
-# FSSN WebSocket（https://fssn-api.fanstudio.tech/ ；旧 FAN Studio API 已停运）
-FSSN_API_DOMAIN = "fssn-api.fanstudio.tech"
-FSSN_ALL_URL = f"wss://{FSSN_API_DOMAIN}/all"
-FSSN_FSSN_URL = f"wss://{FSSN_API_DOMAIN}/fssn"
-FSSN_CMT_URL = f"wss://{FSSN_API_DOMAIN}/fssn-cmt"
-FSSN_MASTER_KEY = "fssn://master"
-FSSN_DOCS_URL = "https://fssn-api.fanstudio.tech/"
-
 # WeJet（WHEWS）：国内为主 api.2v8.cn，国外为辅 api.beecld.com（仅 WAuth；CEA 走 /ws/all，无二次 App 鉴权）
 WHEWS_HOST_PRIMARY = "api.2v8.cn"
 WHEWS_HOST_BACKUP = "api.beecld.com"
 WHEWS_HOSTS = (WHEWS_HOST_PRIMARY, WHEWS_HOST_BACKUP)
 WHEWS_DOMAIN = WHEWS_HOST_PRIMARY  # 兼容旧引用：默认主机域名
 WHEWS_CEA_APPLY_URL = "https://api.2v8.cn/apply"  # 历史申请页（已不再需要 App 二次鉴权）
-DATA_PROVIDER_FANSTUDIO = "fanstudio"  # 已废弃：加载时迁移为 Jian
 DATA_PROVIDER_WHEWS = "whews"
 DATA_PROVIDER_JIAN = "jian"
-DATA_PROVIDER_OFFICIAL = "official"
 DATA_PROVIDERS = (
     DATA_PROVIDER_WHEWS,
     DATA_PROVIDER_JIAN,
@@ -169,10 +142,8 @@ def whews_cea_app_configured(ws_config: Any = None) -> bool:
 
 
 def normalize_data_provider(value: Any) -> str:
-    """规范化数据源提供者取值；无效/空值/旧 Fan Studio 默认 Jian Project。"""
+    """规范化数据源提供者取值；无效/空值默认 Jian Project。"""
     v = str(value or "").strip().lower()
-    if v in (DATA_PROVIDER_OFFICIAL, DATA_PROVIDER_FANSTUDIO, "official", "fanstudio"):
-        return DATA_PROVIDER_JIAN
     if v in ("jianproject", "jian_project", "sismotide"):
         return DATA_PROVIDER_JIAN
     if v in DATA_PROVIDERS:
@@ -198,7 +169,7 @@ WHEWS_CEA_ALL_URL = whews_ws_url("cea_all", WHEWS_HOST_BACKUP)
 WHEWS_CENC_URL = whews_ws_url("cenc", WHEWS_HOST_PRIMARY)
 WHEWS_WS_URLS: List[str] = all_whews_ws_urls()
 
-# 非 Fan Studio 的 WebSocket 数据源固定顺序（与轮播优先级一致，确保顺序不变）
+# WebSocket 数据源固定顺序（与轮播优先级一致）
 # Wolfx 聚合源 wss://ws-api.wolfx.jp/all_eew
 P2PQUAKE_WSS_URL = "wss://api.p2pquake.net/v2/ws"  # P2PQuake 地震情报 WSS 总开关
 P2PQUAKE_HISTORY_AGGREGATE_URL = (
@@ -214,21 +185,20 @@ WOLFX_VIRTUAL_SOURCE_KEYS: Tuple[str, ...] = (
     WOLFX_JMA_EQLIST_URL,
 )
 WOLFX_MASTER_KEY = "wolfx://master"  # Wolfx 总开关逻辑键（全局辅助源，参考 EQSC）
-AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI / FSSN）
+AUX_SOURCES_MASTER_KEY = "aux://master"  # 辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）
 NOWQUAKE_CENCINT_WSS_URL = "wss://api-cencint-public.nowquake.cn/websocket"  # Nowquake CENC 烈度速报
 
-# PancakesAPI（原 OpenQuakeAPI，api.aloys23.link）全局辅助 WebSocket：/api/v1/alert/ws/all 聚合
+# PancakesAPI（api.aloys23.link）全局辅助 WebSocket：/api/v1/alert/ws/all 聚合
 # 文档: https://wiki.aloys23.link/wiki/PancakesAPI/%E8%81%9A%E5%90%88
-OPENQUAKE_WS_BASE = "wss://api.aloys23.link"
-OPENQUAKE_WS_ALL_URL = f"{OPENQUAKE_WS_BASE}/api/v1/alert/ws/all"
+PANCAKES_WS_BASE = "wss://api.aloys23.link"
+PANCAKES_WS_ALL_URL = f"{PANCAKES_WS_BASE}/api/v1/alert/ws/all"
 # 旧路径（配置迁移用）
-OPENQUAKE_WS_ALL_URL_LEGACY = f"{OPENQUAKE_WS_BASE}/ws/all"
+PANCAKES_WS_ALL_URL_LEGACY = f"{PANCAKES_WS_BASE}/ws/all"
 
 # 气象预警源互斥：同一时刻仅允许一个解析开关为 True
 WEATHER_SOURCE_FLAGS: Dict[str, str] = {
     "jian": "jian_parse_weather",
     "whews": "whews_parse_weatheralarm",
-    "openquake": "openquake_parse_cma",
 }
 
 
@@ -304,7 +274,7 @@ def enforce_jma_report_mutex(
 
 
 def active_weather_source(message_config: Any) -> str:
-    """返回当前启用的气象预警源键（jian / whews / openquake），无则空串。"""
+    """返回当前启用的气象预警源键（jian / whews），无则空串。"""
     for key, flag in WEATHER_SOURCE_FLAGS.items():
         if bool(getattr(message_config, flag, False)):
             return key
@@ -317,19 +287,12 @@ def weather_provider_for_parsed(parsed_data: Dict[str, Any]) -> Optional[str]:
         return None
     msg_type = str(parsed_data.get("type") or "").strip().lower()
     st = str(parsed_data.get("source_type") or "").strip().lower()
-    if st == "openquake_cma" or (
-        msg_type == "weather" and parsed_data.get("openquake")
-    ):
-        return "openquake"
     if st == "weatheralarm" or msg_type == "weather":
         if parsed_data.get("jian"):
             return "jian"
         if parsed_data.get("whews"):
             return "whews"
-        org = str(parsed_data.get("organization") or "")
-        if "中国气象局" in org and parsed_data.get("openquake"):
-            return "openquake"
-        # 旧 Fan Studio 气象已移除；未知归属时不放行
+        # 未知气象归属时不放行
         return None
     return None
 
@@ -359,63 +322,9 @@ def is_ws_url_enabled(config: "Config", url: str) -> bool:
             return bool(val)
     return True
 
-# EQSC（equake.top）全局辅助数据源：以 HTTP 轮询为主（官方称 WS 不稳定）
-# 登录密钥在 https://equake.top/auth 申请；软件内自动换取 AccessToken
-EQSC_HTTP_BASE = "https://equake.top"
-EQSC_HTTP_MASTER = "https://equake.top/"  # 总开关逻辑键（不直接轮询）
-EQSC_WS_URL = "wss://equake.top:50023/"  # 保留常量；默认强制关闭，不建连
-EQSC_JMA_EEW_HTTP = f"{EQSC_HTTP_BASE}/jma_eew.json"
-EQSC_JMA_REPORT_HTTP = f"{EQSC_HTTP_BASE}/jma_report.json"
-EQSC_JMA_TSUNAMI_HTTP = f"{EQSC_HTTP_BASE}/jma_tsunami.json"
-EQSC_CENC_HTTP = f"{EQSC_HTTP_BASE}/eqlistCENC.json?limit=2"
-EQSC_CENC_IR_HTTP = f"{EQSC_HTTP_BASE}/listIntensityReportCENC.json?limit=2"
-EQSC_CWA_HTTP = f"{EQSC_HTTP_BASE}/eqlistCWA.json?limit=2"
-EQSC_HKO_HTTP = f"{EQSC_HTTP_BASE}/eqlistHKO.json?limit=2"
-EQSC_USGS_HTTP = f"{EQSC_HTTP_BASE}/eqlistUSGS4.json?limit=2"  # level4：M≥4.5
-EQSC_EMSC_HTTP = f"{EQSC_HTTP_BASE}/eqlistEMSC4.json?limit=2"
-EQSC_TYPHOON_HTTP = f"{EQSC_HTTP_BASE}/typhoonNMC.json"
-EQSC_VOLCANO_HTTP = f"{EQSC_HTTP_BASE}/volcanoJMA.json"
-EQSC_HTTP_SOURCE_KEYS: List[str] = [
-    EQSC_JMA_EEW_HTTP,
-    EQSC_JMA_REPORT_HTTP,
-    EQSC_JMA_TSUNAMI_HTTP,
-    EQSC_CENC_HTTP,
-    EQSC_CENC_IR_HTTP,
-    EQSC_CWA_HTTP,
-    EQSC_HKO_HTTP,
-    EQSC_USGS_HTTP,
-    EQSC_EMSC_HTTP,
-    EQSC_TYPHOON_HTTP,
-    EQSC_VOLCANO_HTTP,
-]
-# HTTP URL -> API scope（供适配器识别）
-EQSC_HTTP_URL_TO_SCOPE: Dict[str, str] = {
-    EQSC_JMA_EEW_HTTP: "jma_eew",
-    EQSC_JMA_REPORT_HTTP: "jma_report",
-    EQSC_JMA_TSUNAMI_HTTP: "jma_tsunami",
-    EQSC_CENC_HTTP: "eqlistCENC",
-    EQSC_CENC_IR_HTTP: "listIntensityReportCENC",
-    EQSC_CWA_HTTP: "eqlistCWA",
-    EQSC_HKO_HTTP: "eqlistHKO",
-    EQSC_USGS_HTTP: "eqlistUSGS",
-    EQSC_EMSC_HTTP: "eqlistEMSC",
-    EQSC_TYPHOON_HTTP: "typhoonNMC",
-    EQSC_VOLCANO_HTTP: "volcanoJMA",
-}
-# MessageConfig 解析开关 -> HTTP URL
-EQSC_PARSE_FLAG_TO_URL: Dict[str, str] = {
-    "eqsc_parse_jma_eew": EQSC_JMA_EEW_HTTP,
-    "eqsc_parse_jma_report": EQSC_JMA_REPORT_HTTP,
-    "eqsc_parse_jma_tsunami": EQSC_JMA_TSUNAMI_HTTP,
-    "eqsc_parse_cenc": EQSC_CENC_HTTP,
-    "eqsc_parse_cenc_ir": EQSC_CENC_IR_HTTP,
-    "eqsc_parse_cwa": EQSC_CWA_HTTP,
-    "eqsc_parse_hko": EQSC_HKO_HTTP,
-    "eqsc_parse_usgs": EQSC_USGS_HTTP,
-    "eqsc_parse_emsc": EQSC_EMSC_HTTP,
-    "eqsc_parse_typhoon": EQSC_TYPHOON_HTTP,
-    "eqsc_parse_volcano": EQSC_VOLCANO_HTTP,
-}
+# EQSC（equake.top）全局辅助数据源：WebSocket 实时通道
+# 登录密钥在 https://equake.top/auth 申请；软件内自动换取 AccessToken 后 WS 鉴权
+EQSC_WS_URL = "wss://equake.top/"
 
 # Jian Project（主数据源之一，WebSocket 聚合）
 JIAN_API_HOST_PRIMARY = "api.sismotide.top"
@@ -676,10 +585,9 @@ P2PQUAKE_HTTP_SOURCE_KEYS: List[str] = [
     P2PQUAKE_HISTORY_AGGREGATE_URL,
 ]
 
-# 台风 HTTP：Jian Project GET（已停运的 Fan Studio we/typhoon.php 仅作启动迁移）
+# 台风 HTTP：Jian Project GET
 JIAN_TYPHOON_HTTP = "https://api.sismotide.top/get/typhoon.php"
 JIAN_TYPHOON_HTTP_KEYS: List[str] = [JIAN_TYPHOON_HTTP]
-_LEGACY_FANSTUDIO_TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
 
 
 def is_jian_project_url(url: str) -> bool:
@@ -705,15 +613,15 @@ def wolfx_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     )
 
 
-def openquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
-    """PancakesAPI（原 OpenQuakeAPI）总开关是否开启（依赖辅助总开关）。"""
+def pancakes_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
+    """PancakesAPI 总开关是否开启（依赖辅助总开关）。"""
     if not aux_sources_enabled(enabled_sources):
         return False
-    return bool(enabled_sources.get(OPENQUAKE_WS_ALL_URL, False))
+    return bool(enabled_sources.get(PANCAKES_WS_ALL_URL, False))
 
 
 def aux_sources_enabled(enabled_sources: Dict[str, Any]) -> bool:
-    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI / FSSN）；缺省视为开启以兼容旧配置。"""
+    """辅助数据源总开关（Wolfx / EQSC / P2PQuake / PancakesAPI）；缺省视为开启以兼容旧配置。"""
     if not isinstance(enabled_sources, dict):
         return True
     if AUX_SOURCES_MASTER_KEY not in enabled_sources:
@@ -750,29 +658,15 @@ def any_jian_source_enabled(config: "Config") -> bool:
         return False
     return _any_jian_parse_flag_enabled(config)
 
-# 各 HTTP 数据源默认轮询间隔（秒，仅保留台风 / P2P 补拉 / EQSC）
+# 各 HTTP 数据源默认轮询间隔（秒；EQSC 2.10 起不再轮询）
 DEFAULT_HTTP_POLL_INTERVALS: Dict[str, int] = {
     P2PQUAKE_HISTORY_AGGREGATE_URL: 2,
-    # EQSC：预警 1s；速报按品类（海啸稍密，台风/火山较疏）
-    EQSC_JMA_EEW_HTTP: 1,
-    EQSC_JMA_REPORT_HTTP: 30,
-    EQSC_JMA_TSUNAMI_HTTP: 15,
-    EQSC_CENC_HTTP: 30,
-    EQSC_CENC_IR_HTTP: 30,
-    EQSC_CWA_HTTP: 30,
-    EQSC_HKO_HTTP: 60,
-    EQSC_USGS_HTTP: 60,
-    EQSC_EMSC_HTTP: 60,
-    EQSC_TYPHOON_HTTP: 300,
     JIAN_TYPHOON_HTTP: 60,  # Jian GET typhoon.php（≥1s；默认 60s）
-    EQSC_VOLCANO_HTTP: 300,
 }
 
 ALL_KNOWN_HTTP_SOURCE_KEYS: List[str] = (
     P2PQUAKE_HTTP_SOURCE_KEYS
     + JIAN_TYPHOON_HTTP_KEYS
-    + [EQSC_HTTP_MASTER]
-    + EQSC_HTTP_SOURCE_KEYS
 )
 
 
@@ -786,18 +680,21 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.9.5"  # 当前程序版本
+APP_VERSION = "2.10.0"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
 AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://gitee.com/jian0786/Rolling-Subtitle/raw/main/update/manifest.json"  # 默认更新清单（Gitee）
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.9.5
-1、Jian Project 主/备服务器状态名称与双卡片显示修复
-2、主备切换时连接任务键保持稳定，避免状态页分裂
-3、移除 NRCAN（加拿大自然资源部）速报
-4、主备主机变化时强制重启 Jian 连接"""
+CHANGELOG_TEXT = """版本 2.10.0
+
+1、EQSC 实时通道改为 WebSocket
+2、新增跨源同事件融合，同机构通道合并为单槽展示
+3、加固跨源去重，减少同事件双报
+4、彻底下线FAN Studio Seismic Network（FSSN）
+5、删除 PancakesAPI 已下线子源
+6、删除部分死代码，精简代码库"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -967,7 +864,6 @@ class MessageConfig:
     no_activity_message: str = '系统运行中，等待最新地震信息...'
     custom_text: str = '系统运行中，等待最新地震信息...'
     use_custom_text: bool = False  # True=自定义文本模式(与地震速报二选一)，False=地震速报模式
-    # Fan Studio All 数据源：勾选则解析对应类型，不勾选则不解析（不写单项 URL）
     # Wolfx 聚合源 (ws-api.wolfx.jp/all_eew)：勾选则解析对应子源，不勾选则不解析
     ali_all_parse_nied: bool = True         # 解析 JMA 緊急地震速報
     ali_all_parse_early_est: bool = True    # 解析 四川省地震局预警
@@ -976,6 +872,9 @@ class MessageConfig:
     ali_all_parse_cq_eew: bool = True       # 解析 重庆市地震局预警
     # EQSC（equake.top）全局辅助源：勾选则解析对应类型
     eqsc_parse_jma_eew: bool = True
+    eqsc_parse_cea: bool = True
+    eqsc_parse_cea_pr: bool = True
+    eqsc_parse_cwa_eew: bool = True
     eqsc_parse_jma_report: bool = True
     eqsc_parse_jma_tsunami: bool = True
     eqsc_parse_cenc: bool = True
@@ -1007,13 +906,6 @@ class MessageConfig:
     strong_felt_stage1_ms: int = 1500  # 强有感阶段一时长
     strong_felt_stage2_ms: int = 2500  # 强有感阶段二时长
     alert_flash_interval_ms: int = 400  # 红色背景闪烁间隔
-    # Fan Studio 单项数据源解析开关（基于 All 通道按子源细分）
-    # 预警类
-    # 速报 / 其他类
-
-    # FSSN
-    fssn_parse_fssn: bool = True
-    fssn_parse_fssn_cmt: bool = True
     # 无界科技（WHEWS）子源解析开关
     whews_parse_jma_eew: bool = True
     whews_parse_jma: bool = True  # WeJet /ws/jma 地震情报（与紧急地震速报分开）
@@ -1132,13 +1024,9 @@ class MessageConfig:
     p2pquake_parse_551: bool = False  # 与主源 JMA 情报互斥；默认关，优先主源
     p2pquake_parse_552: bool = True
     # PancakesAPI（/api/v1/alert/ws/all）：按子源分别控制是否解析
-    openquake_parse_gq: bool = True
-    openquake_parse_nmefc: bool = True
-    openquake_parse_nmefc_wave: bool = True
-    openquake_parse_nmefc_surge: bool = True
-    openquake_parse_cma: bool = False  # 与 jian_parse_weather 互斥，默认关
+    pancakes_parse_gq: bool = True
     # GlobalQuake 专用震级阈值（0 表示不限制；与全局 min_report_magnitude 独立）
-    openquake_gq_min_magnitude: float = 4.5
+    pancakes_gq_min_magnitude: float = 4.5
     # 速报震级过滤（0 表示不限制）
     min_report_magnitude: float = 0.0
     # 关注区域过滤（以经纬度为圆心、半径 km 内才显示）
@@ -1330,7 +1218,6 @@ class WebSocketConfig:
     connection_timeout: int = 10
     # 启动时相邻两路 WebSocket 建连任务之间的间隔（秒），0 表示不间隔（与旧版同时发起）
     startup_stagger_seconds: float = 1.5
-    # Fan Studio /all 用户 API Key（sk-…）；未填写时仍可连上，但仅收到公开精简数据流
     # 无界科技 WAuth 令牌（wat_…）；建连后以纯文本首帧发送，须在 5 秒内
     whews_token: str = ""
     # CEA App 凭证（历史字段保留兼容；公开版已不再二次鉴权）
@@ -1594,6 +1481,9 @@ class Config:
                 'ali_all_parse_bmkg': getattr(self.message_config, 'ali_all_parse_bmkg', True),
                 'ali_all_parse_cq_eew': getattr(self.message_config, 'ali_all_parse_cq_eew', True),
                 'eqsc_parse_jma_eew': getattr(self.message_config, 'eqsc_parse_jma_eew', True),
+                'eqsc_parse_cea': getattr(self.message_config, 'eqsc_parse_cea', True),
+                'eqsc_parse_cea_pr': getattr(self.message_config, 'eqsc_parse_cea_pr', True),
+                'eqsc_parse_cwa_eew': getattr(self.message_config, 'eqsc_parse_cwa_eew', True),
                 'eqsc_parse_jma_report': getattr(self.message_config, 'eqsc_parse_jma_report', True),
                 'eqsc_parse_jma_tsunami': getattr(self.message_config, 'eqsc_parse_jma_tsunami', True),
                 'eqsc_parse_cenc': getattr(self.message_config, 'eqsc_parse_cenc', True),
@@ -1607,18 +1497,9 @@ class Config:
                 # 默认 False，与 MessageConfig / 主源 JMA 情报互斥约定一致
                 'p2pquake_parse_551': getattr(self.message_config, 'p2pquake_parse_551', False),
                 'p2pquake_parse_552': getattr(self.message_config, 'p2pquake_parse_552', True),
-                'openquake_parse_gq': getattr(self.message_config, 'openquake_parse_gq', True),
-                'openquake_parse_nmefc': getattr(self.message_config, 'openquake_parse_nmefc', True),
-                'openquake_parse_nmefc_wave': getattr(
-                    self.message_config, 'openquake_parse_nmefc_wave', True
-                ),
-                'openquake_parse_nmefc_surge': getattr(
-                    self.message_config, 'openquake_parse_nmefc_surge', True
-                ),
-                # 默认 False，与 MessageConfig / 气象互斥约定一致（勿写成 True）
-                'openquake_parse_cma': getattr(self.message_config, 'openquake_parse_cma', False),
-                'openquake_gq_min_magnitude': float(
-                    getattr(self.message_config, 'openquake_gq_min_magnitude', 4.5) or 0.0
+                'pancakes_parse_gq': getattr(self.message_config, 'pancakes_parse_gq', True),
+                'pancakes_gq_min_magnitude': float(
+                    getattr(self.message_config, 'pancakes_gq_min_magnitude', 4.5) or 0.0
                 ),
                 'warning_color': self.message_config.warning_color,
                 'report_color': self.message_config.report_color,
@@ -1637,9 +1518,7 @@ class Config:
                 'strong_felt_stage1_ms': getattr(self.message_config, 'strong_felt_stage1_ms', 1500),
                 'strong_felt_stage2_ms': getattr(self.message_config, 'strong_felt_stage2_ms', 2500),
                 'alert_flash_interval_ms': getattr(self.message_config, 'alert_flash_interval_ms', 400),
-                # Fan Studio 子源细粒度开关
-                'fssn_parse_fssn': getattr(self.message_config, 'fssn_parse_fssn', True),
-                'fssn_parse_fssn_cmt': getattr(self.message_config, 'fssn_parse_fssn_cmt', True),
+                # WeJet 子源解析开关
                 'whews_parse_jma_eew': getattr(self.message_config, 'whews_parse_jma_eew', True),
                 'whews_parse_jma': getattr(self.message_config, 'whews_parse_jma', True),
                 'whews_parse_cwa_eew': getattr(self.message_config, 'whews_parse_cwa_eew', True),
@@ -1796,22 +1675,6 @@ class Config:
             'HTTP_POLL_INTERVALS': dict(self.http_poll_intervals),
         }
     
-    def _is_fanstudio_individual_url(self, url: str) -> bool:
-        """是否为应剔除持久化的 Fan Studio 单项 URL（历史遗留：除 all 外的 path 源）。"""
-        if not url or not isinstance(url, str):
-            return False
-        if "fssn-api.fanstudio.tech" in url.lower():
-            return False
-        if "fanstudio.tech" not in url:
-            return False
-        # Fan Studio HTTP 源不应被视为“历史遗留的单项 URL”，
-        # 它们需要持久化开关状态，否则用户关闭后重启会被恢复为默认启用。
-        if url.startswith("http://") or url.startswith("https://"):
-            return False
-        nu = url.rstrip("/").lower()
-        if nu == FANSTUDIO_ALL_URL.rstrip("/").lower():
-            return False
-        return True
 
     def _is_websocket_url(self, url: str) -> bool:
         """判断 URL 是否为 WebSocket 协议。"""
@@ -1840,45 +1703,47 @@ class Config:
         if agg not in self.http_poll_intervals:
             self.http_poll_intervals[agg] = DEFAULT_HTTP_POLL_INTERVALS.get(agg, 2)
 
-    def _disable_eqsc_ws(self) -> None:
-        """EQSC 官方称 WebSocket 不稳定，强制关闭 WS 建连，仅用 HTTP。"""
-        if EQSC_WS_URL in self.enabled_sources and self.enabled_sources.get(EQSC_WS_URL):
-            logger.info("已关闭 EQSC WebSocket（改用 HTTP 轮询）")
-        self.enabled_sources[EQSC_WS_URL] = False
 
-    def _ensure_eqsc_http_defaults(self) -> None:
-        """补全 EQSC HTTP 总开关与子源缺项；同步解析开关→启用状态；强制关 WS。"""
-        # 旧配置若曾打开 WS，迁移为 HTTP 总开关
-        if self.enabled_sources.pop(EQSC_WS_URL, False):
-            if not self.enabled_sources.get(EQSC_HTTP_MASTER, False):
-                self.enabled_sources[EQSC_HTTP_MASTER] = True
-                logger.info("已将 EQSC WebSocket 开关迁移为 HTTP 总开关")
-        self._disable_eqsc_ws()
-        if EQSC_HTTP_MASTER not in self.enabled_sources:
-            self.enabled_sources[EQSC_HTTP_MASTER] = False
-        for url in EQSC_HTTP_SOURCE_KEYS:
-            if url not in self.enabled_sources:
-                self.enabled_sources[url] = False
-        self._sync_eqsc_http_from_parse_flags()
 
-    def _sync_eqsc_http_from_parse_flags(self) -> None:
-        """按辅助总开关 + EQSC 总开关 + eqsc_parse_* 同步各 HTTP 子源。"""
+
+
+
+
+    def _ensure_eqsc_ws_defaults(self) -> None:
+        """补全 EQSC WebSocket 开关键；归一旧端口地址。"""
+        for legacy in (
+            "wss://equake.top:50023/",
+            "wss://equake.top:50023",
+            "wss://equake.top",
+        ):
+            if legacy.rstrip("/") == EQSC_WS_URL.rstrip("/"):
+                continue
+            if self.enabled_sources.pop(legacy, False):
+                self.enabled_sources[EQSC_WS_URL] = True
+                logger.info(f"已迁移 EQSC WebSocket 地址: {legacy} -> {EQSC_WS_URL}")
+        # 清掉 equake.top 的残留 HTTP 轮询键（已不再使用）
+        for key in list(self.enabled_sources.keys()):
+            low = str(key).lower()
+            if "equake.top" in low and low.startswith(("http://", "https://")):
+                self.enabled_sources.pop(key, None)
+                self.http_poll_intervals.pop(key, None)
+        if EQSC_WS_URL not in self.enabled_sources:
+            self.enabled_sources[EQSC_WS_URL] = False
+        self._sync_eqsc_ws_master()
+
+    def _sync_eqsc_ws_master(self) -> None:
+        """按辅助总开关同步 EQSC WSS（解析勾选只影响 scopes）。"""
         master = bool(
             aux_sources_enabled(self.enabled_sources)
-            and self.enabled_sources.get(EQSC_HTTP_MASTER, False)
+            and self.enabled_sources.get(EQSC_WS_URL, False)
         )
-        mc = self.message_config
-        for flag, url in EQSC_PARSE_FLAG_TO_URL.items():
-            parse_on = bool(getattr(mc, flag, flag != "eqsc_parse_volcano"))
-            self.enabled_sources[url] = bool(master and parse_on)
-        self._disable_eqsc_ws()
+        self.enabled_sources[EQSC_WS_URL] = bool(master)
 
     def _allowed_logical_source_keys(self) -> set:
         """允许持久化的逻辑开关键（非 ws/http URL）。"""
         return {
             JIAN_MASTER_KEY,
             WHEWS_MASTER_KEY,
-            FSSN_MASTER_KEY,
             WOLFX_MASTER_KEY,
             AUX_SOURCES_MASTER_KEY,
             *JIAN_SUB_SOURCE_KEYS,
@@ -1891,35 +1756,29 @@ class Config:
             return False
         if key in self._allowed_logical_source_keys() or is_jian_logical_key(key):
             return True
-        all_url = FANSTUDIO_ALL_URL
         allowed_ws = self._allowed_public_ws_urls()
         allowed_http = set(ALL_KNOWN_HTTP_SOURCE_KEYS)
-        if key == all_url or not self._is_fanstudio_individual_url(key):
-            if self._is_websocket_url(key):
-                return key in allowed_ws
-            return key in allowed_http
-        return False
+        if self._is_websocket_url(key):
+            return key in allowed_ws
+        return key in allowed_http
 
     def _allowed_public_ws_urls(self) -> set:
-        """公开版允许持久化/连接的 WebSocket URL 集合。"""
+        """允许持久化/连接的 WebSocket URL 集合。"""
         return {
-            FANSTUDIO_ALL_URL,
-            FSSN_ALL_URL,
-            FSSN_FSSN_URL,
-            FSSN_CMT_URL,
             JIAN_PROJECT_ALL_URL,
             P2PQUAKE_WSS_URL,
             NOWQUAKE_CENCINT_WSS_URL,
             WOLFX_ALL_EEW_URL,
             WOLFX_CWA_EEW_URL,
-            OPENQUAKE_WS_ALL_URL,
+            PANCAKES_WS_ALL_URL,
+            EQSC_WS_URL,
             *WOLFX_VIRTUAL_SOURCE_KEYS,
             *all_whews_ws_urls(),
         }
 
     def _enforce_public_ws_sources(self) -> List[str]:
         """
-        公开版连接策略：仅保留 Fan Studio /all、无界科技、Wolfx/P2P 等公开 WebSocket，
+        公开版连接策略：仅保留 WeJet / Jian / Wolfx / P2P / EQSC / Pancakes 等公开 WebSocket，
         并仅保留已知 HTTP 拉取配置项。
         Returns:
             被移除的 URL 列表
@@ -2038,8 +1897,8 @@ class Config:
         ):
             return aux_sources_enabled(self.enabled_sources)
         if (
-            u == OPENQUAKE_WS_ALL_URL
-            or u == OPENQUAKE_WS_ALL_URL_LEGACY
+            u == PANCAKES_WS_ALL_URL
+            or u == PANCAKES_WS_ALL_URL_LEGACY
             or "api.aloys23.link" in low
         ):
             return aux_sources_enabled(self.enabled_sources)
@@ -2049,12 +1908,6 @@ class Config:
         # CENC 烈度速报（Nowquake）：任意提供者下均可连接（不计入辅助三源）
         if u == NOWQUAKE_CENCINT_WSS_URL or "nowquake.cn" in low:
             return True
-        # FSSN：任意主源下可连（受自身开关控制）
-        if (
-            u in (FSSN_MASTER_KEY, FSSN_ALL_URL, FSSN_FSSN_URL, FSSN_CMT_URL)
-            or "fssn-api.fanstudio.tech" in low
-        ):
-            return True
         # 台风 HTTP：任意提供者下均可轮询（全局，与主提供者/辅助三源解耦）
         if (
             u == JIAN_TYPHOON_HTTP
@@ -2062,14 +1915,11 @@ class Config:
             or "typhoon.php" in low
         ):
             return True
-        # 旧 Fan Studio 主源已移除：残留 URL 一律不激活
-        if u == FANSTUDIO_ALL_URL or ("fanstudio.tech" in low and "fssn-api" not in low):
-            return False
         if provider == DATA_PROVIDER_WHEWS:
             return u == WHEWS_MASTER_KEY or is_whews_all_url(u)
         if provider == DATA_PROVIDER_JIAN:
             return u == JIAN_MASTER_KEY or u == JIAN_PROJECT_ALL_URL or is_jian_project_url(u)
-        if "fanstudio" in low or is_whews_url(u) or is_jian_project_url(u):
+        if is_whews_url(u) or is_jian_project_url(u):
             return False
         return False
 
@@ -2091,31 +1941,12 @@ class Config:
 
 
 
-    def _disable_legacy_fanstudio_master(self) -> None:
-        """关闭已下线的 Fan Studio 主源连接键。"""
-        try:
-            self.enabled_sources[FANSTUDIO_ALL_URL] = False
-            for u in FANSTUDIO_ALL_URLS:
-                self.enabled_sources[u] = False
-        except Exception:
-            pass
 
-    def _migrate_typhoon_http_url(self) -> None:
-        """已停运的 Fan Studio 台风 URL → Jian Project GET。"""
-        legacy = _LEGACY_FANSTUDIO_TYPHOON_HTTP
-        new_url = JIAN_TYPHOON_HTTP
-        if legacy == new_url:
-            return
-        if legacy in self.enabled_sources:
-            self.enabled_sources[new_url] = bool(self.enabled_sources.pop(legacy))
-            logger.info(f"已迁移台风 HTTP：{legacy} → {new_url}")
-        if legacy in self.http_poll_intervals:
-            self.http_poll_intervals[new_url] = self.http_poll_intervals.pop(legacy)
 
-    def _migrate_openquake_ws_url(self) -> None:
+    def _migrate_pancakes_ws_url(self) -> None:
         """PancakesAPI 聚合路径：旧 /ws/all → /api/v1/alert/ws/all。"""
-        legacy = OPENQUAKE_WS_ALL_URL_LEGACY
-        new_url = OPENQUAKE_WS_ALL_URL
+        legacy = PANCAKES_WS_ALL_URL_LEGACY
+        new_url = PANCAKES_WS_ALL_URL
         if legacy == new_url:
             return
         if legacy in self.enabled_sources:
@@ -2126,7 +1957,6 @@ class Config:
 
     def _ensure_http_poll_interval_defaults(self) -> None:
         """补全已知 HTTP 源的默认轮询间隔（不覆盖用户已设值）。"""
-        self._migrate_typhoon_http_url()
         for url, default_sec in DEFAULT_HTTP_POLL_INTERVALS.items():
             if url not in self.http_poll_intervals:
                 self.http_poll_intervals[url] = default_sec
@@ -2135,7 +1965,6 @@ class Config:
 
     def _ensure_jian_source_defaults(self) -> None:
         """补全 Jian Project 总开关缺项；迁移旧逻辑键到 jian_parse_*。"""
-        self._remove_legacy_fanstudio_aqi()
         self._migrate_legacy_http_to_jian_logical_keys()
         self._migrate_jian_logical_keys_to_parse_flags()
         self._purge_obsolete_intl_http_config()
@@ -2159,7 +1988,7 @@ class Config:
                     migrated = True
         if self.enabled_sources.pop(JIAN_MASTER_KEY, False):
             self.enabled_sources[JIAN_MASTER_KEY] = True
-            if self.data_provider not in DATA_PROVIDERS or self.data_provider == DATA_PROVIDER_FANSTUDIO:
+            if self.data_provider not in DATA_PROVIDERS:
                 self.data_provider = DATA_PROVIDER_JIAN
             migrated = True
         return migrated
@@ -2208,25 +2037,19 @@ class Config:
                 migrated = True
         if migrated:
             logger.info("已将遗留国际 HTTP 开关键迁移为 Jian Project 解析开关")
-        if self.data_provider in (DATA_PROVIDER_OFFICIAL, DATA_PROVIDER_FANSTUDIO):
-            self.data_provider = DATA_PROVIDER_JIAN
-            logger.info(
-                "已将主数据源「官方/Fan Studio」迁移为 Jian Project；"
-                "FSSN 请使用独立辅助源（wss://fssn-api.fanstudio.tech/all）"
-            )
+        if normalize_data_provider(self.data_provider) != self.data_provider:
+            self.data_provider = normalize_data_provider(self.data_provider)
 
     def _purge_obsolete_intl_http_config(self) -> None:
-        """移除已下线的国际 HTTP 配置残留（非 P2P / 台风 / EQSC / 自定义）。"""
+        """移除不应再轮询的国际 HTTP 配置残留（保留 P2P / 台风 / 自定义）。"""
         keep_markers = (
             "api.p2pquake.net",
-            "api.fanstudio",
-            "equake.top",
             "sismotide.top",  # Jian Project GET（台风等）
             "tsunami.gov",
             "kma.go.kr",
             "jma.go.jp/developer/xml/feed/eqvol",
         )
-        keep_http = keep_markers[:4]
+        keep_http = keep_markers[:2]
         removed = False
         for key in list(self.enabled_sources.keys()):
             if not isinstance(key, str):
@@ -2236,7 +2059,7 @@ class Config:
                 continue
             if any(m in low for m in keep_http):
                 continue
-            if any(m in low for m in keep_markers[4:]):
+            if any(m in low for m in keep_markers[2:]):
                 del self.enabled_sources[key]
                 removed = True
                 continue
@@ -2260,18 +2083,6 @@ class Config:
         if removed:
             logger.info("已清理遗留国际 HTTP 数据源配置项")
 
-
-    def _ensure_fssn_defaults(self) -> None:
-        """补全 FSSN 开关键；缺省时默认启用（新装/升级迁移）。"""
-        if FSSN_MASTER_KEY not in self.enabled_sources and FSSN_ALL_URL not in self.enabled_sources:
-            self.enabled_sources[FSSN_MASTER_KEY] = True
-            self.enabled_sources[FSSN_ALL_URL] = True
-            logger.info("已启用 FSSN 默认连接（wss://fssn-api.fanstudio.tech/all）")
-        elif FSSN_MASTER_KEY not in self.enabled_sources:
-            self.enabled_sources[FSSN_MASTER_KEY] = bool(self.enabled_sources.get(FSSN_ALL_URL, False))
-        elif FSSN_ALL_URL not in self.enabled_sources:
-            self.enabled_sources[FSSN_ALL_URL] = bool(self.enabled_sources.get(FSSN_MASTER_KEY, False))
-
     def _ensure_wolfx_source_defaults(self) -> None:
         """补全 Wolfx 全局辅助源开关键；总开关与 all_eew 连接项保持一致。"""
         if WOLFX_MASTER_KEY not in self.enabled_sources:
@@ -2291,20 +2102,6 @@ class Config:
             if url not in self.enabled_sources:
                 self.enabled_sources[url] = False
 
-    def _remove_legacy_fanstudio_aqi(self) -> None:
-        """移除已下线的 Fan Studio 空气质量 HTTP 源配置残留。"""
-        aqi_marker = "aqi.php"
-        removed = False
-        for key in list(self.enabled_sources.keys()):
-            if isinstance(key, str) and aqi_marker in key.lower():
-                del self.enabled_sources[key]
-                removed = True
-        for key in list(self.http_poll_intervals.keys()):
-            if isinstance(key, str) and aqi_marker in key.lower():
-                del self.http_poll_intervals[key]
-                removed = True
-        if removed:
-            logger.info("已移除遗留的 Fan Studio 空气质量（aqi.php）HTTP 数据源配置")
 
     def _merge_config_file(self, existing: Dict[str, Any], full: Dict[str, Any]) -> Dict[str, Any]:
         """仅对 existing 做缺项补全：只补 full 中有而 existing 中没有的键，不删除 existing 中任何键。"""
@@ -2449,19 +2246,15 @@ class Config:
             raw_provider = config_data.get('DATA_PROVIDER', None)
             raw_sources_preview = config_data.get('ENABLED_SOURCES', {}) or {}
             if raw_provider is None or str(raw_provider).strip() == '':
-                fs_on = bool(raw_sources_preview.get(FANSTUDIO_ALL_URL, False))
                 jian_on = bool(
                     raw_sources_preview.get(JIAN_MASTER_KEY, False)
                     or raw_sources_preview.get(JIAN_PROJECT_ALL_URL, False)
                 )
                 whews_on = is_whews_all_enabled(raw_sources_preview)
-                if whews_on and not jian_on and not fs_on:
+                if whews_on and not jian_on:
                     self.data_provider = DATA_PROVIDER_WHEWS
                 else:
-                    # 含旧 Fan Studio 主源：一律迁到 Jian
                     self.data_provider = DATA_PROVIDER_JIAN
-                    if fs_on:
-                        raw_sources_preview[FANSTUDIO_ALL_URL] = False
             else:
                 self.data_provider = normalize_data_provider(raw_provider)
             
@@ -2498,7 +2291,6 @@ class Config:
                         setattr(self.message_config, key, value)
                 if not self.message_config.validate():
                     success = False
-                # 已移除 Fan Studio 主源：气象开关强制关闭
                 enforce_weather_source_mutex(
                     self.message_config,
                     prefer=normalize_data_provider(
@@ -2506,24 +2298,6 @@ class Config:
                     ),
                 )
                 enforce_jma_report_mutex(self.message_config, prefer="main")
-                # 按这两个总开关初始化各 Fan Studio 子源细粒度开关，避免升级后行为变化。
-                try:
-                    # 预警类子源字段名
-                    warning_fields = [
-                    ]
-                    # 速报/其他类子源字段名
-                    report_fields = [
-                    ]
-                    # 如果配置文件中没有对应键，则根据总开关初始化，已有键则保留用户设置
-                    msg_cfg_section = config_data.get('MESSAGE_CONFIG', {})
-                    for field in warning_fields:
-                        if field not in msg_cfg_section:
-                            setattr(self.message_config, field, bool(parse_warning_flag))
-                    for field in report_fields:
-                        if field not in msg_cfg_section:
-                            setattr(self.message_config, field, bool(parse_report_flag))
-                except Exception as e:
-                    logger.debug(f"迁移 Fan Studio 子源解析开关失败(可忽略): {e}")
                 # 子源迁移可能重新打开气象开关，再按当前主源收敛互斥
                 enforce_weather_source_mutex(
                     self.message_config,
@@ -2590,19 +2364,10 @@ class Config:
                 if not self.log_config.validate():
                     success = False
 
-            # 加载数据源配置（仅持久化 all 与非 Fan Studio 数据源，Fan Studio 单项已移除）
+            # 加载数据源配置
             raw_sources = config_data.get('ENABLED_SOURCES', {})
-            all_url = FANSTUDIO_ALL_URL
-            self.enabled_sources = {
-                k: v for k, v in raw_sources.items()
-                if k == all_url or not self._is_fanstudio_individual_url(k)
-            }
-            # 确保内存中不保留任何 Fan Studio 单项 URL
-            for k in list(self.enabled_sources.keys()):
-                if self._is_fanstudio_individual_url(k):
-                    del self.enabled_sources[k]
-            self._migrate_typhoon_http_url()
-            self._migrate_openquake_ws_url()
+            self.enabled_sources = dict(raw_sources) if isinstance(raw_sources, dict) else {}
+            self._migrate_pancakes_ws_url()
             removed_ws = self._enforce_public_ws_sources()
             if removed_ws:
                 logger.info(f"已清理非公开 WebSocket 数据源: {removed_ws}")
@@ -2625,7 +2390,7 @@ class Config:
 
             # 如果配置文件中没有数据源配置，使用默认配置（Jian Project 为主源）
             if not self.enabled_sources:
-                self.enabled_sources = {all_url: False}
+                self.enabled_sources = {}
                 # P2PQuake 仅 WSS + 启动时 HTTP 拉取，不启用 HTTP 轮询
                 self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
                 self.enabled_sources[JIAN_TYPHOON_HTTP] = True
@@ -2636,17 +2401,14 @@ class Config:
                 self.enabled_sources[WOLFX_JMA_EQLIST_URL] = False
                 self.enabled_sources[NOWQUAKE_CENCINT_WSS_URL] = False
                 self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
-                self.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
+                self.enabled_sources[PANCAKES_WS_ALL_URL] = False
                 self.enabled_sources[AUX_SOURCES_MASTER_KEY] = True
                 self.enabled_sources[JIAN_MASTER_KEY] = True
                 self.enabled_sources[WHEWS_MASTER_KEY] = False
                 self.data_provider = DATA_PROVIDER_JIAN
                 logger.info("配置文件中没有数据源配置，使用默认配置（Jian Project）")
             else:
-                if all_url not in self.enabled_sources:
-                    self.enabled_sources[all_url] = False
-                # 若配置中已有 all_url，尊重用户关闭聚合连接的设置，不再强制为 True
-                # 仅补全非 Fan Studio 数据源缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉取
+                # 补全缺失项；P2PQuake HTTP 不用于轮询，仅启动时拉取
                 if P2PQUAKE_HISTORY_AGGREGATE_URL not in self.enabled_sources:
                     self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
                 if JIAN_TYPHOON_HTTP not in self.enabled_sources:
@@ -2664,7 +2426,7 @@ class Config:
                     WOLFX_JMA_EQLIST_URL,
                     NOWQUAKE_CENCINT_WSS_URL,
                     "wss://api.p2pquake.net/v2/ws",
-                    OPENQUAKE_WS_ALL_URL,
+                    PANCAKES_WS_ALL_URL,
                 ]
                 for wss_url in other_wss_urls:
                     if wss_url not in self.enabled_sources:
@@ -2674,12 +2436,9 @@ class Config:
             self._sync_p2pquake_http_with_wss()
             self._ensure_jian_source_defaults()
             self._ensure_wolfx_source_defaults()
-            self._ensure_fssn_defaults()
             self._ensure_whews_source_defaults()
-            self._ensure_eqsc_http_defaults()
+            self._ensure_eqsc_ws_defaults()
 
-            # 根据服务器选择更新URL
-            self._cleanup_invalid_fanstudio_ws_sources()
             removed_ws = self._enforce_public_ws_sources()
             if removed_ws:
                 logger.info(f"URL 规范化后再次清理非公开 WebSocket 数据源: {removed_ws}")
@@ -2806,10 +2565,7 @@ class Config:
         self.ws_config = WebSocketConfig()
         self.translation_config = TranslationConfig()
         self.log_config = LogConfig()
-        # 默认数据源：仅聚合/独立源，不加入 Fan Studio 单项 wss URL（实际只连 /all）
-        all_url = FANSTUDIO_ALL_URL
-
-        self.enabled_sources = {all_url: False}
+        self.enabled_sources = {}
         # P2PQuake 仅 WSS + 启动时 HTTP 拉取，不启用 HTTP 轮询
         self.enabled_sources[P2PQUAKE_HISTORY_AGGREGATE_URL] = False
         self.enabled_sources[JIAN_TYPHOON_HTTP] = True
@@ -2819,19 +2575,16 @@ class Config:
         self.enabled_sources[WOLFX_CENC_EQLIST_URL] = False
         self.enabled_sources[WOLFX_JMA_EQLIST_URL] = False
         self.enabled_sources[NOWQUAKE_CENCINT_WSS_URL] = False
-        self.enabled_sources[FSSN_MASTER_KEY] = True
-        self.enabled_sources[FSSN_ALL_URL] = True
         self.enabled_sources["wss://api.p2pquake.net/v2/ws"] = False
-        self.enabled_sources[OPENQUAKE_WS_ALL_URL] = False
+        self.enabled_sources[PANCAKES_WS_ALL_URL] = False
         self.enabled_sources[AUX_SOURCES_MASTER_KEY] = True
         self.enabled_sources[JIAN_MASTER_KEY] = True
         self.enabled_sources[WHEWS_MASTER_KEY] = False
         self.data_provider = DATA_PROVIDER_JIAN
         self._ensure_jian_source_defaults()
         self._ensure_wolfx_source_defaults()
-        self._ensure_fssn_defaults()
         self._ensure_whews_source_defaults()
-        self._ensure_eqsc_http_defaults()
+        self._ensure_eqsc_ws_defaults()
         self._ensure_http_poll_interval_defaults()
         self._enforce_public_ws_sources()
         enforce_weather_source_mutex(self.message_config, prefer=DATA_PROVIDER_JIAN)
@@ -2844,15 +2597,12 @@ class Config:
     
     def _build_ws_urls_ordered(self) -> List[str]:
         """按主提供者构建 ws_urls；Wolfx / P2P / Nowquake 为全局辅助源。"""
-        self._disable_legacy_fanstudio_master()
-        self._cleanup_invalid_fanstudio_ws_sources()
-        self._migrate_openquake_ws_url()
+        self._migrate_pancakes_ws_url()
         self._enforce_public_ws_sources()
         self._disable_whews_dedicated_endpoints()
         self._migrate_whews_url_keys_to_master()
         provider = self.get_active_data_provider()
         ws_urls: List[str] = []
-        # 旧 Fan Studio 主源已移除，不再建连 ws.fanstudio.tech
         if provider == DATA_PROVIDER_WHEWS:
             if is_whews_all_enabled(self.enabled_sources):
                 all_url = self.get_whews_endpoint_urls().get("all")
@@ -2872,20 +2622,16 @@ class Config:
             if self.enabled_sources.get(P2PQUAKE_WSS_URL, False):
                 if P2PQUAKE_WSS_URL not in ws_urls:
                     ws_urls.append(P2PQUAKE_WSS_URL)
-            if self.enabled_sources.get(OPENQUAKE_WS_ALL_URL, False):
-                if OPENQUAKE_WS_ALL_URL not in ws_urls:
-                    ws_urls.append(OPENQUAKE_WS_ALL_URL)
+            if self.enabled_sources.get(PANCAKES_WS_ALL_URL, False):
+                if PANCAKES_WS_ALL_URL not in ws_urls:
+                    ws_urls.append(PANCAKES_WS_ALL_URL)
+            if self.enabled_sources.get(EQSC_WS_URL, False):
+                if EQSC_WS_URL not in ws_urls:
+                    ws_urls.append(EQSC_WS_URL)
         # Nowquake（独立全局源，不受辅助总开关影响）
         if self.enabled_sources.get(NOWQUAKE_CENCINT_WSS_URL, False):
             if NOWQUAKE_CENCINT_WSS_URL not in ws_urls:
                 ws_urls.append(NOWQUAKE_CENCINT_WSS_URL)
-        # FSSN
-        if self.enabled_sources.get(FSSN_MASTER_KEY, False) or self.enabled_sources.get(FSSN_ALL_URL, False):
-            if getattr(self.message_config, "fssn_parse_fssn", True) or getattr(
-                self.message_config, "fssn_parse_fssn_cmt", True
-            ):
-                if FSSN_ALL_URL not in ws_urls:
-                    ws_urls.append(FSSN_ALL_URL)
         filtered: List[str] = []
         for u in ws_urls:
             if is_whews_dedicated_endpoint(u):
@@ -2898,7 +2644,6 @@ class Config:
     def update_enabled_sources(self, sources: Dict[str, bool]):
         """更新启用的数据源"""
         self.enabled_sources.update(sources)
-        self._cleanup_invalid_fanstudio_ws_sources()
         removed_ws = self._enforce_public_ws_sources()
         if removed_ws:
             logger.info(f"更新数据源时已清理非公开 WebSocket 数据源: {removed_ws}")
@@ -2946,24 +2691,9 @@ class Config:
         )
         return result
     
-    def _cleanup_invalid_fanstudio_ws_sources(self) -> None:
-        """仅保留 Fan Studio /all；剔除其余 Fan Studio WebSocket 配置项。"""
-        if not hasattr(self, "enabled_sources"):
-            return
-        all_norm = FANSTUDIO_ALL_URL.rstrip("/").lower()
-        for url in list(self.enabled_sources.keys()):
-            if not isinstance(url, str):
-                continue
-            low = url.lower()
-            if "fanstudio" in low and low.startswith(("ws://", "wss://")):
-                if "fssn-api.fanstudio.tech" in low:
-                    continue
-                if url.rstrip("/").lower() != all_norm:
-                    del self.enabled_sources[url]
-                    logger.debug(f"已移除无效 Fan Studio WebSocket 配置: {url}")
-    
+
     def get_source_name(self, url: str) -> str:
-        """获取数据源名称。Fan Studio 子源用 path 代号映射（不写完整 wss URL），其余用完整 URL 映射。"""
+        """获取数据源名称。"""
         if self.custom_data_source_url and url == self.custom_data_source_url:
             return "custom"
         normalized_url = (url or "").rstrip("/")
@@ -2972,18 +2702,7 @@ class Config:
             P2PQUAKE_HISTORY_AGGREGATE_URL: "p2pquake",
             "https://api.p2pquake.net/v2/history?codes=551&limit=3": "p2pquake",
             "https://api.p2pquake.net/v2/jma/tsunami?limit=1": "p2pquake_tsunami",
-            EQSC_HTTP_MASTER: "eqsc",
-            EQSC_JMA_EEW_HTTP: "eqsc_jma_eew",
-            EQSC_JMA_REPORT_HTTP: "eqsc_jma_report",
-            EQSC_JMA_TSUNAMI_HTTP: "eqsc_jma_tsunami",
-            EQSC_CENC_HTTP: "eqsc_cenc",
-            EQSC_CENC_IR_HTTP: "eqsc_cenc_ir",
-            EQSC_CWA_HTTP: "eqsc_cwa",
-            EQSC_HKO_HTTP: "eqsc_hko",
-            EQSC_USGS_HTTP: "eqsc_usgs",
-            EQSC_EMSC_HTTP: "eqsc_emsc",
-            EQSC_TYPHOON_HTTP: "eqsc_typhoon",
-            EQSC_VOLCANO_HTTP: "eqsc_volcano",
+            EQSC_WS_URL: "eqsc",
         }
         if normalized_url in http_url_to_name:
             return http_url_to_name[normalized_url]
@@ -3007,34 +2726,6 @@ class Config:
                 "cenc": "cenc",
             }
             return whews_path_to_name.get(path, "whews")
-        # FSSN 新地址路径也是 /all，必须先于旧 Fan Studio 的 path=all → fanstudio
-        low_url = normalized_url.lower()
-        if "fssn-api.fanstudio.tech" in low_url and low_url.startswith(("wss://", "ws://")):
-            path = low_url.rstrip("/").split("/")[-1] or "all"
-            if path == "fssn-cmt":
-                return "fssn-cmt"
-            return "fssn"
-        # 旧 Fan Studio wss（已停运）：从 URL 抽 path
-        if "fanstudio.tech" in low_url and low_url.startswith(("wss://", "ws://")):
-            try:
-                path = normalized_url.rstrip("/").split("/")[-1] or "all"
-                fanstudio_path_to_name = {
-                    "all": "fanstudio",
-                    "weatheralarm": "weatheralarm",
-                    "tsunami": "海啸信息",
-                    "cenc": "cenc", "cea": "cea", "cea-pr": "cea-pr",
-                    "ningxia": "ningxia", "guangxi": "guangxi",
-                    "shanxi": "shanxi", "beijing": "beijing", "yunnan": "yunnan",
-                    "cwa": "cwa", "cwa-eew": "cwa-eew", "jma": "jma", "hko": "hko",
-                    "usgs": "usgs", "sa": "sa", "emsc": "emsc", "bcsf": "bcsf",
-                    "gfz": "gfz", "usp": "usp", "kma": "kma", "kma-eew": "kma-eew", "fssn": "fssn",
-                    "fssn-cmt": "fssn-cmt",
-                }
-                if path in fanstudio_path_to_name:
-                    return fanstudio_path_to_name[path]
-            except Exception:
-                pass
-        # 非 Fan Studio：仅保留需完整 URL 的数据源（P2PQuake WSS、Wolfx All 等）
         url_to_name = {
             WOLFX_MASTER_KEY: "wolfx",
             WOLFX_ALL_EEW_URL: "wolfx_all_eew",
@@ -3042,11 +2733,8 @@ class Config:
             WOLFX_CENC_EQLIST_URL: "wolfx_cenc",
             WOLFX_JMA_EQLIST_URL: "wolfx_jma_eqlist",
             NOWQUAKE_CENCINT_WSS_URL: "cenc-ir",
-            FSSN_ALL_URL: "fssn",
-            FSSN_FSSN_URL: "fssn",
-            FSSN_CMT_URL: "fssn-cmt",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
-            OPENQUAKE_WS_ALL_URL: "openquake",
+            PANCAKES_WS_ALL_URL: "PancakesAPI",
         }
         return url_to_name.get(normalized_url, url)
     
@@ -3054,7 +2742,6 @@ class Config:
         """获取机构名称"""
         organization_name_mapping = {
             "custom": "自定义数据源",
-            "fanstudio": "Fan Studio数据源",
             "whews": "WeJet",
             "whews_cea": "中国地震预警网",
             "weatheralarm": "气象预警",
@@ -3080,12 +2767,9 @@ class Config:
             "jma_eq": "日本气象厅地震情报",
             "p2pquake": "日本气象厅地震情报",
             "p2pquake_tsunami": "日本气象厅海啸预报",
-            "openquake": "PancakesAPI",
-            "openquake_gq": "GlobalQuake地震预警",
-            "openquake_nmefc": "国家海洋环境预报中心海啸预警",
-            "openquake_nmefc_wave": "国家海洋环境预报中心海浪警报",
-            "openquake_nmefc_surge": "国家海洋环境预报中心风暴潮警报",
-            "openquake_cma": "中国气象局气象预警",
+            "pancakes": "PancakesAPI",
+            "PancakesAPI": "PancakesAPI",
+            "pancakes_gq": "GlobalQuake地震预警",
             "hko": "香港天文台",
             "jian_typhoon": "实时台风",
             "whews_typhoon": "实时台风",
@@ -3098,8 +2782,6 @@ class Config:
             "usp": "巴西圣保罗大学",
             "kma": "韩国气象厅",
             "kma-eew": "韩国气象厅地震预警",
-            "fssn": "FSSN",
-            "fssn-cmt": "FSSN 矩心矩张量解",
             "cenc_int": "中国地震台网中心地震烈度速报",
             "cmt_gfz": "GFZ 矩心矩张量解",
             "funvisis": "委内瑞拉地震研究中心",
@@ -3125,6 +2807,9 @@ class Config:
             "usgs_tsunami": "NOAA/USGS 海啸预警",
             "eqsc": "EQSC",
             "eqsc_jma_eew": "日本气象厅（EQSC）",
+            "eqsc_cea": "中国地震预警网（EQSC）",
+            "eqsc_cea_pr": "中国地震预警省网（EQSC）",
+            "eqsc_cwa_eew": "台湾中央气象署预警（EQSC）",
             "eqsc_jma_report": "日本气象厅地震情报（EQSC）",
             "eqsc_jma_tsunami": "日本气象厅海啸情报（EQSC）",
             "eqsc_cenc": "中国地震台网中心（EQSC）",

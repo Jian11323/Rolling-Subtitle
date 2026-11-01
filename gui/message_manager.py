@@ -85,12 +85,11 @@ _ALL_STREAM_EXTRAS: List[str] = [
     "海啸信息", "ntwc", "ptwc", "incois", "cat_tsunami", "eqsc_jma_tsunami",
     "cenc-ir", "wolfx_cenc", "eqsc_cenc", "eqsc_cenc_ir",
     "guangxi", "fujian", "sichuan", "shaanxi", "hubei",
-    "eqsc_cwa",
+    "eqsc_cwa", "eqsc_cwa_eew", "eqsc_cea", "eqsc_cea_pr",
     "p2pquake", "wolfx_jma_eqlist", "eqsc_jma_report", "p2pquake_tsunami",
     "eqsc_volcano",
     "eqsc_hko", "eqsc_usgs", "eqsc_emsc",
     "sgc", "cenais",
-    "fssn", "fssn-cmt",
     "cmt_usgs", "cmt_emsc", "cmt_cenc", "cmt_ingv",
     # 台风：不在 /all，放最后
     "jian_typhoon", "eqsc_typhoon", "whews_typhoon",
@@ -100,6 +99,8 @@ _WARNING_SOURCES = frozenset({
     "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
     "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
     "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew",
+    "eqsc_cea", "eqsc_cea_pr", "eqsc_cwa_eew",
+    "pancakes_gq",
 })
 
 
@@ -111,6 +112,8 @@ def _build_all_stream_priority_and_order() -> tuple:
         "cea", "cea-pr", "cwa-eew", "jma", "sa", "kma-eew", "early_est",
         "wolfx_jma_eew", "wolfx_sc_eew", "wolfx_fj_eew", "wolfx_cenc_eew",
         "wolfx_cq_eew", "wolfx_cwa_eew", "eqsc_jma_eew",
+        "eqsc_cea", "eqsc_cea_pr", "eqsc_cwa_eew",
+        "pancakes_gq",
     ):
         if s not in fixed:
             fixed.append(s)
@@ -145,6 +148,9 @@ def _build_all_stream_priority_and_order() -> tuple:
     _insert_after("fujian", "sichuan")
     _insert_after("sichuan", "shaanxi")
     _insert_after("shaanxi", "hubei")
+    _insert_after("cea", "eqsc_cea")
+    _insert_after("cea-pr", "eqsc_cea_pr")
+    _insert_after("cwa-eew", "eqsc_cwa_eew")
     _insert_after("cwa", "eqsc_cwa")
     _insert_after("jma_eq", "p2pquake")
     _insert_after("p2pquake", "wolfx_jma_eqlist")
@@ -201,6 +207,18 @@ def get_source_priority(source: str) -> int:
     return SOURCE_PRIORITY.get(source, SOURCE_PRIORITY['default'])
 
 
+def get_fusion_rank(source: str) -> tuple:
+    """
+    跨源融合排名：先比 SOURCE_PRIORITY，再比固定键序（预警多为 priority=0，需键序区分 cea 与 eqsc_cea）。
+    元组越小越优先。
+    """
+    pri = get_source_priority(source)
+    order = SOURCE_FIXED_ORDER_INDEX.get(
+        source, len(SOURCE_FIXED_ORDER_INDEX) + 999
+    )
+    return (pri, order)
+
+
 @dataclass
 class MessageItem:
     """消息项"""
@@ -233,39 +251,53 @@ class MessageItem:
 
     def is_same_event(self, other: 'MessageItem') -> bool:
         """
-        判断是否是同一条地震事件的更新
-        
-        Args:
-            other: 另一个消息项
-            
-        Returns:
-            True表示是同一条事件，False表示不是
+        判断是否是同一条地震事件的更新。
+
+        同 source：按 event_id / 文本回退。
+        跨 source：仅在融合通道族内（如 cea ↔ eqsc_cea）按 id 或发震+震中接近判定。
         """
-        # 必须来自同一个数据源
-        if self.source != other.source:
+        if other is None:
             return False
-        
-        # 如果有event_id，使用event_id匹配
-        if self.event_id and other.event_id:
-            return self.event_id == other.event_id
-        
-        # 如果没有event_id（如气象预警），使用文本内容的前50个字符和时间戳作为唯一标识
-        # 这样可以避免完全相同的消息被重复添加
-        if not self.event_id and not other.event_id:
-            normalized_self = _normalize_warning_text(self.text)
-            normalized_other = _normalize_warning_text(other.text)
-            if normalized_self and normalized_self == normalized_other:
-                return True
-            
-            if self.shock_time and other.shock_time and self.shock_time == other.shock_time:
-                return True
-            
-            if normalized_self and normalized_other:
-                time_diff = abs(self.timestamp - other.timestamp)
-                if time_diff < 30.0 and normalized_self[:80] == normalized_other[:80]:
+
+        # 同数据源
+        if self.source == other.source:
+            if self.event_id and other.event_id:
+                try:
+                    from utils.event_fusion import event_ids_match_for_fusion
+                    if event_ids_match_for_fusion(self.event_id, other.event_id):
+                        return True
+                except Exception:
+                    pass
+                return self.event_id == other.event_id
+
+            if not self.event_id and not other.event_id:
+                normalized_self = _normalize_warning_text(self.text)
+                normalized_other = _normalize_warning_text(other.text)
+                if normalized_self and normalized_self == normalized_other:
                     return True
-        
-        return False
+                if self.shock_time and other.shock_time and self.shock_time == other.shock_time:
+                    return True
+                if normalized_self and normalized_other:
+                    time_diff = abs(self.timestamp - other.timestamp)
+                    if time_diff < 30.0 and normalized_self[:80] == normalized_other[:80]:
+                        return True
+            return False
+
+        # 跨源：通道族融合
+        try:
+            from utils.event_fusion import messages_are_same_fused_event
+            return messages_are_same_fused_event(
+                source_a=self.source,
+                event_id_a=self.event_id,
+                shock_time_a=self.shock_time,
+                parsed_a=self.parsed_data,
+                source_b=other.source,
+                event_id_b=other.event_id,
+                shock_time_b=other.shock_time,
+                parsed_b=other.parsed_data,
+            )
+        except Exception:
+            return False
 
 
 class MessageQueue:
@@ -454,6 +486,13 @@ class MessageBuffer:
             # 查找是否有同一条事件的消息
             for i, existing_msg in enumerate(self.buffer):
                 if message.is_same_event(existing_msg):
+                    # 跨源：低优先级不覆盖高优先级槽
+                    if message.source != existing_msg.source:
+                        if get_fusion_rank(message.source) > get_fusion_rank(existing_msg.source):
+                            logger.debug(
+                                f"跨源融合保留高优先级: keep={existing_msg.source} drop={message.source}"
+                            )
+                            return False
                     # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
                     if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
                         logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
@@ -535,6 +574,15 @@ class MessageBuffer:
                 # 查找是否有同一条事件的消息（在缓冲区中）
                 for i, existing_msg in enumerate(self.buffer):
                     if message.is_same_event(existing_msg):
+                        # 跨源：低优先级不覆盖高优先级槽
+                        if message.source != existing_msg.source:
+                            if get_fusion_rank(message.source) > get_fusion_rank(existing_msg.source):
+                                logger.debug(
+                                    f"跨源融合保留高优先级: keep={existing_msg.source} drop={message.source}"
+                                )
+                                unique_results.append(False)
+                                replaced = True
+                                break
                         # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
                         if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
                             logger.debug(f"忽略重复更新消息: {message.source} / {message.event_id}")
@@ -612,33 +660,41 @@ class MessageBuffer:
             True表示替换了已有消息，False表示添加了新消息
         """
         with self._lock:
-            # 查找是否有相同数据源的消息
+            # 查找同 source 或跨源同事件
             for i, existing_msg in enumerate(self.buffer):
-                if message.source == existing_msg.source:
-                    # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
-                    if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
-                        logger.debug(f"忽略重复更新消息: {message.source}")
+                same_source = message.source == existing_msg.source
+                if not same_source and not message.is_same_event(existing_msg):
+                    continue
+                if not same_source:
+                    if get_fusion_rank(message.source) > get_fusion_rank(existing_msg.source):
+                        logger.debug(
+                            f"跨源融合保留高优先级: keep={existing_msg.source} drop={message.source}"
+                        )
                         return False
-                    # 找到相同数据源，替换
-                    message.inherit_display_meta_from(existing_msg)
-                    old_msg_id = id(existing_msg)
-                    new_msg_id = id(message)
-                    # 保持原有的添加顺序，确保轮播顺序不变
-                    if old_msg_id in self._message_add_order:
-                        self._message_add_order[new_msg_id] = self._message_add_order[old_msg_id]
-                        del self._message_add_order[old_msg_id]
-                    else:
-                        # 如果没有原有顺序，使用当前计数器
-                        self._add_order_counter += 1
-                        self._message_add_order[new_msg_id] = self._add_order_counter
-                    
-                    # 静默替换：直接替换缓冲区中的消息，不改变位置
-                    self.buffer[i] = message
-                    self._retarget_displaying_id_if_needed(old_msg_id, new_msg_id)
-                    # 如果启用优先级，重新排序（但保持当前显示的消息位置）
-                    if self.use_priority:
-                        self._sort_by_priority()
-                    return True
+                # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
+                if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
+                    logger.debug(f"忽略重复更新消息: {message.source}")
+                    return False
+                # 替换（同源更新或跨源融合）
+                message.inherit_display_meta_from(existing_msg)
+                old_msg_id = id(existing_msg)
+                new_msg_id = id(message)
+                # 保持原有的添加顺序，确保轮播顺序不变
+                if old_msg_id in self._message_add_order:
+                    self._message_add_order[new_msg_id] = self._message_add_order[old_msg_id]
+                    del self._message_add_order[old_msg_id]
+                else:
+                    # 如果没有原有顺序，使用当前计数器
+                    self._add_order_counter += 1
+                    self._message_add_order[new_msg_id] = self._add_order_counter
+
+                # 静默替换：直接替换缓冲区中的消息，不改变位置
+                self.buffer[i] = message
+                self._retarget_displaying_id_if_needed(old_msg_id, new_msg_id)
+                # 如果启用优先级，重新排序（但保持当前显示的消息位置）
+                if self.use_priority:
+                    self._sort_by_priority()
+                return True
             
             # 没有找到相同数据源，添加新消息
             if len(self.buffer) >= self.max_size:
@@ -659,15 +715,8 @@ class MessageBuffer:
     
     def batch_replace_by_source(self, messages: List[MessageItem]) -> List[bool]:
         """
-        批量按数据源替换消息（每个数据源只保留一条最新消息）
-        批量操作完成后统一排序，确保顺序稳定
-        同时处理批量消息列表中的重复数据源（只保留最新的）
-        
-        Args:
-            messages: 消息项列表
-            
-        Returns:
-            结果列表，True表示替换了已有消息，False表示添加了新消息
+        批量写入缓冲区：同 source 更新；跨源同事件（融合通道族）合并为一槽。
+        冲突时保留优先级更高的源（数字更小），同级取更新时间戳。
         """
         results = []
         with self._lock:
@@ -698,15 +747,25 @@ class MessageBuffer:
                     source_to_latest_msg[source] = message
                     message_source_map.append(source)
             
-            # 处理去重后的消息（每个数据源一条）
-            unique_messages = list(source_to_latest_msg.values())
+            # 跨源同事件再折叠（cea 与 eqsc_cea 等同通道）
+            try:
+                from utils.event_fusion import collapse_batch_by_fusion
+                unique_messages = collapse_batch_by_fusion(
+                    list(source_to_latest_msg.values()), get_fusion_rank
+                )
+            except Exception:
+                unique_messages = list(source_to_latest_msg.values())
             unique_results = []
             
             for message in unique_messages:
                 replaced = False
-                # 查找是否有相同数据源的消息（在缓冲区中）
+                # 同 source 或跨源同事件
                 for i, existing_msg in enumerate(self.buffer):
-                    if message.source == existing_msg.source:
+                    same_source = message.source == existing_msg.source
+                    same_event = same_source or message.is_same_event(existing_msg)
+                    if not same_event:
+                        continue
+                    if same_source:
                         # 如果内容完全一致，则认为是重复更新，忽略它，避免重复轮播相同内容
                         if message.text == existing_msg.text and message.image_path == existing_msg.image_path:
                             logger.debug(f"忽略重复更新消息: {message.source}")
@@ -740,9 +799,53 @@ class MessageBuffer:
                         unique_results.append(True)
                         replaced = True
                         break
+
+                    # 跨源同事件：排名更优者覆盖槽位；更差则丢弃入队（保留已有）
+                    re_rank = get_fusion_rank(existing_msg.source)
+                    ri_rank = get_fusion_rank(message.source)
+                    if ri_rank > re_rank:
+                        logger.debug(
+                            f"跨源融合保留高优先级: keep={existing_msg.source} drop={message.source} "
+                            f"event_id={message.event_id or existing_msg.event_id}"
+                        )
+                        unique_results.append(False)
+                        replaced = True
+                        break
+                    if (
+                        message.text == existing_msg.text
+                        and message.image_path == existing_msg.image_path
+                        and ri_rank == re_rank
+                    ):
+                        unique_results.append(False)
+                        replaced = True
+                        break
+                    message.inherit_display_meta_from(existing_msg)
+                    old_msg_id = id(existing_msg)
+                    new_msg_id = id(message)
+                    if old_msg_id in self._message_add_order:
+                        self._message_add_order[new_msg_id] = self._message_add_order[old_msg_id]
+                        del self._message_add_order[old_msg_id]
+                    else:
+                        self._add_order_counter += 1
+                        self._message_add_order[new_msg_id] = self._add_order_counter
+                    if (
+                        message.message_type == "weather"
+                        and not message.image_path
+                        and existing_msg.image_path
+                    ):
+                        message.image_path = existing_msg.image_path
+                    self.buffer[i] = message
+                    self._retarget_displaying_id_if_needed(old_msg_id, new_msg_id)
+                    logger.info(
+                        f"跨源融合替换: {existing_msg.source} -> {message.source} "
+                        f"event_id={message.event_id or existing_msg.event_id}"
+                    )
+                    unique_results.append(True)
+                    replaced = True
+                    break
                 
                 if not replaced:
-                    # 没有找到相同数据源，添加新消息
+                    # 没有找到同 source / 同融合事件，添加新消息
                     if len(self.buffer) >= self.max_size:
                         self._remove_lowest_priority_message()
                     
@@ -754,10 +857,12 @@ class MessageBuffer:
                     self.buffer.append(message)
                     unique_results.append(False)
             
-            # 根据映射关系构建结果列表（保持与输入消息列表长度一致）
-            # 对于同一数据源的多个消息，结果相同
+            # 按原始输入 source 回填结果；被融合折叠掉的源视为已处理(False)
             source_to_result = {msg.source: unique_results[i] for i, msg in enumerate(unique_messages)}
-            results = [source_to_result[message_source_map[i]] for i in range(len(messages))]
+            results = []
+            for i in range(len(messages)):
+                src = message_source_map[i]
+                results.append(bool(source_to_result.get(src, False)))
             
             # 批量操作完成后统一排序
             if self.use_priority:

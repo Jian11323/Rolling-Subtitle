@@ -1,6 +1,6 @@
 # 地震情报实况栏
 
-当前版本：**v2.9.5**
+当前版本：**v2.10.0**
 
 > [!WARNING]
 > 软件目前仍处于测试阶段，无法保证软件稳定性。
@@ -18,9 +18,9 @@
 
 - 介绍页（安装包 / 便携版）：[sismotide.top/rolling-subtitle](https://sismotide.top/rolling-subtitle)
 - 安装包：https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe
-- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.5.zip
-- GitHub Release：[v2.9.5](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.9.5)
-- Gitee Release：[v2.9.5](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.9.5)
+- 便携版：https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.10.0.zip
+- GitHub Release：[v2.10.0](https://github.com/Jian11323/Rolling-Subtitle/releases/tag/v2.10.0)
+- Gitee Release：[v2.10.0](https://gitee.com/jian0786/Rolling-Subtitle/releases/tag/v2.10.0)
 
 ## 功能
 
@@ -31,9 +31,8 @@
 ### 数据接入
 
 - **主数据源（二选一）**：WeJet、Jian Project（默认）；切换主数据源后自动清空消息缓冲并重新订阅；保存后按所选主源启用连接。
-- **FSSN**：[FSSN WebSocket API](https://fssn-api.fanstudio.tech/)（独立于已停运的 FAN Studio API）。
-- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、PancakesAPI、FSSN、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。P2PQuake 解析地震情报（551）与海啸预报（552）；地震情报（551）与主数据源 JMA 情报互斥。
-- **气象预警源（互斥）**：Jian / WeJet / PancakesAPI 单独选用，避免同类信息重复推送。
+- **辅助数据源**：可与主源并行启用 Wolfx、EQSC、P2PQuake、PancakesAPI、台风 HTTP、CENC 烈度速报等独立通道；各源解析范围可单独配置。EQSC 实时走 `wss://equake.top/`（含 JMA / CEA / CEA 省局 / CWA 预警与多台网列表等；`ntpCST` 仅 HTTP）；与主源等同机构通道**可并存**，字幕缓冲按同事件跨源融合（优先展示优先级更高的源，不互斥关掉解析开关）。P2PQuake 解析地震情报（551）与海啸预报（552）；地震情报（551）与主数据源 JMA 情报互斥。
+- **气象预警源（互斥）**：Jian / WeJet 单独选用，避免同类信息重复推送。
 - **国际及地区机构速报**：支持 USGS、EMSC、HKO、GFZ、USP、CWA、KMA、BMKG、GeoNet、INGV、PTWC 等机构信息，经主聚合服务或辅助通道接入。
 
 ### 界面与告警反馈
@@ -54,7 +53,6 @@
 * 日本地震预警（JMA）：[Wolfx](https://wolfx.jp/)、[WeJet](https://auth.beecld.com/)、[Jian Project](https://api.sismotide.top/)
 * 中国地震预警 / 速报：[中国预警网](https://www.cea.gov.cn/)、[中国地震台网中心](https://www.cenc.ac.cn/)、[Jian Project](https://api.sismotide.top/)
 * 气象预警：[中央气象台](https://www.nmc.cn/)、[WeJet](https://api.beecld.com)、[Jian Project](https://api.sismotide.top/)
-* FSSN 地震信息：[FSSN WebSocket API](https://fssn-api.fanstudio.tech/)
 * 国外机构地震速报：
 [USGS](https://earthquake.usgs.gov/)
 [EMSC](https://www.seismicportal.eu/)
@@ -68,7 +66,6 @@
 [INGV](https://www.ingv.it/)
 [PTWC](https://ptwc.weather.gov/) 
 [Jian Project](https://api.sismotide.top/)
-[FSSN](https://fssn-api.fanstudio.tech/)
 [WeJet](https://api.beecld.com/)
 
 ## 系统要求与性能模式
@@ -87,9 +84,9 @@
 
 | 模式 | 渲染 | 数据源与解析 | 告警反馈 |
 |------|------|--------------|----------|
-| **低性能** | CPU 软件渲染，30 fps | 仅保留主聚合源；关闭 Wolfx、Jian Project、P2PQuake、FSSN、Nowquake 等辅助连接；精简国际速报解析；HTTP 轮询间隔约 2.5 倍 | 默认关闭 TTS |
-| **中性能** | CPU 软件渲染，30 fps | 主聚合源 + 台风 HTTP、PancakesAPI 等常用辅助源；解析开关恢复程序默认 | 跟随默认设置 |
-| **高性能** | OpenGL 硬件渲染，30 fps | 启用全部可选 WebSocket / HTTP 源（含 Jian Project、Wolfx、P2PQuake、Nowquake 等）及完整解析 | 告警反馈为 TTS（默认可选手动开启） |
+| **低性能** | CPU 软件渲染，30 fps | 仅保留当前主聚合源；关闭 Wolfx、EQSC、P2PQuake、Nowquake、PancakesAPI 等辅助连接；精简国际速报解析；HTTP 轮询间隔约 2.5 倍 | 默认关闭 TTS |
+| **中性能** | CPU 软件渲染，30 fps | 主聚合源 + 台风 HTTP 等常用辅助源；解析开关恢复程序默认 | 跟随默认设置 |
+| **高性能** | OpenGL 硬件渲染，30 fps | 启用全部可选 WebSocket / HTTP 源（含 Wolfx、P2PQuake、Nowquake 等）及完整解析 | 告警反馈为 TTS（默认可选手动开启） |
 | **极致** | OpenGL 硬件渲染，60 fps，2× MSAA | 与高性能相同的数据源与解析范围 | 开启 Toast 通知（告警反馈为 TTS，可选手动开启） |
 
 **自动匹配**（仅首次初始化时）：物理内存小于 3 GB 或 CPU ≤ 2 核 → 低性能；小于 6 GB 或 ≤ 4 核 → 中性能；小于 12 GB 或 ≤ 6 核 → 高性能；其余 → 极致。

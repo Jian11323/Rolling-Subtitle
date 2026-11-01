@@ -37,7 +37,7 @@ WOLFX_TYPE_MAP: Dict[str, str] = {
 WOLFX_REPORT_TYPES = frozenset({"wolfx_cenc", "wolfx_jma_eqlist"})
 
 # source_type -> 消息配置解析开关字段名（与设置页 Wolfx 区块一致）
-# wolfx_cwa_eew 由 WOLFX_CWA_EEW_URL 连接开关控制，不复用 Fan Studio 的 fanstudio_parse_*
+# wolfx_cwa_eew 由 WOLFX_CWA_EEW_URL 连接开关控制
 WOLFX_PARSE_FLAG: Dict[str, str] = {
     "wolfx_jma_eew": "ali_all_parse_nied",
     "wolfx_sc_eew": "ali_all_parse_early_est",
@@ -278,7 +278,6 @@ class WolfxAdapter(BaseAdapter):
             "organization": ORG_BY_SOURCE.get(source_type, "地震信息"),
             "event_id": event_id,
             "raw_data": dict(item),
-            "fanstudio": False,
             "whews": False,
         }
         if depth is not None:
@@ -439,7 +438,6 @@ class WolfxAdapter(BaseAdapter):
             "raw_data": dict(data),
             "final": final,
             "cancel": cancel,
-            "fanstudio": False,
             "whews": False,
         }
         if depth_f is not None:
