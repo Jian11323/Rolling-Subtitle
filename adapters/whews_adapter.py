@@ -29,7 +29,7 @@ from utils import timezone_utils
 logger = get_logger()
 
 # WeJet CEA 已恢复：需 WAuth + App 鉴权；不再整源丢弃
-WHEWS_SKIP_SOURCES = frozenset()
+WHEWS_SKIP_SOURCES = frozenset({"nrcan"})  # 已下架：加拿大自然资源部
 
 
 
@@ -90,7 +90,6 @@ WHEWS_SOURCE_TO_INTERNAL = {
     "geonet": "geonet",
     "tmd": "tmd",
     "ingv": "ingv",
-    "nrcan": "nrcan",
     "mmd": "mmd",
     "phivolcs": "phivolcs",
     "sgc": "sgc",
@@ -183,7 +182,6 @@ WHEWS_SOURCE_FLAG_FIELD = {
     "geonet": "whews_parse_geonet",
     "tmd": "whews_parse_tmd",
     "ingv": "whews_parse_ingv",
-    "nrcan": "whews_parse_nrcan",
     "mmd": "whews_parse_mmd",
     "phivolcs": "whews_parse_phivolcs",
     "sgc": "whews_parse_sgc",

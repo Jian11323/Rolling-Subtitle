@@ -33,7 +33,7 @@ JIAN_TSUNAMI_INTERNAL = frozenset(
     {"tsunami", "cwa_tsunami", "jma_tsunami", "usgs_tsunami"}
 )
 JIAN_VOLCANO_INTERNAL = frozenset({"jma_volcano", "usgs_volcano"})
-JIAN_SKIP_INTERNAL = frozenset()  # CEA 已恢复公开推送
+JIAN_SKIP_INTERNAL = frozenset({"nrcan"})  # 已下架：加拿大自然资源部
 JIAN_UTC9_SOURCES = frozenset(
     {"jma", "jma_eq", "jma_tsunami", "jma_volcano"}
 )  # JMA 系列：ISO/发表时刻常为 JST
@@ -274,6 +274,7 @@ def _is_tsunami_product_code(text: str) -> bool:
     if re.fullmatch(r"[A-Z]{3,6}\d{0,4}", s, flags=re.IGNORECASE):
         return True
     return False
+
 
 
 class JianProjectAdapter(BaseAdapter):

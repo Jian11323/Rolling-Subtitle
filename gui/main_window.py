@@ -810,6 +810,8 @@ class MainWindow(QMainWindow):
                 (getattr(self.config.ws_config, "jian_login_token", "") or "").strip(),
                 (getattr(self.config.ws_config, "jian_refresh_token", "") or "").strip(),
                 float(getattr(self.config.ws_config, "jian_refresh_expire_at", 0) or 0),
+                # 主/备切换必须触发热重载，否则状态页会残留双卡片
+                (getattr(self.config.ws_config, "jian_endpoint_mode", "") or "").strip().lower(),
                 tuple(sorted((self.config.http_poll_intervals or {}).items())),
             )
             full_snapshot = (snapshot, auth_part)
@@ -2255,6 +2257,11 @@ class MainWindow(QMainWindow):
             if url and not es.get(url, False):
                 logger.debug(f"已忽略消息：EQSC HTTP 源已关闭: {url}")
                 return False
+
+        # 已下架源
+        if st in ("nrcan",) or (st or "").startswith("nrcan-") or (st or "").startswith("nrcan_"):
+            logger.debug(f"已忽略消息：下架源 {st}")
+            return False
 
         if parsed_data.get("whews"):
             from config import is_whews_all_enabled

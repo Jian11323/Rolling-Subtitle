@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Jian Project（auth.sismotide.top）鉴权凭证辅助。
+Jian Project 鉴权凭证辅助：lk→rt 固定主站；rt→at 随 API 主机。
 
 流程：邮件登录密钥 lk_（约 5 分钟、用后作废）
   → 长期 Token rt_（约 180 天，应本地持久化）
@@ -23,7 +23,7 @@ logger = get_logger()
 
 JIAN_AUTH_BASE = "https://auth.sismotide.top"
 JIAN_REFRESH_URL = f"{JIAN_AUTH_BASE}/api/refresh"
-JIAN_ACCESS_URL = f"{JIAN_AUTH_BASE}/api/access"
+JIAN_ACCESS_URL = f"{JIAN_AUTH_BASE}/api/access"  # 兼容；实际换 at_ 用 jian_auth_access_url()
 JIAN_AUTH_PAGE = "https://auth.sismotide.top/"
 
 # 访问令牌约 3600s；提前刷新避免边界失效
@@ -151,9 +151,16 @@ def create_refresh_token(login_key: str, timeout: float = 15.0) -> Tuple[bool, s
         return False, "", f"获取长期 Token 失败: {e}", 0
 
 
-def create_access_token(refresh_token: str, timeout: float = 15.0) -> Tuple[bool, str, str, int]:
+def create_access_token(
+    refresh_token: str,
+    timeout: float = 15.0,
+    *,
+    api_host: str = "",
+) -> Tuple[bool, str, str, int]:
     """
     使用长期 Token 换取访问令牌（at_…）。
+
+    api_host：当前 Jian API 主机；备服务器须走备服鉴权口签发 at_。
 
     Returns:
         (ok, access_token, message, expires_after_sec)
@@ -162,8 +169,11 @@ def create_access_token(refresh_token: str, timeout: float = 15.0) -> Tuple[bool
     if not token:
         return False, "", "长期 Token 为空", 0
     try:
+        from config import jian_auth_access_url
+
+        access_url = jian_auth_access_url(api_host)
         resp = requests.post(
-            JIAN_ACCESS_URL,
+            access_url,
             headers=_bearer_headers(token),
             timeout=timeout,
         )
@@ -284,6 +294,7 @@ def _fetch_and_cache_access_token(
     seed_expire_at: float,
     force_new_refresh: bool,
     timeout: float,
+    api_host: str = "",
 ) -> Tuple[bool, str, str]:
     """
     执行换票并缓存。
@@ -342,7 +353,7 @@ def _fetch_and_cache_access_token(
                 "access_expire_at": 0.0,
             }
 
-    ok, access, msg, expires_sec = create_access_token(refresh, timeout=timeout)
+    ok, access, msg, expires_sec = create_access_token(refresh, timeout=timeout, api_host=api_host)
     if not ok:
         # 长期 Token 可能已失效：若仍有 lk_ 再换一次；否则提示重新申请
         lk = (login_key or "").strip()
@@ -350,7 +361,9 @@ def _fetch_and_cache_access_token(
             ok2, refresh2, msg2, expires_min2 = create_refresh_token(lk, timeout=timeout)
             if not ok2:
                 return False, "", msg or msg2
-            ok3, access, msg3, expires_sec = create_access_token(refresh2, timeout=timeout)
+            ok3, access, msg3, expires_sec = create_access_token(
+                refresh2, timeout=timeout, api_host=api_host
+            )
             if not ok3:
                 return False, "", msg3
             refresh = refresh2
@@ -371,15 +384,7 @@ def _fetch_and_cache_access_token(
         access=access,
         access_ttl=float(access_ttl),
     )
-    # 同时用 rt_ 自身作键，便于仅凭持久化 rt_ 命中缓存
-    if refresh.startswith("rt_") and cache_key != refresh:
-        _store_bundle(
-            refresh,
-            refresh=refresh,
-            refresh_expire_at=refresh_expire_at or (time.time() + _REFRESH_FALLBACK_TTL_SEC),
-            access=access,
-            access_ttl=float(access_ttl),
-        )
+    # 勿再写入无鉴权口后缀的裸 rt_ 键，避免主/备 at_ 串台。
     return True, access, msg or "OK"
 
 
@@ -390,6 +395,7 @@ def get_jian_access_token(
     persisted_refresh_expire_at: float = 0.0,
     force_refresh: bool = False,
     timeout: float = 15.0,
+    api_host: str = "",
 ) -> Tuple[bool, str, str]:
     """
     获取可用访问令牌。
@@ -408,6 +414,12 @@ def get_jian_access_token(
     if classify_jian_credential(lk) == "access":
         return False, "", "请勿填写 at_ 访问令牌；请填邮件 lk_，由软件换取并保存 rt_"
 
+    try:
+        from config import jian_auth_host_for_api
+
+        auth_tag = jian_auth_host_for_api(api_host)
+    except Exception:
+        auth_tag = "auth.sismotide.top"
     if rt:
         cache_key = seed_jian_refresh_cache(
             rt, persisted_refresh_expire_at, cache_key=rt
@@ -416,6 +428,7 @@ def get_jian_access_token(
         cache_key = lk
     else:
         return False, "", "请先填写邮件内 lk_ 登录密钥，或确认已保存长期 Token"
+    cache_key = f"{cache_key}|{auth_tag}"
 
     force_new = bool(force_refresh and classify_jian_credential(lk) == "login")
 
@@ -449,6 +462,7 @@ def get_jian_access_token(
                 seed_expire_at=float(persisted_refresh_expire_at or 0),
                 force_new_refresh=force_new,
                 timeout=timeout,
+                api_host=api_host,
             )
             flight.result = result
             return result

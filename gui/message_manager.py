@@ -55,7 +55,6 @@ _ALL_STREAM_ORDER: List[str] = [
     "bcsf",
     "ingv",
     "usp",
-    "nrcan",
     "afad",
     "ipma",
     "noa",

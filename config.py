@@ -429,7 +429,7 @@ JIAN_ENDPOINT_MODE_BACKUP = "backup"
 JIAN_LOGICAL_PREFIX = "jian://"
 JIAN_MASTER_KEY = f"{JIAN_LOGICAL_PREFIX}master"
 
-# auto 运行时当前主机（进程内；失败切换会改写）
+# auto 运行时当前主机（进程内；自动切换会改写）
 _jian_active_host = JIAN_API_HOST_PRIMARY
 _jian_fail_streak = 0
 
@@ -455,13 +455,17 @@ def jian_active_host(mode=None) -> str:
 
 
 def set_jian_endpoint_mode(mode) -> None:
-    """应用设置中的入口模式（热切换时调用）。"""
+    """应用设置中的入口模式（热切换时调用）。
+
+    auto 不重置失败计数与当前主机，避免每次重连把自动切换计数清零。
+    """
     global _jian_active_host, _jian_fail_streak
     m = normalize_jian_endpoint_mode(mode)
-    _jian_fail_streak = 0
     if m == JIAN_ENDPOINT_MODE_PRIMARY:
+        _jian_fail_streak = 0
         _jian_active_host = JIAN_API_HOST_PRIMARY
     elif m == JIAN_ENDPOINT_MODE_BACKUP:
+        _jian_fail_streak = 0
         _jian_active_host = JIAN_API_HOST_BACKUP
 
 
@@ -500,6 +504,31 @@ def rewrite_jian_api_url(url: str, host: str = None) -> str:
             idx = low.find(h)
             return u[:idx] + target + u[idx + len(h) :]
     return u
+
+
+
+JIAN_AUTH_HOST_PRIMARY = "auth.sismotide.top"
+JIAN_AUTH_ACCESS_URL_BACKUP = "https://auth.jianproject.cloud/api/access"
+JIAN_AUTH_ACCESS_URL_PRIMARY = "https://auth.sismotide.top/api/access"
+
+
+def jian_auth_host_for_api(api_host=None) -> str:
+    """缓存键用的鉴权身份；lk→rt 签发始终走主站。"""
+    h = (api_host or "").strip().lower()
+    if not h:
+        h = (_jian_active_host or JIAN_API_HOST_PRIMARY).lower()
+    if h == JIAN_API_HOST_BACKUP or "jianproject.cloud" in h:
+        return "auth.jianproject.cloud"
+    return JIAN_AUTH_HOST_PRIMARY
+
+
+def jian_auth_access_url(api_host=None) -> str:
+    h = (api_host or "").strip().lower()
+    if not h:
+        h = (_jian_active_host or JIAN_API_HOST_PRIMARY).lower()
+    if h == JIAN_API_HOST_BACKUP or "jianproject.cloud" in h:
+        return JIAN_AUTH_ACCESS_URL_BACKUP
+    return JIAN_AUTH_ACCESS_URL_PRIMARY
 
 
 def jian_project_all_url(mode=None) -> str:
@@ -545,7 +574,6 @@ JIAN_SUB_SOURCE_SPECS: List[Tuple[str, str]] = [
     ("bcsf", "BCSF 法国中央地震局"),
     ("ingv", "INGV 意大利国家地球物理与火山学研究所"),
     ("usp", "USP 巴西圣保罗大学"),
-    ("nrcan", "NRCan 加拿大自然资源部"),
     ("afad", "AFAD 土耳其灾害应急管理局"),
     ("ipma", "IPMA 葡萄牙气象局"),
     ("noa", "NOA 希腊国家天文台"),
@@ -655,7 +683,7 @@ _LEGACY_FANSTUDIO_TYPHOON_HTTP = "https://api.fanstudio.tech/we/typhoon.php"
 
 
 def is_jian_project_url(url: str) -> bool:
-    """是否为 Jian Project WebSocket URL（主服/备服）。"""
+    """是否为 Jian Project WebSocket URL（主服务器/备服务器）。"""
     low = (url or "").lower().rstrip("/")
     if not low.startswith(("ws://", "wss://")):
         return False
@@ -758,17 +786,18 @@ def p2pquake_master_enabled(enabled_sources: Dict[str, Any]) -> bool:
     return bool(enabled_sources.get(P2PQUAKE_WSS_URL, False))
 
 # 应用版本号（用于更新说明弹窗“仅展示一次”及关于页）
-APP_VERSION = "2.9.3"  # 当前程序版本
+APP_VERSION = "2.9.5"  # 当前程序版本
 
 # 自动更新清单默认 URL（可在设置-关于中修改）
-AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://sismotide.top/rolling-update/manifest.json"  # 默认更新清单地址
+AUTO_UPDATE_MANIFEST_URL_DEFAULT = "https://gitee.com/jian0786/Rolling-Subtitle/raw/main/update/manifest.json"  # 默认更新清单（Gitee）
 
 # 更新说明（关于页/首次启动弹窗展示，当前版本仅展示一次）
 # 每次修改 APP_VERSION 时，请同步修改下方 CHANGELOG_TEXT 的版本标题与更新条目。
-CHANGELOG_TEXT = """版本 2.9.3
-1、Jian Project 支持主服/备服手动选择与自动切换（api.sismotide.top ↔ api.jianproject.cloud）
-2、鉴权仍走 auth.sismotide.top；令牌主备通用
-3、沿用既有官方通知中心与其它数据源能力"""
+CHANGELOG_TEXT = """版本 2.9.5
+1、Jian Project 主/备服务器状态名称与双卡片显示修复
+2、主备切换时连接任务键保持稳定，避免状态页分裂
+3、移除 NRCAN（加拿大自然资源部）速报
+4、主备主机变化时强制重启 Jian 连接"""
 
 # 应用声明（更新说明弹窗与设置-关于页共用；修改时请两处效果一致）
 APP_DECLARATION_TEXT = (
@@ -899,7 +928,8 @@ class GUIConfig:
             except (TypeError, ValueError):
                 self.auto_update_timeout_seconds = 15
             mu = (getattr(self, 'auto_update_manifest_url', '') or '').strip()
-            if not mu:
+            # 旧自建站清单地址迁移到 Gitee 仓库 raw
+            if (not mu) or ('sismotide.top/rolling-update/manifest.json' in mu.lower()):
                 self.auto_update_manifest_url = AUTO_UPDATE_MANIFEST_URL_DEFAULT
             elif len(mu) > 2048:
                 self.auto_update_manifest_url = mu[:2048]
@@ -1004,7 +1034,6 @@ class MessageConfig:
     whews_parse_geonet: bool = True
     whews_parse_tmd: bool = True
     whews_parse_ingv: bool = True
-    whews_parse_nrcan: bool = True
     whews_parse_mmd: bool = True
     whews_parse_kma_eew: bool = True
     whews_parse_beijing: bool = True
@@ -1080,7 +1109,6 @@ class MessageConfig:
     jian_parse_bcsf: bool = True
     jian_parse_ingv: bool = True
     jian_parse_usp: bool = True
-    jian_parse_nrcan: bool = True
     jian_parse_afad: bool = True
     jian_parse_ipma: bool = True
     jian_parse_noa: bool = True
@@ -1631,7 +1659,6 @@ class Config:
                 'whews_parse_geonet': getattr(self.message_config, 'whews_parse_geonet', True),
                 'whews_parse_tmd': getattr(self.message_config, 'whews_parse_tmd', True),
                 'whews_parse_ingv': getattr(self.message_config, 'whews_parse_ingv', True),
-                'whews_parse_nrcan': getattr(self.message_config, 'whews_parse_nrcan', True),
                 'whews_parse_mmd': getattr(self.message_config, 'whews_parse_mmd', True),
                 'whews_parse_kma_eew': getattr(self.message_config, 'whews_parse_kma_eew', True),
                 'whews_parse_beijing': getattr(self.message_config, 'whews_parse_beijing', True),
@@ -2154,7 +2181,6 @@ class Config:
             ("tmd", "eq.tmd.go.th"),
             ("bcsf", "franceseisme.fr"),
             ("mmd", "mygempa.met.gov.my"),
-            ("nrcan", "earthquakescanada.nrcan.gc.ca"),
             ("cenc", "dizhensubao.igexin.com"),
         ]
         out: Dict[str, str] = {}
@@ -2218,7 +2244,7 @@ class Config:
                 "bmkg.go.id", "geonet.org.nz", "terraquakeapi.com", "early-est.rm.ingv.it",
                 "earthquake.usgs.gov", "weather.gov.hk", "geofon.gfz.de", "moho.iag.usp.br",
                 "api.core.exptech.dev", "seismicportal.eu", "eq.tmd.go.th", "franceseisme.fr",
-                "mygempa.met.gov.my", "earthquakescanada.nrcan.gc.ca", "dizhensubao.igexin.com",
+                "mygempa.met.gov.my", "dizhensubao.igexin.com",
             )):
                 del self.enabled_sources[key]
                 removed = True
@@ -2967,6 +2993,9 @@ class Config:
                 return internal
         if normalized_url == JIAN_MASTER_KEY:
             return "jian"
+        # Jian Project /all（主站 api.sismotide.top 或备站 api.jianproject.cloud）
+        if is_jian_project_url(normalized_url) and normalized_url.startswith(("wss://", "ws://")):
+            return "jian"
         if normalized_url == WOLFX_MASTER_KEY:
             return "wolfx"
         # 无界科技（主站或备用）
@@ -3018,7 +3047,6 @@ class Config:
             FSSN_CMT_URL: "fssn-cmt",
             "wss://api.p2pquake.net/v2/ws": "p2pquake_ws",
             OPENQUAKE_WS_ALL_URL: "openquake",
-            JIAN_PROJECT_ALL_URL: "jian",
         }
         return url_to_name.get(normalized_url, url)
     
@@ -3043,7 +3071,6 @@ class Config:
             "sichuan": "四川地震局",
             "shaanxi": "陕西地震局",
             "hubei": "湖北地震局",
-            "nrcan": "加拿大自然资源部",
             "mmd": "马来西亚气象局",
             "tsunami": "自然资源部海啸预警中心",
             "海啸信息": "自然资源部海啸预警中心",

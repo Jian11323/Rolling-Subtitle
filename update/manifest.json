@@ -1,14 +1,14 @@
 {
-  "latest_version": "2.9.3",
-  "notes": "v2.9.3：Jian 主服/备服手动选择与自动切换。",
+  "latest_version": "2.9.5",
+  "notes": "v2.9.5：1、Jian Project 主/备服务器状态名称与双卡片显示修复；2、主备切换时连接任务键保持稳定，避免状态页分裂；3、移除 NRCAN（加拿大自然资源部）速报；4、主备主机变化时强制重启 Jian 连接",
   "installer": {
-    "url": "https://sismotide.top/rolling-update/Setup_Rolling_Subtitle.exe",
-    "sha256": "d89b93f686c95887fc58eb937279753648fd09d95496cfc3b6c633f7c1a72ded",
+    "url": "https://gitee.com/jian0786/Rolling-Subtitle/releases/download/v2.9.5/Setup_Rolling_Subtitle.exe",
+    "sha256": "1740ee2ac1f3fdd2fdd0a5366775aec5605578900bca654ea0be408d36ecc236",
     "user_interface": "progress"
   },
   "zip": {
-    "url": "https://sismotide.top/rolling-update/Rolling_Subtitle_Portable_v2.9.3.zip",
-    "sha256": "c39279a1aead4c335b8790e019db508c505c3fcba3900ee36a1c7ab88b814c1b"
+    "url": "https://gitee.com/jian0786/Rolling-Subtitle/releases/download/v2.9.5/Rolling_Subtitle_Portable_v2.9.5.zip",
+    "sha256": "9c4ea5233b792df93deb7ff15147cbb844ac550d99a8d6195e87818e36ddf9ec"
   },
   "min_supported_version": "2.0.0",
   "channel": "stable",

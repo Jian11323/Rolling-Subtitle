@@ -55,6 +55,8 @@ from config import (
     JIAN_ENDPOINT_MODE_BACKUP,
     JIAN_API_HOST_PRIMARY,
     JIAN_API_HOST_BACKUP,
+    jian_active_host,
+    is_jian_project_url,
     set_jian_endpoint_mode,
     is_whews_url,
     is_whews_dedicated_endpoint,
@@ -1390,7 +1392,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
                 ('whews_parse_geonet_cb', 'whews_parse_geonet'),
                 ('whews_parse_tmd_cb', 'whews_parse_tmd'),
                 ('whews_parse_ingv_cb', 'whews_parse_ingv'),
-                ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
                 ('whews_parse_mmd_cb', 'whews_parse_mmd'),
                 ('whews_parse_beijing_cb', 'whews_parse_beijing'),
                 ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
@@ -3455,7 +3456,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self.whews_parse_geonet_cb = _wh_cb("whews_parse_geonet", "GeoNet 新西兰地震速报")
         self.whews_parse_tmd_cb = _wh_cb("whews_parse_tmd", "泰国地震局速报")
         self.whews_parse_ingv_cb = _wh_cb("whews_parse_ingv", "INGV 意大利地震速报")
-        self.whews_parse_nrcan_cb = _wh_cb("whews_parse_nrcan", "加拿大自然资源部速报")
         self.whews_parse_mmd_cb = _wh_cb("whews_parse_mmd", "马来西亚气象局速报")
         self.whews_parse_phivolcs_cb = _wh_cb("whews_parse_phivolcs", "菲律宾火山地震研究所速报")
         self.whews_parse_sgc_cb = _wh_cb("whews_parse_sgc", "哥伦比亚地质服务局速报")
@@ -3567,14 +3567,14 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         gj_main_layout.addWidget(self.jian_auth_status_label)
         self._refresh_jian_auth_status_label(force=True)
 
-        ep_label = QLabel("Jian API 入口：")
+        ep_label = QLabel("服务器选择：")
         _set_widget_style(ep_label, STYLE_LABEL)
         gj_main_layout.addWidget(ep_label)
         ep_row = QHBoxLayout()
         self.jian_endpoint_group = QButtonGroup(self)
-        self.radio_jian_ep_auto = QRadioButton("自动（失败切换）")
-        self.radio_jian_ep_primary = QRadioButton("主服")
-        self.radio_jian_ep_backup = QRadioButton("备服")
+        self.radio_jian_ep_auto = QRadioButton("自动切换")
+        self.radio_jian_ep_primary = QRadioButton("主服务器")
+        self.radio_jian_ep_backup = QRadioButton("备服务器")
         self.radio_jian_ep_auto.setToolTip(
             f"优先 {JIAN_API_HOST_PRIMARY}；连续失败后切到 {JIAN_API_HOST_BACKUP}"
         )
@@ -4178,7 +4178,7 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
         self._update_parse_status_labels()
 
     def _current_jian_endpoint_from_ui(self) -> str:
-        """从设置页读取 Jian API 入口模式。"""
+        """从设置页读取 Jian 服务器选择模式。"""
         if hasattr(self, "radio_jian_ep_primary") and self.radio_jian_ep_primary.isChecked():
             return JIAN_ENDPOINT_MODE_PRIMARY
         if hasattr(self, "radio_jian_ep_backup") and self.radio_jian_ep_backup.isChecked():
@@ -4506,7 +4506,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             'whews_parse_geonet_cb',
             'whews_parse_tmd_cb',
             'whews_parse_ingv_cb',
-            'whews_parse_nrcan_cb',
             'whews_parse_mmd_cb',
             'whews_parse_beijing_cb',
             'whews_parse_yunnan_cb',
@@ -4611,7 +4610,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_geonet_cb', 'whews_parse_geonet'),
             ('whews_parse_tmd_cb', 'whews_parse_tmd'),
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
-            ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
             ('whews_parse_mmd_cb', 'whews_parse_mmd'),
             ('whews_parse_beijing_cb', 'whews_parse_beijing'),
             ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),
@@ -5634,6 +5632,24 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
     def _compact_source_label(self, url: str, source_name: str) -> str:
         """将 WebSocket URL 压缩为设置页卡片上的短标签。"""
         low = (url or "").lower()
+        name = (source_name or "").strip().lower()
+        # Jian Project /all：按当前实际主备主机展示（状态键始终是规范主站 URL）
+        if is_jian_project_url(url) or name == "jian":
+            host = ""
+            parent = self.parent()
+            if parent is not None and hasattr(parent, "get_data_source_health_snapshot"):
+                try:
+                    health = (parent.get_data_source_health_snapshot() or {}).get(url) or {}
+                    host = (health.get("connect_host") or "").strip()
+                except Exception:
+                    host = ""
+            if not host:
+                host = jian_active_host(
+                    getattr(self.config.ws_config, "jian_endpoint_mode", "auto")
+                )
+            if host == JIAN_API_HOST_BACKUP or JIAN_API_HOST_BACKUP in low:
+                return "Jian Project API备用服务器"
+            return "Jian Project API主服务器"
         if "api.p2pquake.net" in low:
             return "P2PQuake"
         if "equake.top" in low:
@@ -6073,7 +6089,6 @@ class SettingsWindow(SettingsAuthMixin, QDialog):
             ('whews_parse_geonet_cb', 'whews_parse_geonet'),
             ('whews_parse_tmd_cb', 'whews_parse_tmd'),
             ('whews_parse_ingv_cb', 'whews_parse_ingv'),
-            ('whews_parse_nrcan_cb', 'whews_parse_nrcan'),
             ('whews_parse_mmd_cb', 'whews_parse_mmd'),
             ('whews_parse_beijing_cb', 'whews_parse_beijing'),
             ('whews_parse_yunnan_cb', 'whews_parse_yunnan'),

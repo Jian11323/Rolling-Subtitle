@@ -31,6 +31,8 @@ from config import (
     whews_cea_app_configured,
     is_jian_project_url,
     JIAN_PROJECT_ALL_URL,
+    JIAN_API_HOST_PRIMARY,
+    JIAN_API_HOST_BACKUP,
     rewrite_jian_api_url,
     jian_active_host,
     note_jian_connect_result,
@@ -971,8 +973,9 @@ class WebSocketManager:
                         getattr(ws_cfg, "jian_endpoint_mode", "auto")
                     )
                     set_jian_endpoint_mode(mode)
-                    url = rewrite_jian_api_url(url, jian_active_host(mode))
-                    connect_url = url
+                    # 任务/状态键保持配置里的规范 URL（主站），仅实际握手地址随主备切换
+                    active_host = jian_active_host(mode)
+                    connect_url = rewrite_jian_api_url(url, active_host)
                     login_key = (getattr(ws_cfg, "jian_login_token", "") or "").strip()
                     refresh_token = (getattr(ws_cfg, "jian_refresh_token", "") or "").strip()
                     refresh_expire_at = float(
@@ -998,11 +1001,13 @@ class WebSocketManager:
                                 login_key,
                                 persisted_refresh=refresh_token,
                                 persisted_refresh_expire_at=refresh_expire_at,
+                                api_host=active_host,
                             )
 
                         ok, at_token, msg = await asyncio.to_thread(_jian_exchange)
                         if not ok or not at_token:
                             logger.error(f"[{source_name}] Jian 换取访问令牌失败: {msg}")
+                            note_jian_connect_result(False, mode)
                             self.connection_states[url] = "unconnected"
                             await asyncio.sleep(15)
                             continue
@@ -1023,8 +1028,10 @@ class WebSocketManager:
                                 logger.warning(
                                     f"[{source_name}] 保存 Jian 长期 Token 失败: {e_save}"
                                 )
-                        connect_url = append_jian_ws_key(url, at_token)
-                        logger.info(f"[{source_name}] 已附带 Jian 访问令牌握手")
+                        connect_url = append_jian_ws_key(connect_url, at_token)
+                        logger.info(
+                            f"[{source_name}] 已附带 Jian 访问令牌握手（{active_host}）"
+                        )
                     except Exception as e:
                         logger.error(f"[{source_name}] Jian 鉴权异常: {e}")
                         self.connection_states[url] = "unconnected"
@@ -1043,14 +1050,18 @@ class WebSocketManager:
                             True,
                             getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
                         )
-                    logger.info(f"[{source_name}] 已连接到 {url}")
+                    logger.info(f"[{source_name}] 已连接到 {connect_url.split('?', 1)[0]}")
                     self.reconnect_attempts[url] = 0
                     self.connections[url] = websocket
                     self.connection_states[url] = "connected"
                     health = self._ensure_health_entry(url, source_name)
                     health["heartbeat_state"] = "connected"
                     health["last_message_ts"] = time.time()
-
+                    if is_jian_project_url(url or ""):
+                        health["connect_host"] = jian_active_host(
+                            getattr(Config().ws_config, "jian_endpoint_mode", "auto")
+                        )
+                    self._prune_orphan_jian_status_keys()
                     # 无界科技：连接后首帧发送纯文本令牌
                     if is_whews_url(url or ""):
                         await self._maybe_send_whews_auth(websocket, url, source_name)
@@ -1136,6 +1147,11 @@ class WebSocketManager:
                             
             except websockets.ConnectionClosed as e:
                 logger.warning(f"[{source_name}] 连接断开: code={e.code}, reason={getattr(e, 'reason', 'N/A')}")
+                if is_jian_project_url(url or ""):
+                    note_jian_connect_result(
+                        False,
+                        getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                    )
                 self._cleanup_connection(url, source_name)
                 # 无界科技鉴权失败（4401）：停止重连，避免刷令牌错误
                 if int(getattr(e, "code", 0) or 0) == 4401 and is_whews_url(url or ""):
@@ -1145,14 +1161,29 @@ class WebSocketManager:
                     continue
             except TimeoutError as e:
                 logger.warning(f"[{source_name}] 连接超时（握手阶段）: {e}，将按重连间隔重试")
+                if is_jian_project_url(url or ""):
+                    note_jian_connect_result(
+                        False,
+                        getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                    )
                 self._cleanup_connection(url, source_name)
             except (ConnectionResetError, ConnectionAbortedError, ConnectionRefusedError, BrokenPipeError) as e:
                 logger.warning(
                     f"[{source_name}] 连接被重置或拒绝（握手/建连阶段）: {e}，将按重连间隔重试"
                 )
+                if is_jian_project_url(url or ""):
+                    note_jian_connect_result(
+                        False,
+                        getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                    )
                 self._cleanup_connection(url, source_name)
             except OSError as e:
                 logger.warning(f"[{source_name}] 网络错误: {e}，将按重连间隔重试")
+                if is_jian_project_url(url or ""):
+                    note_jian_connect_result(
+                        False,
+                        getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                    )
                 self._cleanup_connection(url, source_name)
             except Exception as e:
                 err_summary = f"{type(e).__name__}: {str(e)[:120]}"
@@ -1173,6 +1204,11 @@ class WebSocketManager:
                     else:
                         logger.error(f"[{source_name}] 连接错误: {e}")
                     self._connect_error_log[url] = (now, err_summary)
+                if is_jian_project_url(url or ""):
+                    note_jian_connect_result(
+                        False,
+                        getattr(Config().ws_config, "jian_endpoint_mode", "auto"),
+                    )
                 self._cleanup_connection(url, source_name)
             
             # 重连逻辑
@@ -1262,6 +1298,33 @@ class WebSocketManager:
         entry = self._ensure_health_entry(url, source_name)
         entry["heartbeat_state"] = "disconnected"
 
+    def _jian_status_url_keep(self) -> set:
+        """Jian 状态页只保留配置规范键（任务/启用表中的 URL），去掉主备改写残留。"""
+        keep = set()
+        for u in list(self.enabled_sources.keys()) + list(self._connection_tasks.keys()):
+            if is_jian_project_url(u or ""):
+                keep.add(u)
+        if keep:
+            return keep
+        return {JIAN_PROJECT_ALL_URL}
+
+    def _prune_orphan_jian_status_keys(self) -> None:
+        """清理旧逻辑把 url 改写成备站后残留的双卡片状态键。"""
+        keep = self._jian_status_url_keep()
+        for store in (
+            self.connection_states,
+            self._health_status,
+            self.reconnect_attempts,
+            self._connect_error_log,
+        ):
+            for u in list(store.keys()):
+                if is_jian_project_url(u or "") and u not in keep:
+                    store.pop(u, None)
+        # connections 不应挂在改写后的备站键上；若有残留且无活任务则丢掉引用
+        for u in list(self.connections.keys()):
+            if is_jian_project_url(u or "") and u not in keep:
+                self.connections.pop(u, None)
+
     def get_connection_status(self) -> Dict[str, str]:
         """
         获取连接状态快照，供设置页状态指示使用。
@@ -1269,18 +1332,29 @@ class WebSocketManager:
         Returns:
             Dict[url, state]，state: connected/connecting/disconnected/unconnected
         """
+        self._prune_orphan_jian_status_keys()
         status = dict(self.connection_states)
         for url in self.connections.keys():
             status[url] = "connected"
         for url in self.enabled_sources.keys():
             status.setdefault(url, "unconnected")
-        return status
+        # 不把残留的备站改写键暴露给状态页
+        keep_jian = self._jian_status_url_keep()
+        return {
+            u: s
+            for u, s in status.items()
+            if (not is_jian_project_url(u or "")) or u in keep_jian
+        }
 
     def get_health_status(self) -> Dict[str, Dict[str, Any]]:
         """获取数据源健康状态快照（供设置页状态面板展示）"""
+        self._prune_orphan_jian_status_keys()
         now = time.time()
         result: Dict[str, Dict[str, Any]] = {}
+        keep_jian = self._jian_status_url_keep()
         for url, entry in self._health_status.items():
+            if is_jian_project_url(url or "") and url not in keep_jian:
+                continue
             copied = dict(entry)
             enabled = bool(self.enabled_sources.get(url, False))
             connection_state = self.connection_states.get(
@@ -1306,6 +1380,10 @@ class WebSocketManager:
             copied["enabled"] = enabled
             copied["connection_state"] = connection_state
             copied["heartbeat_age_seconds"] = (now - last_heartbeat) if last_heartbeat > 0 else None
+            if is_jian_project_url(url or "") and not copied.get("connect_host"):
+                copied["connect_host"] = jian_active_host(
+                    getattr(Config().ws_config, "jian_endpoint_mode", "auto")
+                )
             result[url] = copied
         for url in self.enabled_sources.keys():
             enabled = bool(self.enabled_sources.get(url, False))
@@ -1822,6 +1900,11 @@ class WebSocketManager:
     async def _reload_connections_unlocked(self) -> None:
         """热启停实现（调用方须已持有 _reload_lock）。"""
         config = Config()
+        jian_mode = normalize_jian_endpoint_mode(
+            getattr(config.ws_config, "jian_endpoint_mode", "auto")
+        )
+        set_jian_endpoint_mode(jian_mode)
+        jian_host = jian_active_host(jian_mode)
         desired = self._collect_desired_ws_urls(config)
         desired_set = set(desired)
         desired_norm = {(u or "").strip().lower().rstrip("/") for u in desired}
@@ -1831,10 +1914,24 @@ class WebSocketManager:
         for url in desired:
             self.enabled_sources[url] = True
 
-        # 停止不再需要的连接
+        # Jian 主/备切换：规范 URL 不变，但需强制重连以换握手主机
+        force_restart: set = set()
         for url in list(self._connection_tasks.keys()):
-            if url in desired_set:
+            if url not in desired_set or not is_jian_project_url(url or ""):
                 continue
+            entry = self._health_status.get(url) or {}
+            last_host = (entry.get("connect_host") or "").strip()
+            if last_host and last_host != jian_host:
+                force_restart.add(url)
+            elif not last_host and jian_host != JIAN_API_HOST_PRIMARY:
+                # 旧会话无 connect_host，切到备站时也重启一次
+                force_restart.add(url)
+
+        # 停止不再需要的连接（含 Jian 强制重连）
+        for url in list(self._connection_tasks.keys()):
+            if url in desired_set and url not in force_restart:
+                continue
+            # 先置 False，让旧循环自行退出；稍后 to_start 会再打开
             self.enabled_sources[url] = False
             source_name = config.get_source_name(url)
             ws = self.connections.get(url)
@@ -1852,7 +1949,14 @@ class WebSocketManager:
                     pass
             self._connection_tasks.pop(url, None)
             self._cleanup_connection(url, source_name)
-            logger.info(f"已热停止 WebSocket: {source_name} ({url})")
+            if url in force_restart:
+                logger.info(
+                    f"已按 Jian 服务器选择重启 WebSocket: {source_name} → {jian_host}"
+                )
+            else:
+                logger.info(f"已热停止 WebSocket: {source_name} ({url})")
+
+        self._prune_orphan_jian_status_keys()
 
         # 收集需新建的连接（任务已结束或尚未创建）
         to_start: List[str] = []
